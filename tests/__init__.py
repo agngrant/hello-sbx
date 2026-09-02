@@ -1,4 +1,5 @@
-"""LittleDungeons test package (stdlib unittest).
+"""LittleDungeons test package (pytest primary; stdlib unittest compatible).
 
-Run:  ``python -m unittest discover -s tests -t .``
+Primary:  ``python -m pytest -q`` (see pytest.ini — global 30s per-test timeout)
+Also:     ``python -m unittest discover -s tests -t .``
 """
