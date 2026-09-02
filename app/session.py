@@ -56,8 +56,9 @@ UNKNOWN_TYPE = "unknown message type"
 #: move somebody else's entity.
 NOT_ALLOWED = "not allowed"
 
-#: Entity kinds a GM may create (player characters are spawned by ``join``).
-CREATABLE_KINDS = ("npc", "enemy", "gm_character")
+#: Entity kinds a GM may create (player characters are spawned by ``join``;
+#: the GM itself has NO token — docs/design/gm-controller.md §2.3).
+CREATABLE_KINDS = ("npc", "enemy")
 
 
 def _as_int(value: Any) -> int | None:
@@ -155,11 +156,14 @@ class GameSession:
           becomes the GM automatically.
         * A second GM is refused, as is a 7th non-GM player
           (``"session full"``) — refused clients are NOT added.
-        * A player gets a starting Entity (kind ``"player"``, team ``"party"``,
-          ``owner`` = the player id) on a free floor cell; the GM gets a
-          ``"gm_character"`` entity (team ``"neutral"``, ``owner=None``).
+        * A player gets a starting Entity (kind ``"player"``, team
+          ``"party"``, ``owner`` = the player id) on a free floor cell.
+          The **GM is a pure controller: it gets NO entity** (``entity_id``
+          stays ``None``, nothing is spawned, no floor is consumed) —
+          docs/design/gm-controller.md §2.1/§2.2.
         * Reconnecting with the same name+role re-attaches the existing
-          Player (stable id, keeps its entity and position).
+          Player (stable id, keeps its entity and position). A reconnecting
+          GM has no entity to preserve and none is re-spawned.
         """
         name = (name or "").strip()
         if not name:
@@ -200,18 +204,20 @@ class GameSession:
             player = Player(id=pid, name=name, role=effective_role, entity_id=None)
             self.players[pid] = player
 
-            kind = "gm_character" if effective_role == "gm" else "player"
-            team = "neutral" if effective_role == "gm" else "party"
-            x, y = self._find_free_floor()
-            eid = f"e{len(self.entities) + 1}"
-            while eid in self.entities:
+            if effective_role == "player":
+                # Players only get a starting token (the GM is a pure
+                # controller — it never gets one).
+                x, y = self._find_free_floor()
                 eid = f"e{len(self.entities) + 1}"
-            entity = Entity(
-                id=eid, name=name, kind=kind, team=team, x=x, y=y,
-                owner=pid if effective_role == "player" else None,
-            )
-            self.entities[eid] = entity
-            player.entity_id = eid
+                while eid in self.entities:
+                    eid = f"e{len(self.entities) + 1}"
+                entity = Entity(
+                    id=eid, name=name, kind="player", team="party",
+                    x=x, y=y, owner=pid,
+                )
+                self.entities[eid] = entity
+                player.entity_id = eid
+
             self._seen.setdefault(pid, set())
 
             self._socks[pid] = sock
@@ -219,7 +225,11 @@ class GameSession:
             return player, None
 
     def leave(self, player_id: str) -> None:
-        """Remove a player and their owned entity entirely (full exit)."""
+        """Remove a player and their owned entity entirely (full exit).
+
+        A GM has ``entity_id is None`` and simply drops its Player record —
+        no entity is ever removed (there is nothing to remove).
+        """
         with self._lock:
             player = self.players.get(player_id)
             if player is None:
@@ -272,8 +282,9 @@ class GameSession:
 
         Fog off (default): the full radar — awareness passes through walls.
         Fog on: a *player* only sees entities with clear line of sight from
-        their own entity; the **GM is never fogged**. A per-player
-        "previously seen" set keeps once-seen entities visible.
+        their own entity; the **GM is never fogged** (and has no own entity
+        to anchor LOS at — the role-exempt early return below applies). A
+        per-player "previously seen" set keeps once-seen entities visible.
         """
         items = build_awareness(viewer, self.entities)
         if not self.fog or viewer.role == "gm":
@@ -302,7 +313,8 @@ class GameSession:
         ``entities`` is the full list for a GM and ``[]`` for a player
         (players get only ``awareness``). ``you_entity`` (additive field)
         carries a player's own character dict — which ``build_awareness``
-        excludes — so the client can render its own token.
+        excludes — so the client can render its own token; it is ``None``
+        for the GM, which has no entity at all.
         """
         is_gm = viewer.role == "gm"
         own = self.entities.get(viewer.entity_id) if viewer.entity_id else None

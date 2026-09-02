@@ -26,10 +26,11 @@ from app.main import LittleDungeonsHandler, ThreadingHTTPServer
 from app.ws import compute_accept, ws_serve, client_send_text, client_recv_text
 from tests.wsclient import WSClient, WSClientError
 
-# Sample-dungeon coordinates (app/grid.py): the GM spawns on the first free
-# floor cell (1,1). (5,5) is a doorway (gap in the col-5 wall), (2,3) and
-# (6,5) are in the left/upper rooms sealed off from the upper-left room.
-SPAWN_GM = (1, 1)
+# Sample-dungeon coordinates (app/grid.py): the GM has NO token on the map
+# (pure controller); the FIRST PLAYER spawns on the first free floor cell
+# (1,1). (5,5) is a doorway (gap in the col-5 wall), (2,3) and (6,5) are in
+# the left/upper rooms sealed off from the upper-left room.
+SPAWN_PLAYER = (1, 1)
 
 
 # ---------------------------------------------------------------------------
@@ -142,11 +143,12 @@ class TestWebSocketServer(unittest.TestCase):
             you = w["you"]
             self.assertEqual(you["name"], "Gamer")
             self.assertEqual(you["role"], "gm")
-            self.assertIsNotNone(you["entity_id"])
-            # GM sees everything: the full entity list is present.
-            self.assertEqual(len(w["entities"]), 1)
-            self.assertEqual(w["entities"][0]["id"], you["entity_id"])
-            self.assertEqual(w["entities"][0]["kind"], "gm_character")
+            # The GM is a pure controller: NO entity, no token on the map.
+            self.assertIsNone(you["entity_id"])
+            self.assertIsNone(w["you_entity"])
+            # GM sees everything: the full entity list is present (empty —
+            # the GM holds nothing yet).
+            self.assertEqual(w["entities"], [])
             # welcome carries the map + players + fog + per-viewer awareness
             m = w["map"]
             self.assertEqual(m["name"], "Sample Dungeon")
@@ -158,9 +160,7 @@ class TestWebSocketServer(unittest.TestCase):
             self.assertEqual(m["cells"][7][9], "doorway")
             self.assertEqual(len(w["players"]), 1)
             self.assertIs(w["fog"], False)
-            aw = w["awareness"]
-            self.assertEqual(len(aw), 1)
-            self.assertTrue(aw[0]["label"])  # GM: labeled, sees its own entity
+            self.assertEqual(w["awareness"], [])  # no tokens yet
 
     def test_first_player_without_gm_becomes_gm(self):
         with self.client(self.session_id()) as c:
@@ -181,7 +181,7 @@ class TestWebSocketServer(unittest.TestCase):
             st = c.recv_json()
             self.assertEqual(st["type"], "state")
             self.assertEqual(len(st["players"]), 2)
-            self.assertEqual(len(st["entities"]), 2)  # GM sees both
+            self.assertEqual(len(st["entities"]), 1)  # GM sees only Alice's token
             # Alice's welcome: no entity list, own entity as you_entity
             self.assertEqual(wp["entities"], [])
             self.assertEqual(wp["you_entity"]["id"], wp["you"]["entity_id"])
@@ -218,7 +218,9 @@ class TestWebSocketServer(unittest.TestCase):
             st = frames[-1]
             self.assertEqual(st["type"], "state")
             self.assertEqual(len(st["players"]), 7)
-            self.assertEqual(len(st["entities"]), 7)
+            # 6 player tokens + the GM's none: the GM sees exactly the
+            # players' entities.
+            self.assertEqual(len(st["entities"]), 6)
             roles = [p["role"] for p in st["players"]]
             self.assertEqual(roles.count("gm"), 1)
             self.assertEqual(roles.count("player"), 6)
@@ -237,20 +239,20 @@ class TestWebSocketServer(unittest.TestCase):
             gm.join("Gamer", "gm")
             wp = pl.join("Alice", "player")
             alice_ent = wp["you"]["entity_id"]
-            # GM moves ALICE's entity (2,1) → (3,1), an adjacent floor cell.
-            gm.send_json({"type": "move", "entity_id": alice_ent, "x": 3, "y": 1})
+            # GM moves ALICE's entity (1,1) → (2,1), an adjacent floor cell.
+            gm.send_json({"type": "move", "entity_id": alice_ent, "x": 2, "y": 1})
             # The PLAYER client must receive the path + a state showing the
-            # moved position (its own you_entity is at (3,1)).
+            # moved position (its own you_entity is at (2,1)).
             frames = pl.frames_until(lambda m: m["type"] == "path")
             path_msg = frames[-1]
             self.assertEqual(path_msg["entity_id"], alice_ent)
-            self.assertEqual(path_msg["path"][0], {"x": 2, "y": 1})
-            self.assertEqual(path_msg["path"][-1], {"x": 3, "y": 1})
+            self.assertEqual(path_msg["path"][0], {"x": 1, "y": 1})
+            self.assertEqual(path_msg["path"][-1], {"x": 2, "y": 1})
             state_msg = pl.recv_json()
             self.assertEqual(state_msg["type"], "state")
             self.assertEqual(
                 (state_msg["you_entity"]["x"], state_msg["you_entity"]["y"]),
-                (3, 1),
+                (2, 1),
             )
             # The GM got its path reply + the broadcast state too.
             gm_frames = gm.frames_until(lambda m: m["type"] == "path")
@@ -258,7 +260,7 @@ class TestWebSocketServer(unittest.TestCase):
             st_gm = gm.recv_json()
             self.assertEqual(st_gm["type"], "state")
             item = next(i for i in st_gm["awareness"] if i["entity_id"] == alice_ent)
-            self.assertEqual((item["x"], item["y"]), (3, 1))
+            self.assertEqual((item["x"], item["y"]), (2, 1))
         finally:
             gm.close()
             pl.close()
@@ -272,16 +274,16 @@ class TestWebSocketServer(unittest.TestCase):
             wp = pl.join("Alice", "player")
             self.assertEqual(gm.recv_json()["type"], "state")  # join broadcast
             own = wp["you"]["entity_id"]
-            # Alice moves herself (2,1) → (3,1).
-            pl.send_json({"type": "move", "entity_id": own, "x": 3, "y": 1})
+            # Alice moves herself (1,1) → (2,1).
+            pl.send_json({"type": "move", "entity_id": own, "x": 2, "y": 1})
             reply = pl.recv_json()
             self.assertEqual(reply["type"], "path")
             self.assertEqual(reply["entity_id"], own)
-            self.assertEqual(reply["path"][-1], {"x": 3, "y": 1})
+            self.assertEqual(reply["path"][-1], {"x": 2, "y": 1})
             # the GM saw it too (state broadcast; its awareness shows the move)
             st = gm.frames_until(lambda m: m["type"] == "state")[-1]
             item = next(i for i in st["awareness"] if i["entity_id"] == own)
-            self.assertEqual((item["x"], item["y"]), (3, 1))
+            self.assertEqual((item["x"], item["y"]), (2, 1))
         finally:
             gm.close()
             pl.close()
@@ -300,14 +302,14 @@ class TestWebSocketServer(unittest.TestCase):
             self.assertEqual(alice.recv_json()["type"], "state")  # Bob's join
             bob_ent = wb["you"]["entity_id"]
             # Alice tries to move Bob → "not allowed"
-            alice.send_json({"type": "move", "entity_id": bob_ent, "x": 4, "y": 1})
+            alice.send_json({"type": "move", "entity_id": bob_ent, "x": 3, "y": 1})
             err = alice.recv_json()
             self.assertEqual(err, {"type": "error", "message": "not allowed"})
             # Bob's position is unchanged in Alice's next state.
             alice.send_json({"type": "request_state"})
             st = alice.recv_json()
             item = next(i for i in st["awareness"] if i["entity_id"] == bob_ent)
-            self.assertEqual((item["x"], item["y"]), (3, 1))
+            self.assertEqual((item["x"], item["y"]), (2, 1))
             # Alice with override → also "not allowed" (GM-only).
             alice.send_json({"type": "move", "entity_id": wa["you"]["entity_id"],
                              "x": 6, "y": 5, "override": True})
@@ -323,75 +325,101 @@ class TestWebSocketServer(unittest.TestCase):
         gm = self.client(sid).connect()
         pl = self.client(sid).connect()
         try:
-            wg = gm.join("Gamer", "gm")
+            gm.join("Gamer", "gm")
             pl.join("Alice", "player")
             self.assertEqual(gm.recv_json()["type"], "state")  # Alice joined
-            gm_ent_id = wg["you"]["entity_id"]
+            # The GM has no own token: it creates a neutral npc on the open
+            # floor (2,1) (Alice is at (1,1)) and drives it instead.
+            gm.send_json({"type": "create_entity", "name": "Grom",
+                          "kind": "npc", "team": "neutral", "x": 2, "y": 1})
+            st = gm.frames_until(lambda m: m["type"] == "state")[-1]
+            npc_ent_id = next(e["id"] for e in st["entities"]
+                              if e["name"] == "Grom")
+            pl.recv_json()  # the create broadcast reached the player too
             # GM → wall cell (5,3) (col-5 interior wall) with NO override:
             # walking through a wall is impossible →
             # "no route — wall in the way".
-            gm.send_json({"type": "move", "entity_id": gm_ent_id, "x": 5, "y": 3})
+            gm.send_json({"type": "move", "entity_id": npc_ent_id, "x": 5, "y": 3})
             err = gm.recv_json()
             self.assertEqual(err, {"type": "error", "message": "no route — wall in the way"})
             # position unchanged
             gm.send_json({"type": "request_state"})
             st = gm.recv_json()
-            ent = next(e for e in st["entities"] if e["id"] == gm_ent_id)
-            self.assertEqual((ent["x"], ent["y"]), SPAWN_GM)
+            ent = next(e for e in st["entities"] if e["id"] == npc_ent_id)
+            self.assertEqual((ent["x"], ent["y"]), (2, 1))
             # now with override → teleports straight through the wall, and the
-            # player client sees the new position.
-            gm.send_json({"type": "move", "entity_id": gm_ent_id, "x": 5, "y": 3,
+            # player client sees the new position (a white neutral dot).
+            gm.send_json({"type": "move", "entity_id": npc_ent_id, "x": 5, "y": 3,
                           "override": True})
             reply = gm.recv_json()
             self.assertEqual(reply["type"], "path")
             self.assertEqual(reply["path"], [{"x": 5, "y": 3}])
             frames = pl.frames_until(lambda m: m["type"] == "state")
             st2 = frames[-1]
-            item = next(i for i in st2["awareness"] if i["entity_id"] == gm_ent_id)
+            item = next(i for i in st2["awareness"] if i["entity_id"] == npc_ent_id)
             self.assertEqual((item["x"], item["y"]), (5, 3))
+            self.assertEqual(item["color"], "white")  # neutral npc
             gm.send_json({"type": "request_state"})
             st3 = gm.recv_json()
-            ent = next(e for e in st3["entities"] if e["id"] == gm_ent_id)
+            ent = next(e for e in st3["entities"] if e["id"] == npc_ent_id)
             self.assertEqual((ent["x"], ent["y"]), (5, 3))
         finally:
             gm.close()
             pl.close()
 
     def test_awareness_differs_per_client(self):
-        """GM: full labeled list, all entities. Player: dots only (no
-        names), self excluded — the two streams genuinely differ."""
+        """GM: full labeled list of every token (the GM has none of its own).
+        Player: dots only (no names), self excluded, and NO dot for the GM —
+        with GM + 2 players + 1 enemy the player sees exactly 2 dots."""
         sid = self.session_id()
         gm = self.client(sid).connect()
-        pl = self.client(sid).connect()
+        alice = self.client(sid).connect()
+        bob = self.client(sid).connect()
         try:
-            wg = gm.join("Gamer", "gm")
-            wp = pl.join("Alice", "player")
-            self.assertEqual(gm.recv_json()["type"], "state")  # join broadcast
-            gm.send_json({"type": "request_state"})
-            pl.send_json({"type": "request_state"})
-            st_gm = gm.recv_json()
-            st_pl = pl.recv_json()
-            # GM: every entity listed + labeled awareness of every entity
-            # (including the GM's own character).
-            self.assertEqual(len(st_gm["entities"]), 2)
-            self.assertEqual(len(st_gm["awareness"]), 2)
+            gm.join("Gamer", "gm")
+            wa = alice.join("Alice", "player")
+            wb = bob.join("Bob", "player")
+            # join broadcasts: GM saw Alice + Bob; Alice saw Bob.
+            self.assertEqual(gm.recv_json()["type"], "state")
+            self.assertEqual(gm.recv_json()["type"], "state")
+            self.assertEqual(alice.recv_json()["type"], "state")
+            # The GM creates a hostile enemy → the session has 3 tokens.
+            gm.send_json({"type": "create_entity", "name": "Vex",
+                          "kind": "enemy", "team": "hostile", "x": 12, "y": 9})
+            frames = gm.frames_until(lambda m: m["type"] == "state")
+            st_gm = frames[-1]
+            alice.recv_json()  # the create broadcast reached Alice too
+            alice.send_json({"type": "request_state"})
+            st_al = alice.recv_json()
+            # GM: every token listed + labeled awareness of every token.
+            self.assertEqual(len(st_gm["entities"]), 3)
+            self.assertEqual(len(st_gm["awareness"]), 3)
             for item in st_gm["awareness"]:
                 self.assertTrue(item["label"])
                 self.assertIn("name", item)
                 self.assertIn("kind", item)
-            # Player: no entity list, awareness excludes self, no labels.
-            self.assertEqual(st_pl["entities"], [])
-            self.assertEqual(len(st_pl["awareness"]), 1)
-            (item,) = st_pl["awareness"]
-            self.assertEqual(item["entity_id"], wg["you"]["entity_id"])
-            self.assertFalse(item["label"])
-            self.assertNotIn("name", item)
-            self.assertEqual(item["color"], "white")  # neutral gm_character
+            self.assertNotIn(
+                "gm_character",
+                [e["kind"] for e in st_gm["entities"]],
+            )
+            # Alice: no entity list; awareness is EXACTLY 2 dots — Bob (green)
+            # and Vex (red) — no self, no GM dot, no labels.
+            self.assertEqual(st_al["entities"], [])
+            self.assertEqual(len(st_al["awareness"]), 2)
+            by_id = {i["entity_id"]: i for i in st_al["awareness"]}
+            # (Alice's OWN token e1 is excluded from her awareness.)
+            self.assertEqual(by_id[wb["you"]["entity_id"]]["color"], "green")  # Bob
+            self.assertEqual(by_id[next(e["id"] for e in st_gm["entities"]
+                                        if e["kind"] == "enemy")]["color"], "red")
+            for item in st_al["awareness"]:
+                self.assertFalse(item["label"])
+                self.assertNotIn("name", item)
             # and the player's own character rides along as you_entity
-            self.assertEqual(st_pl["you_entity"]["id"], wp["you"]["entity_id"])
+            self.assertEqual(st_al["you_entity"]["id"], wa["you"]["entity_id"])
         finally:
             gm.close()
-            pl.close()
+            alice.close()
+            bob.close()
 
     # -- transport behaviour -----------------------------------------------------
 
@@ -524,11 +552,16 @@ class TestWsServeReplyUnderSendLock(unittest.TestCase):
         try:
             c = WSClient(host, port, path="/ws?session=locktest", timeout=10).connect()
             welcome = c.join("Gamer", "gm")
-            gm_ent = welcome["you"]["entity_id"]
-            # Trigger a per-client REPLY: move the GM entity into a wall with
+            self.assertIsNone(welcome["you"]["entity_id"])  # GM has no token
+            # The GM creates a token to drive (it has no own entity).
+            c.send_json({"type": "create_entity", "name": "Grom",
+                         "kind": "npc", "team": "neutral", "x": 1, "y": 1})
+            state = c.frames_until(lambda m: m["type"] == "state")[-1]
+            ent_id = next(e["id"] for e in state["entities"] if e["name"] == "Grom")
+            # Trigger a per-client REPLY: move the token into a wall with
             # no override -> {type:error, message:"no route — wall in the way"}
             # sent back via the ws_serve reply path (NOT a broadcast).
-            c.send_json({"type": "move", "entity_id": gm_ent, "x": 5, "y": 3})
+            c.send_json({"type": "move", "entity_id": ent_id, "x": 5, "y": 3})
             reply = c.recv_json()
             self.assertEqual(reply, {"type": "error",
                                      "message": "no route — wall in the way"})

@@ -57,7 +57,10 @@ class TestOverlayColor(unittest.TestCase):
 
 class TestBuildAwarenessGmSeesAll(unittest.TestCase):
     def test_gm_gets_all_labeled_items(self):
-        gm = Player(id="gm1", name="Gamemaster", role="gm", entity_id="e1")
+        # The GM is a pure controller: it has NO entity of its own
+        # (entity_id is None) — the GM branch never references
+        # viewer.entity_id, so it simply sees everything, labeled.
+        gm = Player(id="gm1", name="Gamemaster", role="gm", entity_id=None)
         entities = {
             "e1": ent("e1", "party", kind="player", x=1, y=1),
             "e2": ent("e2", "neutral", kind="npc", x=2, y=2),
@@ -75,17 +78,10 @@ class TestBuildAwarenessGmSeesAll(unittest.TestCase):
         self.assertEqual(by_id["e1"]["color"], "green")
         self.assertEqual(by_id["e2"]["color"], "white")
         self.assertEqual(by_id["e3"]["color"], "red")
-        # The GM's own entity is included, at its position, with its name.
+        # Every listed entity is someone else's token, at its position,
+        # with its name (there is no own item for the GM to exclude).
         self.assertEqual(by_id["e1"]["name"], "party-e1")
         self.assertEqual((by_id["e1"]["x"], by_id["e1"]["y"]), (1, 1))
-
-    def test_gm_without_own_entity_still_sees_all(self):
-        gm = Player(id="gm1", name="Gamemaster", role="gm", entity_id=None)
-        entities = {
-            "e1": ent("e1", "party"),
-            "e2": ent("e2", "neutral", kind="npc"),
-        }
-        self.assertEqual(len(build_awareness(gm, entities)), 2)
 
 
 class TestBuildAwarenessPlayer(unittest.TestCase):

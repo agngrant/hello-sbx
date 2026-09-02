@@ -92,7 +92,9 @@ class SessionTestCase(unittest.TestCase):
         self.assertIsNone(err)
         self.assertIsNone(err1)
         self.assertIsNone(err2)
+        # The GM is a pure controller: it has NO entity on the map.
         self.gm_ent = self.session.players[self.gm.id].entity_id
+        self.assertIsNone(self.gm_ent)
         self.p1_ent = self.session.players[self.p1.id].entity_id
         self.p2_ent = self.session.players[self.p2.id].entity_id
 
@@ -104,27 +106,36 @@ class SessionTestCase(unittest.TestCase):
 
 class TestJoins(unittest.TestCase):
     def test_first_join_role_gm_becomes_gm(self):
+        # A1: an explicit-GM join on a fresh session gets NO entity — the GM
+        # is a pure controller (docs/design/gm-controller.md §2.1).
         s = GameSession("t", build_sample_map())
         sock = FakeSock()
         player, err = s.join(sock, "G", "gm")
         self.assertIsNone(err)
         self.assertEqual(player.role, "gm")
-        ent = s.entities[player.entity_id]
-        self.assertEqual(ent.kind, "gm_character")
-        self.assertEqual(ent.team, "neutral")
-        self.assertIsNone(ent.owner)
+        self.assertIsNone(player.entity_id)
+        self.assertEqual(len(s.entities), 0)
+        self.assertNotIn(
+            "gm_character", [e.kind for e in s.entities.values()]
+        )
 
     def test_first_client_without_role_becomes_gm(self):
         s = GameSession("t", build_sample_map())
         player, err = s.join(FakeSock(), "First", None)
         self.assertIsNone(err)
         self.assertEqual(player.role, "gm")
+        # A2: the first-client GM also gets no entity.
+        self.assertIsNone(player.entity_id)
+        self.assertEqual(len(s.entities), 0)
 
     def test_first_player_before_gm_becomes_gm(self):
         s = GameSession("t", build_sample_map())
         player, err = s.join(FakeSock(), "Early", "player")
         self.assertIsNone(err)
         self.assertEqual(player.role, "gm")
+        # A2: ...and gets no entity.
+        self.assertIsNone(player.entity_id)
+        self.assertEqual(len(s.entities), 0)
 
     def test_player_gets_owned_party_entity_on_free_floor(self):
         s = GameSession("t", build_sample_map())
@@ -138,8 +149,9 @@ class TestJoins(unittest.TestCase):
         self.assertEqual(ent.owner, p.id)
         cell = s.grid.cells[ent.y][ent.x]
         self.assertIn(cell, ("floor", "doorway"))
-        # spawn is on a free cell (row-major first free: GM took (1,1)).
-        self.assertEqual((ent.x, ent.y), (2, 1))
+        # The GM holds no token, so the first player takes the first free
+        # floor (row-major) at (1,1).
+        self.assertEqual((ent.x, ent.y), (1, 1))
 
     def test_seventh_player_refused_session_full(self):
         s = GameSession("t", build_sample_map())
@@ -179,17 +191,33 @@ class TestJoins(unittest.TestCase):
         # the assigned role — so it reconnects without claiming a role.
         p1, _ = s.join(sock1, "Alice", "player")
         self.assertEqual(p1.role, "gm")
-        e_pos = (s.entities[p1.entity_id].x, s.entities[p1.entity_id].y)
+        # The re-attached GM has no entity at all — nothing to preserve.
+        self.assertIsNone(p1.entity_id)
+        n_entities_before = len(s.entities)
         sock2 = FakeSock()
         p2, err = s.join(sock2, "Alice", None)
         self.assertIsNone(err)
         self.assertEqual(p2.id, p1.id)
         self.assertEqual(p2.entity_id, p1.entity_id)
-        pos = (s.entities[p2.entity_id].x, s.entities[p2.entity_id].y)
-        self.assertEqual(pos, e_pos)  # entity kept
+        self.assertIsNone(p2.entity_id)  # still no GM entity (A4)
+        # A4: token positions are unchanged across the GM re-attach — join a
+        # player first so there is a token whose position must be preserved.
+        p4, err4 = s.join(FakeSock(), "Bob", "player")
+        self.assertIsNone(err4)
+        bob_pos = (s.entities[p4.entity_id].x, s.entities[p4.entity_id].y)
+        self.assertEqual(bob_pos, (1, 1))
+        sock3 = FakeSock()
+        p5, err5 = s.join(sock3, "Alice", None)
+        self.assertIsNone(err5)
+        self.assertEqual(p5.id, p1.id)  # re-attached again, idempotent
+        # Entity count/roster is unchanged across the GM re-attach.
+        self.assertEqual(len(s.entities), n_entities_before + 1)
+        b = s.entities[p4.entity_id]
+        self.assertEqual((b.x, b.y), bob_pos)  # token position kept
         # old socket is detached, new socket owns the slot.
         self.assertIsNone(s.player_for_sock(sock1))
-        self.assertEqual(s.player_for_sock(sock2).id, p1.id)
+        self.assertIsNone(s.player_for_sock(sock2))
+        self.assertEqual(s.player_for_sock(sock3).id, p1.id)
         # A same-name join with a CONFLICTING role is a different person:
         # accepted as a fresh player (no re-attach onto the GM slot).
         p3, err3 = s.join(FakeSock(), "Alice", "player")
@@ -208,6 +236,26 @@ class TestJoins(unittest.TestCase):
         # the Player slot (and its entity) survived the disconnect.
         self.assertIn(p.id, s.players)
 
+    def test_gm_leave_removes_no_entity(self):
+        # A5: a GM is a pure controller — leave() drops only its Player
+        # record; nothing is removed from the entity roster.
+        s = GameSession("t", build_sample_map())
+        gm_s, p1_s = FakeSock(), FakeSock()
+        gm, _ = s.join(gm_s, "G", "gm")
+        self.assertEqual(len(s.entities), 0)  # GM-only session: no entities
+        p, _ = s.join(p1_s, "A", "player")
+        self.assertEqual(len(s.entities), 1)
+        s.leave(gm.id)
+        self.assertNotIn(gm.id, s.players)
+        self.assertEqual(len(s.entities), 1)  # no entity removed
+        self.assertIn(p.id, s.players)        # remaining player unaffected
+        # ...and in a GM-only session, the count is 0 before and after.
+        s2 = GameSession("t2", build_sample_map())
+        gm2, _ = s2.join(FakeSock(), "G", "gm")
+        self.assertEqual(len(s2.entities), 0)
+        s2.leave(gm2.id)
+        self.assertEqual(len(s2.entities), 0)
+
 
 # ---------------------------------------------------------------------------
 # Movement & permissions (§6)
@@ -216,9 +264,9 @@ class TestJoins(unittest.TestCase):
 
 class TestMovement(SessionTestCase):
     def test_player_moves_own_entity_adjacent_floor(self):
-        # Alice's entity spawns at (2,1); (3,1) is a free floor cell.
+        # Alice's entity spawns at (1,1); (2,1) is a free floor cell.
         reply = self.session.handle_message(
-            self.p1_s, {"type": "move", "entity_id": self.p1_ent, "x": 3, "y": 1}
+            self.p1_s, {"type": "move", "entity_id": self.p1_ent, "x": 2, "y": 1}
         )
         # Successful move: no separate reply — the path frame is broadcast
         # to everyone (sender included) ahead of the state snapshot.
@@ -226,49 +274,60 @@ class TestMovement(SessionTestCase):
         paths = self.p1_s.sent("path")
         self.assertEqual(len(paths), 1)
         self.assertEqual(paths[0]["entity_id"], self.p1_ent)
-        self.assertEqual(paths[0]["path"][0], {"x": 2, "y": 1})
-        self.assertEqual(paths[0]["path"][-1], {"x": 3, "y": 1})
+        self.assertEqual(paths[0]["path"][0], {"x": 1, "y": 1})
+        self.assertEqual(paths[0]["path"][-1], {"x": 2, "y": 1})
         ent = self.session.entities[self.p1_ent]
-        self.assertEqual((ent.x, ent.y), (3, 1))
+        self.assertEqual((ent.x, ent.y), (2, 1))
         # every client got its per-viewer state snapshot for the mutation.
         for sock in (self.gm_s, self.p1_s, self.p2_s):
             self.assertTrue(sock.sent("state"))
 
     def test_player_cannot_move_another_players_entity(self):
         reply = self.session.handle_message(
-            self.p1_s, {"type": "move", "entity_id": self.p2_ent, "x": 4, "y": 1}
+            self.p1_s, {"type": "move", "entity_id": self.p2_ent, "x": 3, "y": 1}
         )
         self.assertEqual(reply, {"type": "error", "message": "not allowed"})
         ent = self.session.entities[self.p2_ent]
-        self.assertEqual((ent.x, ent.y), (3, 1))  # unchanged
+        self.assertEqual((ent.x, ent.y), (2, 1))  # unchanged
 
-    def test_player_cannot_move_gm_entity(self):
+    def test_player_cannot_move_gm_created_npc(self):
+        # A19-semantics (the "move GM entity" case no longer exists: the GM
+        # has no entity — players may not move non-owned tokens, e.g. the
+        # GM's created npc).
         reply = self.session.handle_message(
-            self.p1_s, {"type": "move", "entity_id": self.gm_ent, "x": 2, "y": 2}
+            self.gm_s,
+            {"type": "create_entity", "name": "Grom", "kind": "npc",
+             "team": "neutral", "x": 6, "y": 5},
+        )
+        self.assertIsNone(reply)
+        npc = next(e for e in self.session.entities.values() if e.name == "Grom")
+        reply = self.session.handle_message(
+            self.p1_s, {"type": "move", "entity_id": npc.id, "x": 2, "y": 2}
         )
         self.assertEqual(reply, {"type": "error", "message": "not allowed"})
 
     def test_player_override_is_not_allowed(self):
         reply = self.session.handle_message(
             self.p1_s,
-            {"type": "move", "entity_id": self.p1_ent, "x": 2, "y": 3,
+            {"type": "move", "entity_id": self.p1_ent, "x": 1, "y": 3,
              "override": True},
         )
         self.assertEqual(reply, {"type": "error", "message": "not allowed"})
 
     def test_gm_can_move_any_entity(self):
         # GM moves ALICE's (p1's) entity — allowed even though it's not
-        # the GM's own entity.
+        # owned by the GM (the GM has no own entity at all). (1,1) -> (2,1),
+        # an adjacent free floor.
         reply = self.session.handle_message(
-            self.gm_s, {"type": "move", "entity_id": self.p1_ent, "x": 1, "y": 1}
+            self.gm_s, {"type": "move", "entity_id": self.p1_ent, "x": 2, "y": 1}
         )
         self.assertIsNone(reply)
         self.assertTrue(self.gm_s.sent("path"))
         ent = self.session.entities[self.p1_ent]
-        self.assertEqual((ent.x, ent.y), (1, 1))
+        self.assertEqual((ent.x, ent.y), (2, 1))
 
     def test_gm_override_moves_through_wall(self):
-        # (2,1) [Alice] -> (4,2): straight line crosses the wall col 5? No —
+        # (2,1) [Bob] -> (4,2): straight line crosses the wall col 5? No —
         # (2,1)->(4,2) is open floor... use a real wall destination: (5,1) is
         # a wall (col 5). Override must teleport straight through it.
         reply = self.session.handle_message(
@@ -295,7 +354,7 @@ class TestMovement(SessionTestCase):
         s = GameSession("t", grid)
         gm_s, p1_s = FakeSock(), FakeSock()
         s.join(gm_s, "G", "gm")
-        p, _ = s.join(p1_s, "Alice", "player")  # (2,1)
+        p, _ = s.join(p1_s, "Alice", "player")  # (1,1)
         ent_id = s.players[p.id].entity_id
         # destination (6,1) is in the sealed region: no path exists.
         reply = s.handle_message(
@@ -304,7 +363,7 @@ class TestMovement(SessionTestCase):
         self.assertEqual(reply, {"type": "error", "message": NO_ROUTE})
         self.assertEqual(NO_ROUTE, "no route — wall in the way")
         e = s.entities[ent_id]
-        self.assertEqual((e.x, e.y), (2, 1))  # unchanged
+        self.assertEqual((e.x, e.y), (1, 1))  # unchanged
         # GM override into the same sealed region works.
         reply = s.handle_message(
             gm_s, {"type": "move", "entity_id": ent_id, "x": 6, "y": 1,
@@ -331,7 +390,7 @@ class TestMovement(SessionTestCase):
         self.assertEqual(len(reply["path"]), 1)
 
     def test_move_to_doorway_is_walkable(self):
-        # Alice (2,1) → doorway (5,5): path must exist through the gap.
+        # Alice (1,1) → doorway (5,5): path must exist through the gap.
         reply = self.session.handle_message(
             self.p1_s, {"type": "move", "entity_id": self.p1_ent, "x": 5, "y": 5}
         )
@@ -382,13 +441,20 @@ class TestGmTools(SessionTestCase):
         )
         self.assertEqual(reply, {"type": "error", "message": "not allowed"})
 
-    def test_delete_gm_character_allowed_player_entity_blocked(self):
-        # The GM's own entity (owner None) can be deleted...
+    def test_delete_gm_created_npc_allowed_player_entity_blocked(self):
+        # A GM-created token (owner None) can be deleted...
         reply = self.session.handle_message(
-            self.gm_s, {"type": "delete_entity", "entity_id": self.gm_ent}
+            self.gm_s,
+            {"type": "create_entity", "name": "Grom", "kind": "npc",
+             "team": "neutral", "x": 6, "y": 5},
         )
         self.assertIsNone(reply)
-        self.assertNotIn(self.gm_ent, self.session.entities)
+        npc = next(e for e in self.session.entities.values() if e.name == "Grom")
+        reply = self.session.handle_message(
+            self.gm_s, {"type": "delete_entity", "entity_id": npc.id}
+        )
+        self.assertIsNone(reply)
+        self.assertNotIn(npc.id, self.session.entities)
         # ...but a connected player's controlling entity cannot (no orphan).
         reply = self.session.handle_message(
             self.gm_s, {"type": "delete_entity", "entity_id": self.p1_ent}
@@ -396,6 +462,48 @@ class TestGmTools(SessionTestCase):
         self.assertEqual(reply["type"], "error")
         self.assertIn("cannot delete", reply["message"])
         self.assertIn(self.p1_ent, self.session.entities)
+
+    def test_create_entity_rejects_gm_character_and_player_kinds(self):
+        # A1: gm_character is no longer creatable; player stays server-only.
+        for kind in ("gm_character", "player"):
+            before = len(self.session.entities)
+            reply = self.session.handle_message(
+                self.gm_s,
+                {"type": "create_entity", "name": "X", "kind": kind,
+                 "team": "neutral", "x": 6, "y": 5},
+            )
+            self.assertEqual(
+                reply,
+                {"type": "error", "message": "kind must be one of npc/enemy"},
+            )
+            self.assertEqual(len(self.session.entities), before)
+
+    def test_create_entity_allows_npc_and_enemy(self):
+        # A6: creation succeeds at a walkable cell AND on a wall cell (the
+        # GM may place anywhere; only the in-bounds check applies).
+        for kind, team in (("npc", "neutral"), ("enemy", "hostile")):
+            before = len(self.session.entities)
+            for x, y in ((12, 9), (5, 1)):  # floor and wall cells
+                reply = self.session.handle_message(
+                    self.gm_s,
+                    {"type": "create_entity", "name": f"c-{kind}-{x}{y}",
+                     "kind": kind, "team": team, "x": x, "y": y},
+                )
+                self.assertIsNone(reply)
+            self.assertEqual(len(self.session.entities), before + 2)
+            # out-of-bounds is still rejected
+            reply = self.session.handle_message(
+                self.gm_s,
+                {"type": "create_entity", "name": "oob", "kind": kind,
+                 "team": team, "x": 99, "y": 99},
+            )
+            self.assertIn("out of bounds", reply["message"])
+            for e in list(self.session.entities.values()):
+                if e.name.startswith(f"c-{kind}-"):
+                    self.session.handle_message(
+                        self.gm_s,
+                        {"type": "delete_entity", "entity_id": e.id},
+                    )
 
     def test_delete_by_player_not_allowed(self):
         reply = self.session.handle_message(
@@ -449,19 +557,20 @@ class TestStateFor(SessionTestCase):
     def test_gm_state_has_full_entities_and_labeled_awareness(self):
         st = self.session.state_for(self.gm)
         self.assertEqual(st["type"], "state")
-        self.assertEqual(len(st["entities"]), 3)  # all three
+        self.assertEqual(st["you_entity"], None)  # GM has no own token
+        self.assertEqual(len(st["entities"]), 2)  # Alice + Bob (no GM entity)
         self.assertEqual(len(st["players"]), 3)
         self.assertFalse(st["fog"])
         aw = st["awareness"]
-        self.assertEqual(len(aw), 3)  # GM sees ALL, incl. own gm_character
+        self.assertEqual(len(aw), 2)  # GM sees ALL tokens (no own item exists)
         for item in aw:
             self.assertTrue(item["label"])
             self.assertIn("name", item)
             self.assertIn("kind", item)
+            self.assertNotEqual(item["kind"], "gm_character")
         colors = {i["entity_id"]: i["color"] for i in aw}
-        self.assertEqual(colors[self.gm_ent], "white")     # neutral gm_character
-        self.assertEqual(colors[self.p1_ent], "green")     # party
-        self.assertEqual(colors[self.p2_ent], "green")
+        self.assertEqual(colors[self.p1_ent], "green")  # party
+        self.assertEqual(colors[self.p2_ent], "green")  # party
 
     def test_player_state_has_no_entities_and_correct_awareness(self):
         st = self.session.state_for(self.p1)
@@ -471,10 +580,9 @@ class TestStateFor(SessionTestCase):
         aw = st["awareness"]
         self.assertNotIn(self.p1_ent, [i["entity_id"] for i in aw])  # self excluded
         by_id = {i["entity_id"]: i for i in aw}
-        self.assertEqual(set(by_id), {self.gm_ent, self.p2_ent})
-        # green friend (Bob's party entity), white neutral (GM character)
-        self.assertEqual(by_id[self.p2_ent]["color"], "green")
-        self.assertEqual(by_id[self.gm_ent]["color"], "white")
+        # Alice sees only Bob — the GM has no token to show as a dot.
+        self.assertEqual(set(by_id), {self.p2_ent})
+        self.assertEqual(by_id[self.p2_ent]["color"], "green")  # friend (party)
         for item in aw:
             self.assertFalse(item["label"])  # dots only, no names
             self.assertNotIn("name", item)
@@ -516,7 +624,7 @@ class TestStateFor(SessionTestCase):
         # Carol's state: players get no entities; awareness excludes self.
         st_carol = sock.last("welcome")
         self.assertEqual(st_carol["entities"], [])
-        self.assertEqual(len(st_carol["awareness"]), 3)
+        self.assertEqual(len(st_carol["awareness"]), 2)  # Alice + Bob
         # and a rejected join sends NO welcome at all.
         s2 = GameSession("t2", build_sample_map())
         s2.join(FakeSock(), "G", "gm")
@@ -546,13 +654,13 @@ class TestFog(unittest.TestCase):
         self.session = GameSession("t", grid)
         self.gm_s = FakeSock()
         self.p1_s = FakeSock()
-        gm, _ = self.session.join(self.gm_s, "G", "gm")     # (1,1)
-        p1, _ = self.session.join(self.p1_s, "Alice", "player")  # (2,1)
+        gm, _ = self.session.join(self.gm_s, "G", "gm")     # no entity (GM)
+        p1, _ = self.session.join(self.p1_s, "Alice", "player")  # (1,1)
         self.gm = gm
         self.p1 = p1
-        # Alice at (2,1); friendly Bob at (4,1) — LOS over floor row y=1.
-        # Enemy at (4,3) — behind the wall row: NO LOS from (2,1).
-        p2, _ = self.session.join(FakeSock(), "Bob", "player")  # (3,1)
+        # Alice at (1,1); friendly Bob at (4,1) — LOS over floor row y=1.
+        # Enemy at (4,3) — behind the wall row: NO LOS from (1,1).
+        p2, _ = self.session.join(FakeSock(), "Bob", "player")  # (2,1)
         self.bob_ent = self.session.players[p2.id].entity_id
         self.session.handle_message(
             self.gm_s, {"type": "place", "entity_id": self.bob_ent, "x": 4, "y": 1}
@@ -586,10 +694,10 @@ class TestFog(unittest.TestCase):
 
         g_aw = self.session.state_for(self.gm)["awareness"]
         g_ids = {i["entity_id"] for i in g_aw}
-        # The GM is NEVER fogged: sees the shade too, labeled (4 entities:
-        # gm_character, Alice, Bob, Shade).
+        # The GM is NEVER fogged: sees the shade too, labeled (3 entities:
+        # Alice, Bob, Shade — the GM itself has no token).
         self.assertIn(self.shade.id, g_ids)
-        self.assertEqual(len(g_aw), 4)
+        self.assertEqual(len(g_aw), 3)
         for item in g_aw:
             self.assertTrue(item["label"])
 
@@ -710,16 +818,25 @@ class TestUseMap(unittest.TestCase):
     def test_use_map_swaps_grid_keeps_players(self):
         from app.main import maps_registry
         sid = "usemap-test"
-        target = self._small_grid(2, 2)
+        # 2x2 target with (1,1) — the first player's spawn cell — painted a
+        # wall, so the entity must be re-placed onto the free (0,0).
+        target = Grid(
+            name="Small", width=2, height=2,
+            cells=[
+                ["floor", "wall"],
+                ["wall", "wall"],
+            ],
+        )
         maps_registry[sid] = {"grid": target, "entities": {}, "players": {}}
         s = GameSession("use", build_sample_map())  # starts on sample map
         self.assertEqual((s.grid.width, s.grid.height), (16, 12))
         gm_s, p_s = FakeSock(), FakeSock()
         gm, _ = s.join(gm_s, "G", "gm")
         p, _ = s.join(p_s, "A", "player")
-        gm_ent, p_ent = gm.entity_id, p.entity_id
-        # Player A spawns at (2,1) — OUT OF BOUNDS for the 2x2 target grid.
-        self.assertEqual((s.entities[p_ent].x, s.entities[p_ent].y), (2, 1))
+        p_ent = p.entity_id
+        self.assertIsNone(gm.entity_id)  # GM has no entity to re-park
+        # Player A spawns at (1,1) — ON A WALL of the 2x2 target grid.
+        self.assertEqual((s.entities[p_ent].x, s.entities[p_ent].y), (1, 1))
 
         # GM requests the CURRENT session play the uploaded map (same session).
         reply = s.handle_message(gm_s, {"type": "use_map", "map_id": sid})

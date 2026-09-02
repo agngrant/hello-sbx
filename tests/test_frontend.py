@@ -43,6 +43,7 @@ Each test maps to the specific QA report it proves:
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import subprocess
@@ -89,6 +90,11 @@ def js(expr: str) -> str:
     return proc.stdout
 
 
+def js_map_literal(mapobj: dict) -> str:
+    """A JS object literal for the small test maps (dict of str/list)."""
+    return json.dumps(mapobj)
+
+
 class FrontendBase(unittest.TestCase):
     """Skip the whole class if Node isn't available (pure-stdlib project)."""
 
@@ -110,13 +116,13 @@ class TestBug001AllEntitiesDefined(FrontendBase):
             ",[\"floor\",\"floor\",\"floor\",\"floor\",\"floor\",\"floor\"]]}"
         )
         if role == "gm":
+            # New contract: the GM welcome carries you.entity_id = null and
+            # an empty entities list (the GM is a pure controller).
             expr = (
                 "(()=>{api.onWelcome({type:'welcome',"
-                "you:{id:'p1',name:'Gamer',role:'gm',entity_id:'e1'},"
-                "map:%s,entities:[{id:'e1',name:'Gamer',kind:'gm_character',"
-                "team:'neutral',x:1,y:1}],players:[],"
-                "awareness:[{entity_id:'e1',x:1,y:1,color:'white',label:true}],"
-                "fog:false});"
+                "you:{id:'p1',name:'Gamer',role:'gm',entity_id:null},"
+                "map:%s,entities:[],players:[],"
+                "awareness:[],fog:false});"
                 "return {joined:api.state.joined,role:api.state.role,"
                 "entities:api.allEntities().length};})()"
             ) % mapobj
@@ -262,17 +268,19 @@ class TestBug003PathAnimation(FrontendBase):
         self.assertIn('"move"', out, out)
 
 
-class TestBug006GmOwnTokenInSidebar(FrontendBase):
-    def test_gm_sidebar_lists_own_entity(self):
+class TestBug006GmRosterInSidebar(FrontendBase):
+    def test_gm_sidebar_lists_all_tokens_no_own_row(self):
+        # The GM is a pure controller: it has no own row — the sidebar lists
+        # every token that exists (the original BUG-006 concern: the list
+        # must agree with the awareness it renders; every awareness row is
+        # rendered exactly once, and the summary counts exactly those rows).
         expr = (
             "(()=>{api.state.role='gm';api.state.name='Gamer';"
-            "api.state.entities=[{id:'e1',name:'Gamer',kind:'gm_character',"
-            "team:'neutral',x:1,y:1,owner:null},{id:'e2',name:'Alice',"
-            "kind:'player',team:'party',x:2,y:1,owner:'p2'}];"
-            "api.state.you={id:'p1',name:'Gamer',role:'gm',entity_id:'e1'};"
-            "api.state.awareness=[{entity_id:'e1',x:1,y:1,color:'white',"
-            "name:'Gamer',kind:'gm_character',label:true},{entity_id:'e2',"
-            "x:2,y:1,color:'green',name:'Alice',kind:'player',label:true}];"
+            "api.state.entities=[{id:'e2',name:'Alice',kind:'player',"
+            "team:'party',x:2,y:1,owner:'p2'}];"
+            "api.state.you={id:'p1',name:'Gamer',role:'gm',entity_id:null};"
+            "api.state.awareness=[{entity_id:'e2',x:2,y:1,color:'green',"
+            "name:'Alice',kind:'player',label:true}];"
             "const kids=[];"
             "api.els.awarenessList.innerHTML='';"
             "api.els.awarenessList.appendChild=(c)=>{kids.push(c);return c};"
@@ -281,15 +289,38 @@ class TestBug006GmOwnTokenInSidebar(FrontendBase):
             "return {ids,summary:api.els.awarenessSummary.textContent};})()"
         )
         out = js(expr)
-        # The GM's own gm_character (e1) AND the other entity (e2) are both
-        # listed. Before the fix e1 was dropped, so the list disagreed with
-        # the summary by one.
-        self.assertIn('"e1"', out, f"GM own entity missing from sidebar: {out}")
-        self.assertIn('"e2"', out)
-        self.assertIn('"ids":["e1","e2"]', out)
-        # The summary counts all awareness items (1 neutral + 1 ally).
+        # The roster lists exactly the real tokens (e2) — no own row.
+        self.assertIn('"ids":["e2"]', out, out)
+        # The summary counts exactly the rows rendered (1 ally, 0 else).
         self.assertIn("1 ally", out)
-        self.assertIn("1 neutral", out)
+        self.assertIn("0 neutral", out)
+        self.assertIn("0 enemy", out)
+
+    def test_gm_sidebar_zero_tokens_empty_row_and_zero_summary(self):
+        # A12 (sidebar part): GM alone, no tokens → empty-state row with the
+        # GM copy and a 0·0·0 summary.
+        expr = (
+            "(()=>{api.state.role='gm';api.state.name='Gamer';"
+            "api.state.entities=[];"
+            "api.state.you={id:'p1',name:'Gamer',role:'gm',entity_id:null};"
+            "api.state.awareness=[];"
+            "const kids=[];"
+            "api.els.awarenessList.innerHTML='';"
+            "api.els.awarenessList.appendChild=(c)=>{kids.push(c);return c};"
+            "api.drawSidebar();"
+            "const row=kids[0];"
+            "return {text:row?row.textContent:null,"
+            "cls:row?row.className:'',"
+            "summary:api.els.awarenessSummary.textContent};})()"
+        )
+        out = js(expr)
+        self.assertIn("No tokens on the map yet — add the first one in GM Tools.",
+                      out)
+        self.assertIn("muted", out)
+        self.assertIn("small", out)
+        self.assertIn("0 ally", out)
+        self.assertIn("0 neutral", out)
+        self.assertIn("0 enemy", out)
 
 
 class TestBug007EntityAtCell(FrontendBase):
@@ -386,10 +417,8 @@ class TestBug011JoinRejectionVisible(FrontendBase):
             "const map={name:'m',width:4,height:4,cells:Array.from({length:4},"
             "()=>Array(4).fill('floor'))};"
             "api.onWelcome({type:'welcome',you:{id:'p1',name:'G',role:'gm',"
-            "entity_id:'e1'},map,entities:[{id:'e1',name:'G',kind:"
-            "'gm_character',team:'neutral',x:1,y:1}],players:[],"
-            "awareness:[{entity_id:'e1',x:1,y:1,color:'white',label:true}],"
-            "fog:false});"
+            "entity_id:null},map,entities:[],players:[],"
+            "awareness:[],fog:false});"
             "return {lobby:api.els.lobbyStatus.textContent, joined:"
             "api.state.joined};})()"
         )
@@ -397,6 +426,245 @@ class TestBug011JoinRejectionVisible(FrontendBase):
         # Once a welcome arrives the stale join error is cleared.
         self.assertIn('"lobby":""', out, out)
         self.assertIn('"joined":true', out)
+
+
+class TestGmControllerView(FrontendBase):
+    """Acceptance for "GM is a pure controller" (docs/design/gm-controller.md
+    §8, A12–A15/A19): a GM welcome with you.entity_id = null and an empty
+    roster renders the controller UI end-to-end.
+
+    The toast assertions capture the span textContent right after creation
+    (toasts are only removed by a later timer tick, so the harness clock
+    keeps them alive)."""
+
+    MAP_JS = js_map_literal({
+        "name": "m", "width": 6, "height": 4,
+        "cells": [["floor"] * 6 for _ in range(4)],
+    })
+
+    _GM_WELCOME_HEAD = (
+        "(()=>{"
+        "const doc=api.document;const toasts=[];"
+        "const realCreate=doc.createElement;"
+        "doc.createElement=(t)=>{const el=realCreate(t);"
+        "if(t==='span')toasts.push(()=>el.textContent);return el};"
+        "api.onWelcome({type:'welcome',"
+        "you:{id:'p1',name:'Gamer',role:'gm',entity_id:null},"
+        f"map:{MAP_JS},entities:[],players:[],awareness:[],"
+        "fog:false});"
+        "doc.createElement=realCreate;"
+    )
+
+    def _toasts(self, expr_after: str = "") -> str:
+        expr = self._GM_WELCOME_HEAD + expr_after + \
+            "return {toasts:toasts.map(f=>f())};})()"
+        return js(expr)
+
+    def test_a12_gm_welcome_zero_tokens_controller_ui(self):
+        expr = (
+            "(()=>{"
+            "api.onWelcome({type:'welcome',"
+            "you:{id:'p1',name:'Gamer',role:'gm',entity_id:null},"
+            f"map:{self.MAP_JS},entities:[],players:[],awareness:[],"
+            "fog:false});"
+            "return {title:api.els.awarenessTitle.textContent,"
+            "sel:api.els.selEntityName.textContent,"
+            "hint:api.els.controlHint.textContent,"
+            "canvasHint:api.els.canvasHint.textContent,"
+            "canvasHintHidden:api.els.canvasHint.hidden,"
+            "fogEnabled:!api.els.fogToggle.disabled,"
+            "fogTitle:api.els.fogToggle.title,"
+            "teamDisabled:api.els.teamSelect.disabled,"
+            "deleteDisabled:api.els.btnDeleteEntity.disabled,"
+            "entities:api.allEntities().length};})()"
+        )
+        out = js(expr)
+        # A12: controller sidebar title, None selection, 0-token hint.
+        # (you.entity_id is null, so isOwn is false for every token — no
+        # own ring / "YOU" pill can render.)
+        self.assertIn('"title":"Tokens — all (GM sees all)"', out, out)
+        self.assertIn('"sel":"None"', out)
+        self.assertIn("No tokens yet — add one in GM Tools.", out)
+        # §3.2 first-run canvas hint is up for a fresh session (5 s window).
+        self.assertIn("You're the GM — no token of your own.", out)
+        self.assertIn('"canvasHintHidden":false', out)
+        # A14: the fog toggle stays ENABLED for the GM, controller tooltip.
+        self.assertIn('"fogEnabled":true', out)
+        self.assertIn("Toggle fog of war for players. As GM you always see "
+                      "everything.", out)
+        # No selection → team/delete disabled; zero tokens.
+        self.assertIn('"teamDisabled":true', out)
+        self.assertIn('"deleteDisabled":true', out)
+        self.assertIn('"entities":0', out)
+
+    def test_a12_empty_row_and_zero_summary(self):
+        expr = (
+            "(()=>{"
+            "api.onWelcome({type:'welcome',"
+            "you:{id:'p1',name:'Gamer',role:'gm',entity_id:null},"
+            f"map:{self.MAP_JS},entities:[],players:[],awareness:[],"
+            "fog:false});"
+            "const kids=[];"
+            "api.els.awarenessList.appendChild="
+            "(c)=>{kids.push(c);return c};"
+            "api.drawSidebar();"
+            "return {row:kids[0]?kids[0].textContent:null,"
+            "summary:api.els.awarenessSummary.textContent};})()"
+        )
+        out = js(expr)
+        self.assertIn(
+            "No tokens on the map yet — add the first one in GM Tools.", out)
+        self.assertIn("0 ally · 0 neutral · 0 enemy", out)
+
+    def test_a15_gm_welcome_toast_controller_copy(self):
+        out = self._toasts()
+        # A15: the GM welcome toast carries the no-token controller sentence.
+        self.assertIn("you're the GM", out)
+        self.assertIn("no token on the map", out)
+        self.assertIn("create and move tokens for everyone", out)
+
+    def test_a15_player_welcome_toast_unchanged(self):
+        # Toast spans are captured in creation order: the own-row spans
+        # ("YOU", "(1, 1)") are made by the render pass, then the toast span
+        # (whose textContent is set directly by toast()).
+        expr = (
+            "(()=>{"
+            "const doc=api.document;const toasts=[];"
+            "const realCreate=doc.createElement;"
+            "doc.createElement=(t)=>{const el=realCreate(t);"
+            "if(t==='span')toasts.push(()=>el.textContent);return el};"
+            "api.onWelcome({type:'welcome',you:{id:'p2',name:'Alice',"
+            "role:'player',entity_id:'e1'},"
+            f"map:{self.MAP_JS},entities:[],"
+            "you_entity:{id:'e1',name:'Alice',kind:'player',team:'party',"
+            "x:1,y:1},players:[],awareness:[],fog:false});"
+            "doc.createElement=realCreate;"
+            "return {toasts:toasts.map(f=>f()),"
+            "sel:api.state.selectedEntityId};})()"
+        )
+        out = js(expr)
+        # Two own-row render passes (applyState, then selectEntity) each
+        # create [dot "", "YOU", "(1, 1)"] spans, then the toast span —
+        # byte-identical to the pre-change player toast; the player keeps
+        # their own-token selection.
+        self.assertIn(
+            '"toasts":["","YOU","(1, 1)","","YOU","(1, 1)",' +
+            '"Welcome, Alice."]', out, out)
+        self.assertIn('"sel":"e1"', out)
+
+    def test_a13_created_token_selected_row_and_summary(self):
+        expr = (
+            "(()=>{"
+            "api.onWelcome({type:'welcome',"
+            "you:{id:'p1',name:'Gamer',role:'gm',entity_id:null},"
+            f"map:{self.MAP_JS},entities:[],players:[],awareness:[],"
+            "fog:false});"
+            "api.els.newEntityName.value='Grom';"
+            "api.els.newEntityKind.value='npc';"
+            "api.els.newEntityTeam.value='neutral';"
+            "api._send.reset();"
+            "api.createEntity();"
+            "const create=api._send.sent.find(m=>m.type==='create_entity');"
+            "const kids=[];"
+            "api.els.awarenessList.appendChild="
+            "(c)=>{kids.push(c);return c};"
+            "const doc=api.document;const spans=[];"
+            "const realCreate=doc.createElement;"
+            "doc.createElement=(t)=>{const el=realCreate(t);"
+            "if(t==='span')spans.push(()=>el.textContent);return el};"
+            "api.onState({type:'state',"
+            f"map:{self.MAP_JS},"
+            "entities:[{id:'e5',name:'Grom',kind:'npc',team:'neutral',"
+            "x:1,y:1,owner:null}],players:[],"
+            "awareness:[{entity_id:'e5',x:1,y:1,color:'white',name:'Grom',"
+            "kind:'npc',label:true}],fog:false});"
+            "doc.createElement=realCreate;"
+            "return {create:!!create,kind:create?create.kind:null,"
+            "sel:api.state.selectedEntityId,"
+            "selName:api.els.selEntityName.textContent,"
+            "team:api.els.teamSelect.value,"
+            "rows:kids.map(k=>k.dataset.entityId).filter(Boolean),"
+            "rowTexts:spans.map(f=>f()),"
+            "summary:api.els.awarenessSummary.textContent,"
+            "canvasHintHidden:api.els.canvasHint.hidden,"
+            "hint:api.els.controlHint.textContent,"
+            "nameCleared:api.els.newEntityName.value};})()"
+        )
+        out = js(expr)
+        # A13: create went out as npc/neutral; the state broadcast
+        # auto-selected the new token; the row carries name + kind·team meta +
+        # coords; the summary follows; the first-run hint is gone; the name
+        # input cleared.
+        self.assertIn('"create":true', out, out)
+        self.assertIn('"kind":"npc"', out)
+        self.assertIn('"sel":"e5"', out)
+        self.assertIn('"selName":"Grom (npc)"', out)
+        self.assertIn('"team":"neutral"', out)
+        self.assertIn('"rows":["e5"]', out)
+        self.assertIn("\"Grom\"", out)
+        self.assertIn("npc·neutral", out)
+        self.assertIn("(1, 1)", out)
+        self.assertIn("0 ally · 1 neutral · 0 enemy", out)
+        self.assertIn('"canvasHintHidden":true', out)
+        self.assertIn("Pick a destination for Grom", out)
+        self.assertIn('"nameCleared":""', out)
+
+    def test_a14_fog_toggle_gm_send_and_no_rendered_change(self):
+        expr = (
+            "(()=>{"
+            "api.onWelcome({type:'welcome',"
+            "you:{id:'p1',name:'Gamer',role:'gm',entity_id:null},"
+            f"map:{self.MAP_JS},"
+            "entities:[{id:'e1',name:'Grom',kind:'npc',team:'neutral',"
+            "x:1,y:1,owner:null}],players:[],"
+            "awareness:[{entity_id:'e1',x:1,y:1,color:'white',name:'Grom',"
+            "kind:'npc',label:true}],fog:false});"
+            "const before=JSON.stringify(api.state.awareness);"
+            "api._send.reset();"
+            "api.els.fogToggle.checked=true;"
+            "api.toggleFog();"
+            "const sent=api._send.sent[0]||null;"
+            "api.onState({type:'state',"
+            f"map:{self.MAP_JS},"
+            "entities:[{id:'e1',name:'Grom',kind:'npc',team:'neutral',"
+            "x:1,y:1,owner:null}],players:[],"
+            "awareness:[{entity_id:'e1',x:1,y:1,color:'white',name:'Grom',"
+            "kind:'npc',label:true}],fog:true});"
+            "const after=JSON.stringify(api.state.awareness);"
+            "return {sent,checked:api.els.fogToggle.checked,"
+            "disabled:api.els.fogToggle.disabled,same:before===after};})()"
+        )
+        out = js(expr)
+        # A14: the GM toggle sends {type:"set_fog", on:true}; the state
+        # broadcast drives the checkbox; the GM's rendered awareness items
+        # are identical before/after (same items, same pixels).
+        self.assertIn('"sent":{"type":"set_fog","on":true}', out, out)
+        self.assertIn('"checked":true', out)
+        self.assertIn('"disabled":false', out)
+        self.assertIn('"same":true', out)
+
+    def test_a19_player_empty_state_when_only_other_was_gm(self):
+        expr = (
+            "(()=>{"
+            "api.onWelcome({type:'welcome',you:{id:'p2',name:'Alice',"
+            "role:'player',entity_id:'e1'},"
+            f"map:{self.MAP_JS},entities:[],"
+            "you_entity:{id:'e1',name:'Alice',kind:'player',team:'party',"
+            "x:1,y:1},players:[],awareness:[],fog:false});"
+            "const kids=[];"
+            "api.els.awarenessList.appendChild="
+            "(c)=>{kids.push(c);return c};"
+            "api.drawSidebar();"
+            "return {rows:kids.map(k=>({t:k.textContent,"
+            "cls:k.className})),"
+            "summary:api.els.awarenessSummary.textContent};})()"
+        )
+        out = js(expr)
+        # A19: a GM-only session + 1 player → the radar is empty (the GM
+        # has no token to show), so the player gets the empty-state row
+        # below their own row.
+        self.assertIn("No one else is out there yet.", out, out)
+        self.assertIn("0 ally · 0 neutral · 0 enemy", out)
 
 
 @unittest.skipUnless(shutil.which("node") is not None,
@@ -414,19 +682,37 @@ class TestIndexHtml(FrontendBase):
             self.assertNotIn(ext, self.html,
                              f"file picker still advertises {ext} (BUG-009)")
 
-    def test_bug010_no_player_kind_option(self):
-        # The server only creates npc/enemy/gm_character; the UI must not
-        # offer a "player" kind. We assert the #new-entity-kind select has no
-        # player option while keeping the other three.
+    def test_kind_options_are_exactly_npc_and_enemy(self):
+        # The GM is a pure controller: the kind dropdown offers exactly
+        # npc | enemy (npc default). No "player" (server-only, BUG-010) and
+        # no "gm_character" (deprecated, never creatable).
         import re
         m = re.search(r'<select id="new-entity-kind">.*?</select>',
                       self.html, re.DOTALL)
         self.assertIsNotNone(m, "could not find #new-entity-kind")
         block = m.group(0)
+        options = re.findall(r'value="([^"]+)"', block)
+        self.assertEqual(options[:2], ["npc", "enemy"])
         self.assertNotIn('value="player"', block,
                          "BUG-010: 'player' kind still offered")
-        for kind in ("npc", "enemy", "gm_character"):
-            self.assertIn(f'value="{kind}"', block, f"missing kind {kind}")
+        self.assertNotIn('gm_character', block,
+                         "'gm_character' kind must not be offered")
+        self.assertIn('<option value="npc">', block)
+        self.assertIn('<option value="enemy">', block)
+
+    def test_lobby_note_mentions_gm_has_no_token(self):
+        # A16: the lobby note sets the controller expectation.
+        import re
+        m = re.search(r'<p id="lobby-note">(.*?)</p>', self.html, re.DOTALL)
+        self.assertIsNotNone(m, "could not find #lobby-note")
+        note = re.sub(r"\s+", " ", m.group(1))
+        self.assertIn("The GM has no token on the map", note)
+        self.assertIn("creates and controls", note)
+
+    def test_fog_toggle_has_player_tooltip_in_html(self):
+        # The player-facing default title is in the markup; the GM title is
+        # applied per role by applyState (checked in TestGmControllerView).
+        self.assertIn('title="GM controls fog of war"', self.html)
 
 
 if __name__ == "__main__":

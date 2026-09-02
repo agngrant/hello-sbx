@@ -31,7 +31,11 @@ CELL_TYPES = ("floor", "wall", "doorway")
 TEAMS = ("party", "neutral", "hostile")
 #: Valid roles.
 ROLES = ("gm", "player")
-#: Valid entity kinds.
+#: Valid entity kinds. DEPRECATED legacy value: "gm_character" is kept ONLY
+#: so `Entity.from_dict` (and any in-memory session from an older build) can
+#: still load old data without crashing — the GM is now a pure controller
+#: with no token, so it is never spawned and never creatable again
+#: (docs/design/gm-controller.md §2.7; PROJECT.md §4 PM decision).
 ENTITY_KINDS = ("player", "npc", "enemy", "gm_character")
 
 #: Team → awareness color (base rule; an explicit ``Entity.color`` wins if

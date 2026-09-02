@@ -4,8 +4,10 @@ The overlay is **per player** and is a radar that ignores walls.  For each
 connected player, the server computes which entities that player sees, in
 what color, and with or without a name label:
 
-* **GM** sees EVERY entity (including its own), unmasked: true color,
-  entity kind, and a name label.
+* **GM** sees EVERY entity, unmasked: true color, entity kind, and a name
+  label. The GM is a pure controller with ``entity_id = None`` — there is
+  no own token to exclude, and its view never references
+  ``viewer.entity_id``.
 * **Player** sees every entity EXCEPT its own as a colored dot — no name,
   no label.  The color is the *relation* to the entity's team:
 
@@ -69,8 +71,10 @@ def build_awareness(
 ) -> list[dict[str, Any]]:
     """Build the awareness overlay items for ``viewer``.
 
-    * ``viewer.role == "gm"``: one item for EVERY entity — including the
-      GM's own — each ``{"entity_id", "x", "y", "color", "name", "kind",
+    * ``viewer.role == "gm"``: one item for EVERY entity — the GM is a
+      pure controller with no own token (``entity_id is None`` is the
+      normal case; ``viewer.entity_id`` is never consulted), each
+      ``{"entity_id", "x", "y", "color", "name", "kind",
       "label": True}``.  Color is the explicit override or the team color
       (true colors, no masking), and every item carries the name + kind.
     * ``viewer.role == "player"``: one item for every entity EXCEPT the

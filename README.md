@@ -7,7 +7,9 @@ static HTML/CSS/JS frontend.
 One **Game Master (GM)** runs the session and up to **6 players** join. The GM
 uploads a map as an **image**, LittleDungeons **detects walls and doorways** into a grid
 automatically, and everyone sees one live, shared map. Each player moves their own
-character; the GM can move *anything*. Every player gets a personal
+character; the GM can move *anything*. **The GM has no token on the map** — the GM is
+a pure controller/spectator who creates, moves, and deletes the other tokens and
+sees everything, never fogged. Every player gets a personal
 **awareness overlay** (colored dots for friends / neutrals / enemies); the GM sees
 everything, labeled.
 
@@ -62,15 +64,16 @@ and binds `127.0.0.1:8000`.
   Your character is the one with the blue **YOU** ring.
 - **GM:** the GM is the editor and referee of record:
   - **Select any entity** (click a token or a sidebar row) and **move it anywhere** —
-    the GM may move player characters, NPCs, enemies, or their own.
+    the GM may move player characters, NPCs, and enemies.
   - **Ignore walls:** tick the *Ignore walls* toggle (GM-only) to move a token
     straight to a target, wall or no wall (a deliberate "teleport" exception).
   - **Paint:** switch the bottom-bar tool to *Floor / Wall / Door* and paint to fix
     any detection mistakes — corrections apply to everyone live.
   - **Teams:** set a selected entity's team to *party* / *neutral* / *hostile*
     (this drives the awareness colors).
-  - **Create / delete tokens:** add `npc`, `enemy`, or `gm_character` entities
-    (spawned on the last hovered tile) and delete any entity.
+  - **Create / delete tokens:** add `npc` or `enemy` tokens
+    (spawned on the last hovered tile) and delete any entity. The GM itself
+    has no token on the map — there is nothing to select for the GM.
   - **Fog of war:** toggle on (off by default) for line-of-sight-aware visibility.
 
 ### The awareness overlay
@@ -78,7 +81,8 @@ and binds `127.0.0.1:8000`.
 The overlay is computed **per player** server-side and is a **radar that passes
 through walls** (by default, with fog of war off you can see around corners).
 
-- **GM** sees **every** entity with its true color, name label, and kind — no masking.
+- **GM** sees **every** token with its true color, name label, and kind — no
+  masking, never fogged (the GM has no token of its own to anchor sight to).
 - **Players** see a **dot** for every *other* entity, plus their own **"YOU"**
   token. A player's own entity is excluded from their dots (they already see it).
 

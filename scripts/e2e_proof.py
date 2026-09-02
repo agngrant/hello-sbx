@@ -7,13 +7,17 @@ announce a ``state`` to everyone already present. This script drives the
 real server + the test WS client through a full scenario and prints a check
 per behaviour:
 
-  1. GM + 2 players join (1 GM + 2 of the 6 allowed players).
-  2. Alice moves herself (2,1)->(5,5) through the doorway: SUCCESS.
-  3. GM moves the gm_character (1,1)->(5,3) (a wall) WITHOUT override:
-     REJECTED ("no route — wall in the way"), position unchanged.
-  4. GM retries with override:true: TELEPORTS through the wall; Alice sees it.
-  5. GM paints a wall at (4,1) + turns fog ON: Bob (2,1) keeps the
-     gm_character (clear diagonal LOS) but Alice (5,5) is hidden; the GM
+  1. GM + 2 players join (1 GM + 2 of the 6 allowed players). The GM has NO
+     token: it starts with 0 entities; the first player spawns at (1,1).
+  2. Alice moves herself (1,1)->(5,5) through the doorway: SUCCESS.
+  3. GM creates a neutral npc at (1,1) and moves it (1,1)->(5,3) (a wall)
+     WITHOUT override: REJECTED ("no route — wall in the way"), position
+     unchanged.
+  4. GM retries with override:true: TELEPORTS through the wall; Alice sees
+     it (white dot, fog still off).
+  5. GM paints a wall at (4,3) + turns fog ON: Bob (2,1) keeps the npc
+     (clear diagonal LOS) but Alice (5,5) is hidden; Alice (5,5) keeps Bob
+     (clear LOS) but the npc (5,3) is hidden behind the col-5 wall; the GM
      (never fogged) sees all. Per-player awareness differs.
   6. NEW MAP: GM uploads an RGB map and sends `use_map` — the SAME session
      swaps to the new grid and re-broadcasts; the players stay in the session
@@ -100,38 +104,37 @@ def main():
               wa["type"] == "welcome" and wa["you"]["role"] == "player")
         check("Bob got welcome (role=player)",
               wb["type"] == "welcome" and wb["you"]["role"] == "player")
-        check("GM welcome: 1 entity so far (only the GM has joined)",
-              len(wg["entities"]) == 1)
+        check("GM welcome: no entities (GM has no token)",
+              len(wg["entities"]) == 0)
+        check("GM welcome: you.entity_id is null", wg["you"]["entity_id"] is None)
         check("Alice entities == [] (players get none)", wa["entities"] == [])
         check("Alice carries you_entity",
               bool(wa["you_entity"])
               and wa["you_entity"]["id"] == wa["you"]["entity_id"])
-        gm_ent = wg["you"]["entity_id"]
         al_ent = wa["you"]["entity_id"]
         bo_ent = wb["you"]["entity_id"]
-        check("spawn order (1,1)/(2,1)/(3,1)",
-              next(e for e in wg["entities"] if e["id"] == gm_ent)["x"] == 1
-              and wa["you_entity"]["x"] == 2 and wb["you_entity"]["x"] == 3)
+        check("spawn order (1,1)/(2,1) (GM occupies no floor)",
+              wa["you_entity"]["x"] == 1 and wb["you_entity"]["x"] == 2)
         # drain join broadcasts: GM saw Alice+Bob, Alice saw Bob.
-        # The GM's 2nd join-state now lists all 3 entities (GM sees everything).
+        # The GM's 2nd join-state lists all 2 tokens (GM sees everything).
         gm_s1 = state_until(gm)
         check("GM got Alice's join broadcast",
-              gm_s1["type"] == "state" and len(gm_s1["entities"]) == 2)
+              gm_s1["type"] == "state" and len(gm_s1["entities"]) == 1)
         gm_s2 = state_until(gm)
-        check("GM got Bob's join broadcast; GM sees all 3 entities",
-              gm_s2["type"] == "state" and len(gm_s2["entities"]) == 3)
+        check("GM got Bob's join broadcast; GM sees all 2 tokens",
+              gm_s2["type"] == "state" and len(gm_s2["entities"]) == 2)
         check("Alice got Bob's join broadcast",
               state_until(alice)["type"] == "state")
 
         # 2. Alice moves herself through the doorway -----------------------
-        print("\n[2] Alice moves (2,1) -> (5,5)  [via the doorway (5,5)]")
+        print("\n[2] Alice moves (1,1) -> (5,5)  [via the doorway (5,5)]")
         alice.send_json({"type": "move", "entity_id": al_ent, "x": 5, "y": 5})
         reply = alice.recv_json()                       # her path (broadcast)
         check("Alice got a path reply",
               reply["type"] == "path" and reply["entity_id"] == al_ent,
               json.dumps(reply))
-        check("path starts (2,1), ends (5,5)",
-              reply["path"][0] == {"x": 2, "y": 1}
+        check("path starts (1,1), ends (5,5)",
+              reply["path"][0] == {"x": 1, "y": 1}
               and reply["path"][-1] == {"x": 5, "y": 5})
         g1, g2 = gm.recv_json(), gm.recv_json()
         check("GM saw path + state", {g1["type"], g2["type"]} == {"path", "state"})
@@ -149,43 +152,55 @@ def main():
         f4 = alice.recv_json()                           # alice's state
         check("Alice's you_entity now at (5,5)",
               f4["you_entity"]["x"] == 5 and f4["you_entity"]["y"] == 5)
-        check("Alice's awareness: Bob=green, GM=white, no self",
+        # The GM has no token, so Alice's radar holds exactly one dot: Bob.
+        check("Alice's awareness: Bob=green, no self, no GM dot",
               {i["entity_id"]: i["color"] for i in f4["awareness"]}
-              == {bo_ent: "green", gm_ent: "white"})
+              == {bo_ent: "green"})
 
-        # 3. GM move into a wall WITHOUT override -> rejected --------------
-        print("\n[3] GM moves gm_character (1,1) -> (5,3) [WALL]  no override")
-        gm.send_json({"type": "move", "entity_id": gm_ent, "x": 5, "y": 3})
+        # 3. GM creates a neutral npc, then moves it into a wall ------------
+        print("\n[3] GM creates neutral npc at (1,1), moves it "
+              "-> (5,3) [WALL]  no override")
+        gm.send_json({"type": "create_entity", "name": "Grom",
+                      "kind": "npc", "team": "neutral", "x": 1, "y": 1})
+        st = state_until(gm)
+        npc_ent = next(e["id"] for e in st["entities"] if e["name"] == "Grom")
+        alice.recv_json(); bob.recv_json()  # create broadcasts
+        check("npc created at (1,1), team neutral",
+              next(e for e in st["entities"] if e["id"] == npc_ent)["team"]
+              == "neutral")
+        gm.send_json({"type": "move", "entity_id": npc_ent, "x": 5, "y": 3})
         err = gm.recv_json()
         check("GM got the no-route error",
               err == {"type": "error", "message": "no route — wall in the way"},
               json.dumps(err))
         gm.send_json({"type": "request_state"})
         st = gm.recv_json()
-        ent = next(e for e in st["entities"] if e["id"] == gm_ent)
-        check("gm_character still at (1,1)", (ent["x"], ent["y"]) == (1, 1))
+        ent = next(e for e in st["entities"] if e["id"] == npc_ent)
+        check("npc still at (1,1)", (ent["x"], ent["y"]) == (1, 1))
+        # (no-route error + request_state are GM-only replies: nothing is
+        # queued for the players)
 
         # 4. GM override -> teleports through the wall ---------------------
         print("\n[4] GM retries with override:true")
-        gm.send_json({"type": "move", "entity_id": gm_ent, "x": 5, "y": 3,
+        gm.send_json({"type": "move", "entity_id": npc_ent, "x": 5, "y": 3,
                       "override": True})
         reply = gm.recv_json()                           # gm's path
         check("GM got path reply",
               reply["type"] == "path" and reply["path"] == [{"x": 5, "y": 3}],
               json.dumps(reply))
         st = gm.recv_json()                              # gm's state
-        ent = next(e for e in st["entities"] if e["id"] == gm_ent)
-        check("gm_character teleported to (5,3)", (ent["x"], ent["y"]) == (5, 3))
+        ent = next(e for e in st["entities"] if e["id"] == npc_ent)
+        check("npc teleported to (5,3)", (ent["x"], ent["y"]) == (5, 3))
         alice.recv_json()                                # alice's path
         f = alice.recv_json()                            # alice's state
-        item = next(i for i in f["awareness"] if i["entity_id"] == gm_ent)
-        check("Alice's awareness: gm_character white at (5,3)",
+        item = next(i for i in f["awareness"] if i["entity_id"] == npc_ent)
+        check("Alice's awareness: npc white at (5,3) (fog still off)",
               item["color"] == "white" and (item["x"], item["y"]) == (5, 3))
         bob.recv_json(); bob.recv_json()                 # drain bob path+state
 
         # 5. fog of war ------------------------------------------------------
-        print("\n[5] fog: GM paints wall (4,1) + fog ON")
-        gm.send_json({"type": "paint", "x": 4, "y": 1, "cell_type": "wall"})
+        print("\n[5] fog: GM paints wall (4,3) + fog ON")
+        gm.send_json({"type": "paint", "x": 4, "y": 3, "cell_type": "wall"})
         for c in (gm, alice, bob):
             c.recv_json()                                # paint state
         gm.send_json({"type": "set_fog", "on": True})
@@ -198,17 +213,17 @@ def main():
         check("fog flag broadcast", st_gm["fog"] is True)
         gm_ids = {i["entity_id"] for i in st_gm["awareness"]}
         check("GM is NEVER fogged (sees all 3, labeled)",
-              gm_ids == {gm_ent, al_ent, bo_ent}
+              gm_ids == {npc_ent, al_ent, bo_ent}
               and all(i["label"] for i in st_gm["awareness"]))
         al_ids = {i["entity_id"] for i in st_al["awareness"]}
-        check("Alice (5,5) fog: Bob (3,1) clear LOS -> visible",
+        check("Alice (5,5) fog: Bob (2,1) clear LOS -> visible",
               bo_ent in al_ids)
-        check("Alice (5,5) fog: gm_character (5,3) behind (4,1) wall -> hidden",
-              gm_ent not in al_ids)
+        check("Alice (5,5) fog: npc (5,3) behind the col-5 wall -> hidden",
+              npc_ent not in al_ids)
         bo_ids = {i["entity_id"] for i in st_bo["awareness"]}
-        check("Bob (2,1) fog: gm_character (5,3) clear LOS -> visible",
-              gm_ent in bo_ids)
-        check("Bob (2,1) fog: Alice (5,5) blocked by (4,1) wall -> hidden",
+        check("Bob (2,1) fog: npc (5,3) clear LOS -> visible",
+              npc_ent in bo_ids)
+        check("Bob (2,1) fog: Alice (5,5) blocked by (4,3) wall -> hidden",
               al_ent not in bo_ids)
         check("Bob's fogged awareness still dots only",
               all(i["label"] is False for i in st_bo["awareness"]))
@@ -308,10 +323,11 @@ def main():
         p7.send_json({"type": "join", "name": "P7", "role": "player"})
         check("7th non-GM join -> session full",
               p7.recv_json() == {"type": "error", "message": "session full"})
-        # GM's view: 1 GM + 6 players, 7 entities (drain queued join-states).
+        # GM's view: 1 GM + 6 players; entities = the 6 player tokens plus
+        # the GM's created npc (the GM itself holds none).
         gm.send_json({"type": "request_state"})
         st = state_until_n_players(gm, 7)
-        check("GM view: 1 GM + 6 players, 7 entities",
+        check("GM view: 1 GM + 6 players, 7 tokens (6 players + 1 npc)",
               len(st["players"]) == 7 and len(st["entities"]) == 7)
         p7.close()
     finally:

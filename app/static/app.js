@@ -94,6 +94,7 @@ const state = {
   players: [],
   fog: false,
   selectedEntityId: null,
+  expectCreatedToken: false, // GM "Add" armed: the next state auto-selects the new token
   tool: "select",       // "select" | "floor" | "wall" | "doorway"
   painting: false,
   lastHovered: null,    // last hovered cell (GM entity spawn target)
@@ -187,9 +188,22 @@ function onWelcome(msg) {
   document.title = `LittleDungeons — ${msg.map ? msg.map.name : "no map"}`;
   els.lobbyView.hidden = true;
   applyState(msg);                     // welcome = state + "you"
+  // Sync the selection UI with the assigned selection: players re-assert
+  // their own token; the GM (no entity) ends on "None" with the tools
+  // disabled.
+  selectEntity(state.selectedEntityId);
   showView("map");
-  if (state.role === "gm") toast(`Welcome, ${state.name} — you are the GM.`);
-  else toast(`Welcome, ${state.name}.`);
+  // The GM is a pure controller: welcome copy says so; the player toast is
+  // unchanged. (docs/design/gm-controller.md §3.2)
+  if (state.role === "gm") {
+    toast(`Welcome, ${state.name} — you're the GM. You have no token on the ` +
+          `map: create and move tokens for everyone.`);
+    // First-run canvas hint (one-time): only for a fresh session with no
+    // tokens at all — for 5 s, or until the GM selects or creates a token.
+    if ((msg.entities || []).length === 0) showGmFirstRunHint();
+  } else {
+    toast(`Welcome, ${state.name}.`);
+  }
   updateControlHint();
 }
 
@@ -201,8 +215,18 @@ function applyState(msg) {
   state.grid = { width: msg.map.width, height: msg.map.height,
                  cells: msg.map.cells };
   state.mapName = msg.map.name;
+  // GM "Add" auto-selects the freshly created token (gm-controller spec §3.2/
+  // §3.5): diff the roster against what we had when the create was sent.
+  const expectCreated = state.role === "gm" && state.expectCreatedToken;
+  const prevEntityIds = expectCreated
+    ? new Set(state.entities.map((e) => e.id)) : null;
   state.entities = msg.entities || [];       // [] for players
-  state.youEntity = msg.you_entity || null;  // own character (players only)
+  state.youEntity = msg.you_entity || null;  // own character (players only; GM has none)
+  if (prevEntityIds) {
+    state.expectCreatedToken = false;
+    const fresh = state.entities.find((e) => !prevEntityIds.has(e.id));
+    if (fresh) selectEntity(fresh.id);
+  }
   // BUG-003: the snapshot arrives with each entity at its FINAL position, but
   // if we are mid-animation we keep the token on the cell it's currently
   // showing (the anim advances it one cell per tick and lands on the goal).
@@ -216,8 +240,15 @@ function applyState(msg) {
   state.players = msg.players || [];
   const fogChanged = state.fog !== msg.fog;
   state.fog = !!msg.fog;
+  // The fog toggle is GM-only and stays ENABLED for the GM: fog is applied
+  // server-side per viewer, and the GM is role-exempt — so "on" is a no-op
+  // render-wise for the GM (gm-controller spec §3.6). The title states the
+  // semantics per role.
   els.fogToggle.checked = state.fog;
   els.fogToggle.disabled = state.role !== "gm";
+  els.fogToggle.title = state.role === "gm"
+    ? "Toggle fog of war for players. As GM you always see everything."
+    : "GM controls fog of war";
   document.body.classList.toggle("fog-on", state.fog);
   if (!els.mapView.hidden || mapChanged) {
     if (els.mapView.hidden) els.mapView.hidden = false;
@@ -332,6 +363,27 @@ function canvasHint(message) {
   els.canvasHint.hidden = false;
   clearTimeout(hintTimer);
   hintTimer = setTimeout(() => { els.canvasHint.hidden = true; }, 2000);
+}
+
+// GM first-run hint (one-time, gm-controller spec §3.2): reuses #canvas-hint
+// for 5 s — or until the GM selects or creates a token, whichever comes
+// first. Decorative (kept outside aria-live to avoid double-announcing).
+let gmFirstRunHintShown = false;
+let gmHintTimer = null;
+function showGmFirstRunHint() {
+  if (gmFirstRunHintShown) return;
+  gmFirstRunHintShown = true;
+  els.canvasHint.textContent =
+    "You're the GM — no token of your own. Add tokens in GM Tools, then " +
+    "select one and click a tile to move.";
+  els.canvasHint.hidden = false;
+  clearTimeout(gmHintTimer);
+  gmHintTimer = setTimeout(() => { els.canvasHint.hidden = true; }, 5000);
+}
+function dismissGmFirstRunHint() {
+  if (!gmFirstRunHintShown) return;
+  clearTimeout(gmHintTimer);
+  els.canvasHint.hidden = true;
 }
 
 /* ───────────────────────────── Connection status ───────────────────────────── */
@@ -663,7 +715,7 @@ function renderAll() {
 function drawSidebar() {
   const gm = state.role === "gm";
   els.awarenessTitle.textContent = gm
-    ? "Awareness — GM (sees all)"
+    ? "Tokens — all (GM sees all)"
     : `Awareness — ${state.name}`;
 
   els.awarenessList.innerHTML = "";
@@ -681,9 +733,9 @@ function drawSidebar() {
     else if (item.color === "red") counts.red++;
     const isOwn = state.you && state.you.entity_id
       ? item.entity_id === state.you.entity_id : false;
-    // BUG-006: only a PLAYER's own item is already rendered (the "own" row
-    // block above). For the GM, fall through and render the row normally so
-    // the GM sees its own gm_character (and the summary count matches the list).
+    // BUG-006 (historical): only a PLAYER's own item is already rendered by
+    // the "own" row block above. GM rows: every entity, no own row (the GM
+    // has no entity) — each rendered exactly once.
     if (isOwn && state.role === "player") continue;
     let name = null, meta = null;
     if (gm) {
@@ -697,7 +749,14 @@ function drawSidebar() {
     els.awarenessList.appendChild(li);
   }
 
-  if (!els.awarenessList.children.length) {
+  if (gm && state.awareness.length === 0) {
+    // GM token roster is empty (0 tokens: no players, none created).
+    const li = document.createElement("li");
+    li.className = "awareness-row muted small";
+    li.textContent = "No tokens on the map yet — add the first one in GM Tools.";
+    els.awarenessList.appendChild(li);
+  } else if (!gm && state.awareness.length === 0) {
+    // A player whose radar is empty (their own row, if any, is NOT an "other").
     const li = document.createElement("li");
     li.className = "awareness-row muted small";
     li.textContent = "No one else is out there yet.";
@@ -774,6 +833,7 @@ function entityAtCell(x, y) {
 
 function selectEntity(id) {
   state.selectedEntityId = id;
+  if (id) dismissGmFirstRunHint();  // GM chose a token — hint no longer needed
   els.canvasWrap.classList.toggle("has-selection", !!id);
   const e = state.entities.find((x) => x.id === id);
   els.selEntityName.textContent = e ? `${e.name} (${e.kind})` : (id || "None");
@@ -924,11 +984,18 @@ function updateControlHint() {
   if (!state.joined) return;
   let hint;
   if (state.role === "gm") {
-    hint = state.tool === "select"
-      ? (state.selectedEntityId
-          ? `Pick a destination for ${els.selEntityName.textContent.split(" ")[0]}`
-          : "Click an entity to select it, then a tile")
-      : `Drag on the map to paint ${state.tool}`;
+    if (state.tool === "select") {
+      if (state.selectedEntityId) {
+        hint = `Pick a destination for ${els.selEntityName.textContent.split(" ")[0]}`;
+      } else if (state.entities.length === 0) {
+        // 0-token roster: point the GM at GM Tools (gm-controller spec §3.4a).
+        hint = "No tokens yet — add one in GM Tools.";
+      } else {
+        hint = "Click an entity to select it, then a tile";
+      }
+    } else {
+      hint = `Drag on the map to paint ${state.tool}`;
+    }
   } else {
     hint = "Tap a tile to move your character";
   }
@@ -960,7 +1027,11 @@ els.newEntityName.addEventListener("input", () => {
   syncGmTools();
 });
 
-els.btnNewEntity.addEventListener("click", () => {
+els.btnNewEntity.addEventListener("click", () => createEntity());
+
+// GM "Add": spawn a token at the last hovered walkable tile (else the first
+// free floor) and arm auto-selection so the state broadcast selects it.
+function createEntity() {
   if (state.role !== "gm") return;
   const name = els.newEntityName.value.trim() || "entity";
   const kind = els.newEntityKind.value;
@@ -973,7 +1044,9 @@ els.btnNewEntity.addEventListener("click", () => {
     : firstFreeFloor();
   wsSend({ type: "create_entity", name, kind, team, x: spot.x, y: spot.y });
   els.newEntityName.value = "";
-});
+  state.expectCreatedToken = true;  // the next state selects the new token
+  dismissGmFirstRunHint();
+}
 
 let deleteConfirming = false;
 let deleteTimer = null;
@@ -1002,10 +1075,15 @@ els.teamSelect.addEventListener("change", () => {
            team: els.teamSelect.value });
 });
 
-els.fogToggle.addEventListener("change", () => {
+els.fogToggle.addEventListener("change", () => toggleFog());
+
+// GM fog toggle: GM-only control; "on" filters PLAYERS' snapshots
+// server-side. The GM is role-exempt and always sees everything, so this
+// changes nothing in the GM's own rendered awareness (spec §3.6).
+function toggleFog() {
   if (state.role !== "gm") { els.fogToggle.checked = state.fog; return; }
   wsSend({ type: "set_fog", on: els.fogToggle.checked });
-});
+}
 
 /* Keyboard (wireframes §9): arrows move the selected entity one cell;
    Esc deselects / closes the drawer. */

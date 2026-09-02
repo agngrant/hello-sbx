@@ -147,10 +147,11 @@ function buildApi() {
   const src = fs.readFileSync(APPJS_PATH, "utf8");
   // Re-export the app's top-level functions/state for the Python tests.
   const EXPORTS =
-    ";global.__TAPI__ = { state, els," +
+    ";global.__TAPI__ = { state, els, document," +
     "allEntities, onPath, stopAnim, findEntity, isAnimating," +
     "applyState, onWelcome, onState, onServerMessage, onError," +
     "entityAtCell, drawSidebar, openUploadedMap, sendMove, selectEntity," +
+    "createEntity, toggleFog, canvasHint, showGmFirstRunHint, dismissGmFirstRunHint, updateControlHint," +
     "join, connectWs, setConn, scheduleReconnect, showView, wsSend, wsUrl," +
     "_timer: timer, _send: __SEND }";
   // eslint-disable-next-line no-eval
