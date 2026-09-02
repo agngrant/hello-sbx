@@ -1,0 +1,25 @@
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Bytecode / compiled code
+__pycache__/
+*.pyc
+*.pyo
+*.so
+*.dylib
+
+# JIT-compiled / build intermediates
+.ninja_deps
+.ninja_log
+build/
+dist/
+*.egg-info/
+
+# Caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.cache/
+.DS_Store

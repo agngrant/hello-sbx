@@ -1,0 +1,202 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>LittleDungeons</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+
+  <!-- ══════════════════════════ LOBBY (wireframes §3) ══════════════════════════ -->
+  <section id="lobby-view">
+    <header class="lobby-brand">LITTLEDUNGEONS</header>
+    <div class="lobby-card">
+      <h1>Join a session</h1>
+      <label class="field-label" for="join-name">Name</label>
+      <input id="join-name" type="text" maxlength="24" autocomplete="off"
+             placeholder="Your name" />
+      <div class="lobby-actions">
+        <button id="join-gm" class="btn" disabled>Join as GM</button>
+        <button id="join-player" class="btn" disabled>Join as Player</button>
+      </div>
+      <p id="lobby-note">
+        1 GM + up to 6 players per session.<br />
+        First connection to a new session is the GM automatically.
+      </p>
+      <p id="lobby-status" class="lobby-status" role="status"></p>
+    </div>
+  </section>
+
+  <!-- ══════════════════════════ UPLOAD (GM) — wireframes §7 ══════════════════════════
+       Iteration 3: the form POSTs the chosen file (FileReader → base64) as
+       JSON to /api/maps/upload; the detected grid is registered and
+       previewed, then "Open map in session" switches to the map view.
+       The full before/after paint editor is Iteration 6 polish. -->
+  <section id="upload-view" data-state="idle" hidden>
+    <header class="topbar">
+      <span class="session-title">LITTLEDUNGEONS</span>
+      <span class="topbar-sep">▸</span>
+      <span class="upload-map-title">New map</span>
+      <span class="spacer"></span>
+      <button id="btn-back-top" class="btn btn-small">Back (Esc)</button>
+    </header>
+    <main class="upload-main">
+      <div id="upload-form" class="panel">
+        <h2 class="section-label">Upload map</h2>
+        <label class="field-label" for="upload-name">Map name</label>
+        <input id="upload-name" type="text" maxlength="40" placeholder="The Gilded Crypt" />
+        <label class="field-label" for="upload-file">Image (png / bmp)</label>
+        <input id="upload-file" type="file" accept=".png,.bmp" />
+        <span id="upload-file-name" class="muted small"></span>
+        <div class="upload-grid-size">
+          <label class="field-label" for="upload-cols">Grid size — Cols</label>
+          <input id="upload-cols" type="number" min="8" max="60" placeholder="auto" />
+          <label class="field-label" for="upload-rows">Rows</label>
+          <input id="upload-rows" type="number" min="8" max="60" placeholder="auto" />
+          <label id="dark-is-wall-wrap" class="fog-wrap">
+            <input id="dark-is-wall" type="checkbox" checked />
+            <span>Dark pixels are walls</span>
+          </label>
+        </div>
+        <p id="upload-note" class="muted small" hidden></p>
+        <p class="muted small">
+          PNG or BMP. The server detects walls and doorways automatically;
+          leave cols/rows blank to auto-size (longest edge ≤ 60).
+        </p>
+        <div class="upload-actions">
+          <button id="btn-detect" class="btn btn-primary" disabled>Upload &amp; detect</button>
+        </div>
+      </div>
+      <div id="upload-preview" class="panel" hidden>
+        <h2 class="section-label">Detected map</h2>
+        <div class="upload-preview-panes">
+          <div>
+            <h3 class="section-label">Source</h3>
+            <img id="preview-image" alt="Uploaded source image" />
+          </div>
+          <div>
+            <h3 class="section-label">Detection</h3>
+            <canvas id="preview-canvas" aria-label="Detected grid"></canvas>
+          </div>
+          <div>
+            <h3 class="section-label">Server thumbnail</h3>
+            <img id="preview-thumbnail" alt="Server thumbnail" />
+          </div>
+        </div>
+        <p class="muted small">
+          Note: detection is a suggestion — you are the editor of record.
+          (Side-by-side before/after painting lands in Iteration 6.)
+        </p>
+        <div class="upload-actions">
+          <button id="btn-back" class="btn">Upload another</button>
+          <button id="btn-start-map" class="btn btn-primary">Open map in session</button>
+        </div>
+      </div>
+    </main>
+  </section>
+
+  <!-- ══════════════════════════ MAP VIEW (wireframes §4) ══════════════════════════ -->
+  <section id="map-view" hidden>
+    <header id="topbar" class="topbar">
+      <span id="session-title" class="session-title">LITTLEDUNGEONS</span>
+      <span class="topbar-sep">▸</span>
+      <span id="map-name">—</span>
+      <img id="map-thumbnail" class="map-thumbnail" alt="Map thumbnail" hidden />
+      <span class="spacer"></span>
+      <button id="btn-new-map" class="btn btn-small gm-only" title="Upload a new map (GM)">New map…</button>
+      <label id="fog-wrap" class="fog-wrap" for="fog-toggle">
+        <input id="fog-toggle" type="checkbox" disabled title="GM controls fog of war" />
+        <span>Fog of war</span>
+      </label>
+      <span id="conn-status" role="status">
+        <span id="conn-dot"></span><span id="conn-label">Offline</span>
+      </span>
+      <button id="sidebar-toggle" class="icon-btn" aria-label="Toggle sidebar" aria-expanded="false">☰</button>
+    </header>
+
+    <div id="map-body">
+      <div id="canvas-wrap" class="mode-select">
+        <canvas id="map-canvas" aria-label="Tactical map grid"></canvas>
+
+        <div id="legend">
+          <span class="legend-chip"><i class="swatch floor"></i>floor</span>
+          <span class="legend-chip"><i class="swatch wall"></i>wall</span>
+          <span class="legend-chip"><i class="swatch doorway"></i>doorway</span>
+          <span class="legend-sep">|</span>
+          <span class="legend-chip"><i class="dot dot-tri team-party"></i>friend</span>
+          <span class="legend-chip"><i class="dot dot-circle team-neutral"></i>neutral</span>
+          <span class="legend-chip"><i class="dot dot-square team-hostile"></i>enemy</span>
+        </div>
+
+        <span id="coord-readout" class="muted"></span>
+
+        <div id="canvas-hint" hidden></div>
+
+        <div id="no-map" class="empty-state gm-only" hidden>
+          Waiting for the GM to upload a map…
+        </div>
+
+        <div id="toasts" role="status" aria-live="polite"></div>
+      </div>
+
+      <aside id="sidebar" aria-label="Sidebar">
+        <section id="entity-tools" class="panel gm-only">
+          <h2 class="section-label">GM Tools</h2>
+          <span class="muted small">Selected: <span id="sel-entity-name">None</span></span>
+          <div class="gm-field-row">
+            <span class="muted">Team</span>
+            <select id="team-select" disabled>
+              <option value="party">party</option>
+              <option value="neutral">neutral</option>
+              <option value="hostile">hostile</option>
+            </select>
+            <button id="btn-delete-entity" class="btn btn-danger btn-small" disabled>Delete entity</button>
+          </div>
+          <h3 class="section-label">New entity</h3>
+          <input id="new-entity-name" type="text" maxlength="24" placeholder="Name" />
+          <div class="gm-field-row">
+            <select id="new-entity-kind">
+              <option value="npc">npc</option>
+              <option value="enemy">enemy</option>
+              <option value="gm_character">gm_character</option>
+            </select>
+            <select id="new-entity-team">
+              <option value="party">party</option>
+              <option value="neutral" selected>neutral</option>
+              <option value="hostile">hostile</option>
+            </select>
+            <button id="btn-new-entity" class="btn">Add</button>
+          </div>
+          <p class="muted small">Spawns on the last hovered tile (first free tile if none).</p>
+        </section>
+
+        <section id="awareness" class="panel">
+          <h2 id="awareness-title" class="section-label">Awareness</h2>
+          <ul id="awareness-list" class="awareness-list"></ul>
+          <span id="awareness-summary" class="muted small"></span>
+        </section>
+      </aside>
+    </div>
+
+    <footer id="controls-bar">
+      <div id="paint-group" class="gm-only">
+        <button class="tool-btn" data-tool="select" aria-pressed="true">◉ Select</button>
+        <button class="tool-btn" data-tool="floor" aria-pressed="false">▢ Floor</button>
+        <button class="tool-btn" data-tool="wall" aria-pressed="false">▨ Wall</button>
+        <button class="tool-btn" data-tool="doorway" aria-pressed="false">▣ Door</button>
+      </div>
+      <label id="override-wrap" class="gm-only" for="override-toggle">
+        <input id="override-toggle" type="checkbox" disabled
+               title="GM only. Move directly to the target, ignoring walls." />
+        <span>Ignore walls</span>
+      </label>
+      <span id="control-hint" class="muted"></span>
+    </footer>
+
+    <div id="scrim" hidden></div>
+  </section>
+
+  <script src="app.js"></script>
+</body>
+</html>

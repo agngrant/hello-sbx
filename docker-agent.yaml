@@ -1,0 +1,49 @@
+providers:
+  eidf:
+    base_url: https://elementary.eidf.ac.uk/api
+    token_key: OPENAI_API_KEY
+
+models:
+  qwen:
+    provider: eidf
+    model: qwen3.8-27b
+
+agents:
+  root:
+    model: qwen
+    description: Product Manager - Leads the development team
+    instruction: |
+      Break user requirements into small iterations. Coordinate designer → frontend → QA.
+    sub_agents: [designer, awesome_engineer, qa]
+    toolsets:
+      - type: filesystem
+      - type: think
+      - type: todo
+
+  designer:
+    model: qwen
+    description: UI/UX Designer - Creates designs and wireframes
+    instruction: |
+      Create wireframes and mockups for features. Ensure responsive designs.
+    toolsets:
+      - type: filesystem
+      - type: think
+
+  awesome_engineer:
+    model: qwen
+    description: Developer - Implements features
+    instruction: |
+      Build features based on designs. Write clean, tested code.
+    toolsets:
+      - type: filesystem
+      - type: shell
+      - type: think
+
+  qa:
+    model: qwen
+    description: QA Specialist - Tests and identifies bugs
+    instruction: |
+      Test features and identify bugs. Report issues to fixer.
+    toolsets:
+      - type: filesystem
+      - type: think
