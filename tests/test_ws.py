@@ -4,8 +4,10 @@ The RFC 6455 handshake is still validated against the published
 ``Sec-WebSocket-Accept`` vectors and live (the test client re-derives the
 accept value from its own key).
 
-The message-loop tests now drive the REAL session protocol
-(``app.session.GameSession`` over ``app.ws.ws_serve``): the Iteration-1
+The message-loop tests drive the REAL session protocol
+(``app.session.GameSession`` over the FastAPI/uvicorn server in
+``app/server.py`` — the hand-rolled ``app.ws.ws_serve`` loop is gone,
+uvicorn + ``websockets`` now own the frames): the Iteration-1
 echo stub is gone — a non-join message now yields an error, the first
 ``join`` yields the per-viewer ``welcome``, and every mutation is
 broadcast as per-viewer ``state`` (+ a ``path`` frame for successful
@@ -22,8 +24,8 @@ import unittest
 
 os.environ.setdefault("LITTLEDUNGEONS_QUIET_LOGS", "1")
 
-from app.main import LittleDungeonsHandler, ThreadingHTTPServer
-from app.ws import compute_accept, ws_serve, client_send_text, client_recv_text
+from app.server import ThreadingHTTPServer
+from app.ws import compute_accept
 from tests.wsclient import WSClient, WSClientError
 
 # Sample-dungeon coordinates (app/grid.py): the GM has NO token on the map
@@ -66,7 +68,7 @@ class TestWebSocketServer(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        cls.httpd = ThreadingHTTPServer(("127.0.0.1", 0), LittleDungeonsHandler)
+        cls.httpd = ThreadingHTTPServer(("127.0.0.1", 0), None)
         cls.httpd.daemon_threads = True
         cls.httpd.handle_error = lambda *a, **k: None  # quiet test server
         cls.host, cls.port = cls.httpd.server_address[:2]
@@ -348,7 +350,8 @@ class TestWebSocketServer(unittest.TestCase):
             ent = next(e for e in st["entities"] if e["id"] == npc_ent_id)
             self.assertEqual((ent["x"], ent["y"]), (2, 1))
             # now with override → teleports straight through the wall, and the
-            # player client sees the new position (a white neutral dot).
+            # player client sees the new position as a FULL contact (clear
+            # LOS from (1,1) down the open left room): labeled, named, white.
             gm.send_json({"type": "move", "entity_id": npc_ent_id, "x": 5, "y": 3,
                           "override": True})
             reply = gm.recv_json()
@@ -359,6 +362,9 @@ class TestWebSocketServer(unittest.TestCase):
             item = next(i for i in st2["awareness"] if i["entity_id"] == npc_ent_id)
             self.assertEqual((item["x"], item["y"]), (5, 3))
             self.assertEqual(item["color"], "white")  # neutral npc
+            self.assertTrue(item["label"])
+            self.assertEqual(item["name"], "Grom")
+            self.assertIn("kind", item)
             gm.send_json({"type": "request_state"})
             st3 = gm.recv_json()
             ent = next(e for e in st3["entities"] if e["id"] == npc_ent_id)
@@ -368,9 +374,11 @@ class TestWebSocketServer(unittest.TestCase):
             pl.close()
 
     def test_awareness_differs_per_client(self):
-        """GM: full labeled list of every token (the GM has none of its own).
-        Player: dots only (no names), self excluded, and NO dot for the GM —
-        with GM + 2 players + 1 enemy the player sees exactly 2 dots."""
+        """GM: full labeled list of every token (the GM has none of its own)
+        — with GM + 2 players + 1 enemy the GM sees all 3.  Player: the
+        three-tier model — Alice (1,1) sees Bob (2,1) as a FULL, labeled,
+        named item (clear LOS), while Vex (12,9) is neither within 4
+        squares nor in sight, so it is ABSENT (invisible tier)."""
         sid = self.session_id()
         gm = self.client(sid).connect()
         alice = self.client(sid).connect()
@@ -383,7 +391,7 @@ class TestWebSocketServer(unittest.TestCase):
             self.assertEqual(gm.recv_json()["type"], "state")
             self.assertEqual(gm.recv_json()["type"], "state")
             self.assertEqual(alice.recv_json()["type"], "state")
-            # The GM creates a hostile enemy → the session has 3 tokens.
+            # The GM creates a hostile enemy at (12,9) → 3 tokens total.
             gm.send_json({"type": "create_entity", "name": "Vex",
                           "kind": "enemy", "team": "hostile", "x": 12, "y": 9})
             frames = gm.frames_until(lambda m: m["type"] == "state")
@@ -391,7 +399,8 @@ class TestWebSocketServer(unittest.TestCase):
             alice.recv_json()  # the create broadcast reached Alice too
             alice.send_json({"type": "request_state"})
             st_al = alice.recv_json()
-            # GM: every token listed + labeled awareness of every token.
+            # GM: every token listed + labeled awareness of every token —
+            # NO distance/LOS filtering, even Vex 11 squares away.
             self.assertEqual(len(st_gm["entities"]), 3)
             self.assertEqual(len(st_gm["awareness"]), 3)
             for item in st_gm["awareness"]:
@@ -402,18 +411,25 @@ class TestWebSocketServer(unittest.TestCase):
                 "gm_character",
                 [e["kind"] for e in st_gm["entities"]],
             )
-            # Alice: no entity list; awareness is EXACTLY 2 dots — Bob (green)
-            # and Vex (red) — no self, no GM dot, no labels.
+            # Alice: no entity list; awareness is EXACTLY one item — Bob,
+            # FULL (line of sight): green, labeled, named.  Vex is beyond
+            # 4 squares and has no LOS → it does NOT appear at all.
             self.assertEqual(st_al["entities"], [])
-            self.assertEqual(len(st_al["awareness"]), 2)
-            by_id = {i["entity_id"]: i for i in st_al["awareness"]}
+            self.assertEqual(len(st_al["awareness"]), 1)
+            bob_item = st_al["awareness"][0]
+            self.assertEqual(bob_item["entity_id"], wb["you"]["entity_id"])
+            self.assertEqual(bob_item["color"], "green")
+            self.assertTrue(bob_item["label"])
+            self.assertEqual(bob_item["name"], "Bob")
+            self.assertEqual((bob_item["x"], bob_item["y"]), (2, 1))
+            self.assertNotIn("approximate", bob_item)
             # (Alice's OWN token e1 is excluded from her awareness.)
-            self.assertEqual(by_id[wb["you"]["entity_id"]]["color"], "green")  # Bob
-            self.assertEqual(by_id[next(e["id"] for e in st_gm["entities"]
-                                        if e["kind"] == "enemy")]["color"], "red")
-            for item in st_al["awareness"]:
-                self.assertFalse(item["label"])
-                self.assertNotIn("name", item)
+            self.assertNotIn(wa["you"]["entity_id"],
+                             [i["entity_id"] for i in st_al["awareness"]])
+            self.assertNotIn(
+                next(e["id"] for e in st_gm["entities"] if e["kind"] == "enemy"),
+                [i["entity_id"] for i in st_al["awareness"]],
+            )
             # and the player's own character rides along as you_entity
             self.assertEqual(st_al["you_entity"]["id"], wa["you"]["entity_id"])
         finally:
@@ -461,7 +477,7 @@ class TestWebSocketServer(unittest.TestCase):
 class TestWsClientErrors(unittest.TestCase):
     def test_bad_path_rejected(self):
         """A non-upgrade GET must NOT be treated as a WebSocket."""
-        httpd = ThreadingHTTPServer(("127.0.0.1", 0), LittleDungeonsHandler)
+        httpd = ThreadingHTTPServer(("127.0.0.1", 0), None)
         httpd.daemon_threads = True
         httpd.handle_error = lambda *a, **k: None
         host, port = httpd.server_address[:2]
@@ -481,105 +497,111 @@ class TestWsClientErrors(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# BUG-005: the per-client reply must be sent under the per-connection send
-# lock (the same one _broadcast uses) so it can never interleave with a
-# concurrent broadcast to the same socket.
+# BUG-005 (re-architected for the async stack): a per-client REPLY must
+# never interleave/corrupt a concurrent broadcast on the same connection.
+#
+# The old implementation instrumented the hand-rolled ws_serve loop and the
+# per-connection send lock (``GameSession._send_lock_for``); that plumbing is
+# gone. In the new architecture (FastAPI/uvicorn + websockets) serialisation
+# is guaranteed BY CONSTRUCTION: every send on a connection — broadcast
+# frames (scheduled by the session) and per-client replies (sent by the WS
+# endpoint) — is an ``await websocket.send_text(...)`` on the SAME event
+# loop, and each websockets connection has a single outbound writer, so two
+# sends can never interleave bytes on the socket. This test pins the same
+# OBSERVABLE behaviour at the wire level: a no-route per-client REPLY must
+# arrive intact (complete, parseable JSON, correct content) while a flood of
+# concurrent BROADCAST frames (paint mutations) is in flight on the very
+# same connection.
 # ---------------------------------------------------------------------------
 
 
-class TestWsServeReplyUnderSendLock(unittest.TestCase):
-    """BUG-005: the per-client REPLY the ws_serve loop sends back must go out
-    under the per-connection send lock (the same one _broadcast uses), so it
-    can never interleave with a concurrent broadcast on the same socket.
+class TestWsReplyVsBroadcastFrameIntegrity(unittest.TestCase):
+    """BUG-005 (new architecture): race a per-client reply against concurrent
+    broadcasts on the same connection; assert wire-level frame integrity.
 
-    We run the REAL app server (main.py wires ws_serve with
-    lock_for=session._send_lock_for), then instrument:
-      * ``GameSession._send_lock_for`` returns a *recording* lock that tracks
-        whether it is currently held;
-      * ``app.ws.send_json`` records, for every frame it writes, whether that
-        lock was held at that instant.
-    After the client receives a per-client REPLY (a rejected move), we assert
-    that the reply frame was written while the lock was held. Under the old
-    unlocked-reply bug that frame would be written while the lock was free.
+    Runs the REAL app server (uvicorn/websockets via the ThreadingHTTPServer
+    adapter), joins as GM, creates a token, then, in a tight loop:
+
+      1. fires ``move`` into a wall with no override → the per-client REPLY
+         ``{type:error, message:"no route — wall in the way"}`` (sent by the
+         WS endpoint, not a broadcast), and
+      2. immediately fires ``paint`` → a BROADCAST (path-free state snapshot
+         to every connection, i.e. this one).
+
+    while draining frames off the raw socket. Every frame in the window must
+    parse as a COMPLETE JSON object (no torn/interleaved frames), the no-route
+    reply must arrive in all 8 rounds, and at least one broadcast ``state``
+    must be observed interleaved in the window (proving the broadcast was
+    genuinely in flight while replies were being sent). Under the old
+    unlocked-reply bug a reply could interleave with a broadcast mid-frame
+    and corrupt one of them.
     """
 
-    class RecordingLock:
-        def __init__(self):
-            self._l = threading.Lock()
-            self.held = False
-
-        def acquire(self, *a, **k):
-            got = self._l.acquire(*a, **k)
-            if got:
-                self.held = True
-            return got
-
-        def release(self, *a, **k):
-            self._l.release(*a, **k)
-            self.held = False
-
-        def __enter__(self):
-            self.acquire()
-            return self
-
-        def __exit__(self, *exc):
-            self.release()
-            return False
-
-    def test_reply_written_under_send_lock(self):
-        from app.session import GameSession
-        import app.ws as ws_mod
-
-        rec = self.RecordingLock()
-        frames = []  # (obj, held_flag)
-        real_send_json = ws_mod.send_json
-        real_send_lock_for = GameSession._send_lock_for
-
-        def rec_send_json(sock, obj, mask=None):
-            frames.append((obj, rec.held))
-            return real_send_json(sock, obj, mask=mask)
-
-        def rec_send_lock_for(self, sock):
-            return rec  # every send for this session shares the recording lock
-
-        ws_mod.send_json = rec_send_json
-        GameSession._send_lock_for = rec_send_lock_for
-        httpd = ThreadingHTTPServer(("127.0.0.1", 0), LittleDungeonsHandler)
+    def test_reply_does_not_interleave_concurrent_broadcasts(self):
+        httpd = ThreadingHTTPServer(("127.0.0.1", 0), None)
         httpd.daemon_threads = True
         httpd.handle_error = lambda *a, **k: None
         host, port = httpd.server_address[:2]
         threading.Thread(target=httpd.serve_forever, daemon=True).start()
         try:
-            c = WSClient(host, port, path="/ws?session=locktest", timeout=10).connect()
+            c = WSClient(host, port, path="/ws?session=frame-integrity",
+                         timeout=10).connect()
             welcome = c.join("Gamer", "gm")
             self.assertIsNone(welcome["you"]["entity_id"])  # GM has no token
             # The GM creates a token to drive (it has no own entity).
             c.send_json({"type": "create_entity", "name": "Grom",
                          "kind": "npc", "team": "neutral", "x": 1, "y": 1})
             state = c.frames_until(lambda m: m["type"] == "state")[-1]
-            ent_id = next(e["id"] for e in state["entities"] if e["name"] == "Grom")
-            # Trigger a per-client REPLY: move the token into a wall with
-            # no override -> {type:error, message:"no route — wall in the way"}
-            # sent back via the ws_serve reply path (NOT a broadcast).
-            c.send_json({"type": "move", "entity_id": ent_id, "x": 5, "y": 3})
-            reply = c.recv_json()
-            self.assertEqual(reply, {"type": "error",
-                                     "message": "no route — wall in the way"})
-            # Find the recorded frame matching the reply and assert it was
-            # written while the per-connection send lock was HELD.
-            reply_frames = [held for obj, held in frames
-                            if isinstance(obj, dict)
-                            and obj.get("type") == "error"
-                            and obj.get("message") == "no route — wall in the way"]
-            self.assertTrue(reply_frames,
-                            "the reply frame was not observed on the socket")
-            self.assertTrue(all(reply_frames),
-                            "BUG-005: the per-client reply was written OUTSIDE "
-                            "the per-connection send lock")
+            ent_id = next(e["id"] for e in state["entities"]
+                          if e["name"] == "Grom")
+            expected_reply = {"type": "error",
+                              "message": "no route — wall in the way"}
+            # (2,2)/(3,2) are open floor cells; (5,3) is a wall.
+            paint_cells = [(2, 2), (3, 2)]
+            seen_replies = 0
+            seen_broadcast_states = 0
+            parsed = 0
+            window_frames = 0
+            for round_no in range(8):
+                # REPLY trigger: move into a wall, no override → no-route
+                # error REPLY (per-client, not a broadcast).
+                c.send_json({"type": "move", "entity_id": ent_id,
+                             "x": 5, "y": 3})
+                # BROADCAST trigger: a paint → a state snapshot broadcast
+                # to this same connection while the reply is in flight.
+                px, py = paint_cells[round_no % len(paint_cells)]
+                c.send_json({"type": "paint", "x": px, "y": py,
+                             "cell_type": "floor"})
+                # Drain the window until this round's reply arrives.
+                got_reply = False
+                for _ in range(20):
+                    frame = c.recv_json()  # raises (≠ torn) if bytes corrupt
+                    parsed += 1
+                    window_frames += 1
+                    if frame == expected_reply:
+                        got_reply = True
+                        break
+                    if frame.get("type") == "state":
+                        seen_broadcast_states += 1
+                self.assertTrue(
+                    got_reply,
+                    f"round {round_no}: the no-route per-client reply "
+                    "never arrived in the window",
+                )
+                seen_replies += 1
+            self.assertEqual(seen_replies, 8)
+            self.assertGreater(
+                parsed, 8,
+                "expected concurrent broadcast frames in the window",
+            )
+            self.assertGreater(
+                seen_broadcast_states, 0,
+                "no broadcast state observed while replies were in flight — "
+                "the race is not actually racing",
+            )
+            self.assertGreaterEqual(window_frames, parsed)
             c.close()
         finally:
-            ws_mod.send_json = real_send_json
-            GameSession._send_lock_for = real_send_lock_for
             httpd.shutdown()
             httpd.server_close()
 

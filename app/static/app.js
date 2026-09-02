@@ -431,6 +431,7 @@ const T = {
   ally: "#2f9e44",
   neutralDot: "#f1f3f5",
   enemy: "#e03131",
+  unknownDot: "#9aa3b5", // approximate contact (no identity: gray "?")
   dotStroke: "#1c2130",
 };
 
@@ -580,17 +581,37 @@ function drawEntitiesAndDots(ctx, s, ox, oy) {
     });
   }
 
-  // Awareness dots (on top). For the GM these mark team color on the tokens;
-  // for players they ARE the view of every other entity (no names).
+  // Awareness items (on top). For the GM these mark team color on the
+  // tokens; for players they ARE the view of every other entity, in three
+  // states (server decides per tier):
+  //   FULL — line of sight: colored token + NAME LABEL + shape marker
+  //          (players now see labels, reusing the GM label rendering);
+  //   APPROXIMATE — no line of sight, within 4 squares: a faint gray "?"
+  //          at the coarse 2×2 block (no name, no color, no identity);
+  //   INVISIBLE — beyond that: the item is simply absent; render nothing.
   const ownId = state.you ? state.you.entity_id : null;
   for (const item of state.awareness) {
-    const shape = item.color === "green" ? "tri" : item.color === "white" ? "circle" : "square";
     if (state.role === "gm") {
+      const shape = item.color === "green" ? "tri" : item.color === "white" ? "circle" : "square";
       drawDot(ctx, ox + item.x * s + s * 0.78, oy + item.y * s + s * 0.22,
               s * 0.16, shape, item.color, 1);
+    } else if (item.approximate) {
+      // Unknown contact: a coarse block, no identity (name/color/team).
+      // item.x/item.y is the block's ORIGIN cell; the marker sits at the
+      // block's center.
+      drawUnknownDot(ctx, ox + (item.x * 2) * s, oy + (item.y * 2) * s, s);
     } else if (item.entity_id !== ownId) {
-      drawDot(ctx, ox + item.x * s + s / 2, oy + item.y * s + s / 2,
-              s * 0.28, shape, item.color, 1.5);
+      // Full contact (line of sight): colored token + name label +
+      // colorblind shape marker (triangle friend / circle neutral /
+      // square enemy), reusing the GM label rendering.
+      const colorCss = item.color === "green" ? T.ally
+        : item.color === "white" ? T.neutralDot : T.enemy;
+      drawToken(ctx,
+        { x: item.x, y: item.y, name: item.name || "?", color: colorCss },
+        ox, oy, s, { label: item.label !== false });
+      const shape = item.color === "green" ? "tri" : item.color === "white" ? "circle" : "square";
+      drawDot(ctx, ox + item.x * s + s * 0.78, oy + item.y * s + s * 0.22,
+              s * 0.16, shape, colorCss, 1);
     }
     // (own entity's awareness item never appears — server excludes it)
   }
@@ -691,6 +712,38 @@ function drawDot(ctx, cx, cy, size, shape, colorCss, strokeW) {
   ctx.restore();
 }
 
+/* An APPROXIMATE awareness contact: NO identity — a faint gray "?" circle
+   at the CENTER of the coarse 2×2 block the server reports (plus a subtle
+   dashed outline of that block).  (qx, qy) is the block's ORIGIN cell, so
+   the block spans (qx*2..qx*2+1, qy*2..qy*2+1). */
+function drawUnknownDot(ctx, bx, by, s) {
+  const cx = bx + s; // center of the 2x2 block
+  const cy = by + s;
+  const r = Math.max(4, s * 0.3);
+  ctx.save();
+  // Subtle dashed outline: the reported AREA, not an exact cell.
+  ctx.strokeStyle = "rgba(154, 163, 181, 0.45)";
+  ctx.setLineDash([Math.max(3, s * 0.15), Math.max(3, s * 0.15)]);
+  ctx.lineWidth = 1;
+  ctx.strokeRect(bx + 1, by + 1, s * 2 - 2, s * 2 - 2);
+  ctx.setLineDash([]);
+  // Faint muted marker.
+  ctx.globalAlpha = 0.85;
+  ctx.fillStyle = T.unknownDot;
+  ctx.strokeStyle = T.dotStroke;
+  ctx.lineWidth = 1.5;
+  ctx.beginPath();
+  ctx.arc(cx, cy, r, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.stroke();
+  ctx.fillStyle = T.dotStroke;
+  ctx.font = `700 ${Math.max(9, s * 0.42)}px system-ui, sans-serif`;
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  ctx.fillText("?", cx, cy + 0.5);
+  ctx.restore();
+}
+
 function roundRect(ctx, x, y, w, h, r) {
   ctx.beginPath();
   ctx.moveTo(x + r, y);
@@ -737,11 +790,24 @@ function drawSidebar() {
     // the "own" row block above. GM rows: every entity, no own row (the GM
     // has no entity) — each rendered exactly once.
     if (isOwn && state.role === "player") continue;
+    if (item.approximate) {
+      // Unknown contact: no name, no color, no kind — a coarse block only.
+      const li = awarenessRow(
+        { id: item.entity_id, x: item.x, y: item.y },
+        "approximate", false, "Unknown", "approximate");
+      els.awarenessList.appendChild(li);
+      continue;
+    }
     let name = null, meta = null;
     if (gm) {
       const e = allEntities().find((x) => x.id === item.entity_id);
       name = item.name || (e ? e.name : null);
       meta = e ? `${e.kind}·${e.team}` : null;
+    } else {
+      // Full contact (line of sight): the item itself now carries the
+      // name + kind (the server sends them) — players see labeled entries.
+      name = item.name || null;
+      meta = item.kind ? item.kind : null;
     }
     const li = awarenessRow(
       { id: item.entity_id, x: item.x, y: item.y },
@@ -762,8 +828,10 @@ function drawSidebar() {
     li.textContent = "No one else is out there yet.";
     els.awarenessList.appendChild(li);
   }
+  const unseen = state.awareness.filter((i) => i.approximate).length;
   els.awarenessSummary.textContent =
-    `${counts.green} ally · ${counts.white} neutral · ${counts.red} enemy`;
+    `${counts.green} ally · ${counts.white} neutral · ${counts.red} enemy` +
+    (unseen ? ` · ${unseen} unseen` : "");
 }
 
 function awarenessRow(ent, color, own, name = null, meta = null) {
@@ -773,9 +841,14 @@ function awarenessRow(ent, color, own, name = null, meta = null) {
   li.tabIndex = 0;
 
   const dot = document.createElement("span");
-  const shape = color === "green" ? "tri" : color === "white" ? "circle" : "square";
-  dot.className = `dot dot-${shape} team-${color === "green" ? "party"
-    : color === "white" ? "neutral" : "hostile"}` + (own ? " dot-own" : "");
+  if (color === "approximate") {
+    // Unknown contact: a distinct muted "?" chip (no team color/shape).
+    dot.className = "dot dot-approx";
+  } else {
+    const shape = color === "green" ? "tri" : color === "white" ? "circle" : "square";
+    dot.className = `dot dot-${shape} team-${color === "green" ? "party"
+      : color === "white" ? "neutral" : "hostile"}` + (own ? " dot-own" : "");
+  }
   li.appendChild(dot);
 
   const nameEl = document.createElement("span");

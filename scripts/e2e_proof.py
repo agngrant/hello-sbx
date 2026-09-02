@@ -3,22 +3,32 @@
 
 Every successful move broadcasts a ``path`` frame to ALL clients (sender
 included) followed by each client's per-viewer ``state`` snapshot. Joins
-announce a ``state`` to everyone already present. This script drives the
-real server + the test WS client through a full scenario and prints a check
-per behaviour:
+announce a ``state`` to everyone already present.
+
+Player visibility is the THREE-TIER model (§5): an entity in direct line of
+sight is FULL (exact position + color + name + label); an entity without
+line of sight but within 4 squares is APPROXIMATE (a coarse quantized
+block, no identity); everything else is ABSENT. The GM is never filtered.
+
+This script drives the real server + the test WS client through a full
+scenario and prints a check per behaviour:
 
   1. GM + 2 players join (1 GM + 2 of the 6 allowed players). The GM has NO
      token: it starts with 0 entities; the first player spawns at (1,1).
-  2. Alice moves herself (1,1)->(5,5) through the doorway: SUCCESS.
+  2. Alice moves herself (1,1)->(5,5) through the doorway: SUCCESS. Bob
+     sees her as a FULL contact (line of sight: labeled, named, green).
   3. GM creates a neutral npc at (1,1) and moves it (1,1)->(5,3) (a wall)
      WITHOUT override: REJECTED ("no route — wall in the way"), position
      unchanged.
   4. GM retries with override:true: TELEPORTS through the wall; Alice sees
-     it (white dot, fog still off).
-  5. GM paints a wall at (4,3) + turns fog ON: Bob (2,1) keeps the npc
-     (clear diagonal LOS) but Alice (5,5) is hidden; Alice (5,5) keeps Bob
-     (clear LOS) but the npc (5,3) is hidden behind the col-5 wall; the GM
-     (never fogged) sees all. Per-player awareness differs.
+     it as an APPROXIMATE contact (no LOS past the col-5 wall, within 4
+     squares: gray "?" block, no name) — the old white-dot radar is gone.
+  5. THREE-TIER PROOF: GM paints a wall at (4,2) and a second npc spawns
+     at (12,2). From Alice (5,5): Bob (2,1) is FULL (clear LOS), Grom
+     (5,3) is APPROXIMATE (blocked by the col-5 wall, within 4 squares),
+     the far npc is ABSENT (beyond 4 squares). From Bob (2,1): Alice
+     FULL, Grom APPROXIMATE (new wall (4,2)), far npc ABSENT. The GM (never
+     filtered) sees all four, full + labeled.
   6. NEW MAP: GM uploads an RGB map and sends `use_map` — the SAME session
      swaps to the new grid and re-broadcasts; the players stay in the session
      (not stranded) and the GM's grid object is shared with the registry so
@@ -38,7 +48,7 @@ import threading
 os.environ.setdefault("LITTLEDUNGEONS_QUIET_LOGS", "1")
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from app.main import LittleDungeonsHandler, ThreadingHTTPServer
+from app.server import ThreadingHTTPServer
 from tests.wsclient import WSClient
 
 PASS = "\u2713"
@@ -72,7 +82,7 @@ def state_until_n_players(client, n, limit=50):
 
 
 def main():
-    httpd = ThreadingHTTPServer(("127.0.0.1", 0), LittleDungeonsHandler)
+    httpd = ThreadingHTTPServer(("127.0.0.1", 0), None)
     httpd.daemon_threads = True
     httpd.handle_error = lambda *a, **k: None
     host, port = httpd.server_address[:2]
@@ -144,18 +154,24 @@ def main():
         bob.recv_json()                                  # bob's path
         f3 = bob.recv_json()                             # bob's state
         bitem = next(i for i in f3["awareness"] if i["entity_id"] == al_ent)
-        check("Bob's awareness: Alice is a GREEN dot at (5,5), unlabeled",
-              bitem["color"] == "green" and bitem["label"] is False
-              and (bitem["x"], bitem["y"]) == (5, 5))
-        check("Bob's awareness has NO names (dots only)",
-              all("name" not in i for i in f3["awareness"]))
+        # Three-tier model: Alice is in Bob's line of sight (clear diagonal
+        # from (2,1) over the open floor) → FULL: labeled + named, green.
+        check("Bob's awareness: Alice FULL at (5,5) (LOS, labeled, named)",
+              bitem["color"] == "green" and bitem["label"] is True
+              and bitem.get("name") == "Alice" and "kind" in bitem
+              and (bitem["x"], bitem["y"]) == (5, 5)
+              and not bitem.get("approximate"))
         f4 = alice.recv_json()                           # alice's state
         check("Alice's you_entity now at (5,5)",
               f4["you_entity"]["x"] == 5 and f4["you_entity"]["y"] == 5)
-        # The GM has no token, so Alice's radar holds exactly one dot: Bob.
-        check("Alice's awareness: Bob=green, no self, no GM dot",
-              {i["entity_id"]: i["color"] for i in f4["awareness"]}
-              == {bo_ent: "green"})
+        # The GM has no token, so Alice's awareness holds exactly one item:
+        # Bob (2,1), clear LOS → FULL (green, labeled, named).
+        check("Alice's awareness: exactly Bob, FULL (green, labeled, named)",
+              len(f4["awareness"]) == 1
+              and f4["awareness"][0]["entity_id"] == bo_ent
+              and f4["awareness"][0]["color"] == "green"
+              and f4["awareness"][0]["label"] is True
+              and f4["awareness"][0].get("name") == "Bob")
 
         # 3. GM creates a neutral npc, then moves it into a wall ------------
         print("\n[3] GM creates neutral npc at (1,1), moves it "
@@ -193,40 +209,88 @@ def main():
         check("npc teleported to (5,3)", (ent["x"], ent["y"]) == (5, 3))
         alice.recv_json()                                # alice's path
         f = alice.recv_json()                            # alice's state
-        item = next(i for i in f["awareness"] if i["entity_id"] == npc_ent)
-        check("Alice's awareness: npc white at (5,3) (fog still off)",
-              item["color"] == "white" and (item["x"], item["y"]) == (5, 3))
+        item = next((i for i in f["awareness"] if i.get("approximate")), None)
+        # Three-tier model: (5,3) is behind the col-5 wall from Alice (5,5)
+        # → NO line of sight, but within 4 squares → APPROXIMATE: a coarse
+        # quantized block (5,3)//2 = (2,1), with NO identity at all.
+        check("Alice's awareness: npc APPROXIMATE at block (2,1), no identity",
+              item is not None
+              and item["approximate"] is True
+              and (item["x"], item["y"]) == (2, 1)
+              and "name" not in item and "color" not in item
+              and "kind" not in item and "team" not in item
+              and item["entity_id"] != npc_ent)
         bob.recv_json(); bob.recv_json()                 # drain bob path+state
 
-        # 5. fog of war ------------------------------------------------------
-        print("\n[5] fog: GM paints wall (4,3) + fog ON")
-        gm.send_json({"type": "paint", "x": 4, "y": 3, "cell_type": "wall"})
+        # 5. THREE-TIER visibility proof ------------------------------------
+        # GM paints a wall at (4,2) (a real cell change: it blocks Bob's LOS
+        # to Grom) and a second, FAR npc spawns at (12,2). From each player
+        # the three tiers must be visible simultaneously in the awareness
+        # array; the GM is never filtered. The fog flag is retained in the
+        # payloads for wire compatibility but no longer gates anything.
+        print("\n[5] three tiers: wall (4,2) + far npc (12,2)")
+        gm.send_json({"type": "paint", "x": 4, "y": 2, "cell_type": "wall"})
         for c in (gm, alice, bob):
             c.recv_json()                                # paint state
-        gm.send_json({"type": "set_fog", "on": True})
-        for c in (gm, alice, bob):
-            c.recv_json()                                # fog state
+        gm.send_json({"type": "create_entity", "name": "Wraith",
+                      "kind": "npc", "team": "neutral", "x": 12, "y": 2})
+        st = state_until(gm)
+        wraith_ent = next(e["id"] for e in st["entities"] if e["name"] == "Wraith")
+        alice.recv_json(); bob.recv_json()               # create broadcasts
         gm.send_json({"type": "request_state"})
         alice.send_json({"type": "request_state"})
         bob.send_json({"type": "request_state"})
         st_gm, st_al, st_bo = gm.recv_json(), alice.recv_json(), bob.recv_json()
-        check("fog flag broadcast", st_gm["fog"] is True)
-        gm_ids = {i["entity_id"] for i in st_gm["awareness"]}
-        check("GM is NEVER fogged (sees all 3, labeled)",
-              gm_ids == {npc_ent, al_ent, bo_ent}
-              and all(i["label"] for i in st_gm["awareness"]))
-        al_ids = {i["entity_id"] for i in st_al["awareness"]}
-        check("Alice (5,5) fog: Bob (2,1) clear LOS -> visible",
-              bo_ent in al_ids)
-        check("Alice (5,5) fog: npc (5,3) behind the col-5 wall -> hidden",
-              npc_ent not in al_ids)
-        bo_ids = {i["entity_id"] for i in st_bo["awareness"]}
-        check("Bob (2,1) fog: npc (5,3) clear LOS -> visible",
-              npc_ent in bo_ids)
-        check("Bob (2,1) fog: Alice (5,5) blocked by (4,3) wall -> hidden",
-              al_ent not in bo_ids)
-        check("Bob's fogged awareness still dots only",
-              all(i["label"] is False for i in st_bo["awareness"]))
+        check("fog flag still present in payloads (wire compat)",
+              "fog" in st_gm and "fog" in st_al and "fog" in st_bo)
+        # --- GM: never filtered — all four, FULL + labeled. ----------------
+        gm_items = st_gm["awareness"]
+        gm_ids = {i["entity_id"] for i in gm_items}
+        check("GM sees ALL 4 entities, FULL + labeled (never filtered)",
+              gm_ids == {npc_ent, al_ent, bo_ent, wraith_ent}
+              and all(i["label"] and "name" in i and "kind" in i
+                      for i in gm_items))
+        # --- Alice (5,5): FULL (Bob) / APPROX (Grom) / ABSENT (Wraith). ----
+        al_items = st_al["awareness"]
+        check("Alice: exactly 2 items (1 full + 1 approximate)",
+              len(al_items) == 2
+              and sum(1 for i in al_items if not i.get("approximate")) == 1
+              and sum(1 for i in al_items if i.get("approximate")) == 1,
+              json.dumps(al_items))
+        al_bob = next((i for i in al_items if i["entity_id"] == bo_ent), None)
+        check("Alice (5,5): Bob (2,1) clear LOS -> FULL (labeled, named, green)",
+              al_bob is not None
+              and al_bob.get("label") is True and al_bob.get("name") == "Bob"
+              and al_bob["color"] == "green" and (al_bob["x"], al_bob["y"]) == (2, 1))
+        al_grom = next((i for i in al_items if i.get("approximate")), None)
+        check("Alice (5,5): Grom (5,3) behind col-5 wall -> APPROXIMATE (gray block, no name)",
+              al_grom is not None
+              and (al_grom["x"], al_grom["y"]) == (2, 1)     # (5,3)//2 block
+              and al_grom.get("approximate") is True
+              and al_grom.get("label") is False
+              and "name" not in al_grom and "color" not in al_grom
+              and "kind" not in al_grom
+              and al_grom["entity_id"] != npc_ent)
+        check("Alice (5,5): Wraith (12,2) beyond 4 squares -> ABSENT",
+              wraith_ent not in {i["entity_id"] for i in al_items})
+        # --- Bob (2,1): FULL (Alice) / APPROX (Grom) / ABSENT (Wraith). ----
+        bo_items = st_bo["awareness"]
+        bo_alice = next((i for i in bo_items if i["entity_id"] == al_ent), None)
+        check("Bob (2,1): Alice (5,5) LOS via (4,3)->(4,4) -> FULL (labeled, named)",
+              bo_alice is not None
+              and bo_alice.get("label") is True and bo_alice.get("name") == "Alice"
+              and (bo_alice["x"], bo_alice["y"]) == (5, 5))
+        bo_grom = next((i for i in bo_items if i.get("approximate")), None)
+        check("Bob (2,1): Grom (5,3) blocked by new wall (4,2) -> APPROXIMATE (gray block, no name)",
+              bo_grom is not None
+              and (bo_grom["x"], bo_grom["y"]) == (2, 1)     # (5,3)//2 block
+              and bo_grom.get("approximate") is True
+              and bo_grom.get("label") is False
+              and "name" not in bo_grom and "color" not in bo_grom
+              and "kind" not in bo_grom
+              and bo_grom["entity_id"] != npc_ent)
+        check("Bob (2,1): Wraith (12,2) beyond 4 squares -> ABSENT",
+              wraith_ent not in {i["entity_id"] for i in bo_items})
 
         # 6. Open an uploaded map in the SAME session (use_map) --------------
         # BUG-002: the GM uploads a map and switches the session to it with
@@ -324,11 +388,11 @@ def main():
         check("7th non-GM join -> session full",
               p7.recv_json() == {"type": "error", "message": "session full"})
         # GM's view: 1 GM + 6 players; entities = the 6 player tokens plus
-        # the GM's created npc (the GM itself holds none).
+        # the two GM-created npcs (Grom + Wraith; the GM itself holds none).
         gm.send_json({"type": "request_state"})
         st = state_until_n_players(gm, 7)
-        check("GM view: 1 GM + 6 players, 7 tokens (6 players + 1 npc)",
-              len(st["players"]) == 7 and len(st["entities"]) == 7)
+        check("GM view: 1 GM + 6 players, 8 tokens (6 players + 2 npcs)",
+              len(st["players"]) == 7 and len(st["entities"]) == 8)
         p7.close()
     finally:
         for c in (gm, alice, bob):

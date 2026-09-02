@@ -1,5 +1,5 @@
 #!/bin/sh
-# LittleDungeons convenience launcher — starts the stdlib-only server on 127.0.0.1:8000.
+# LittleDungeons convenience launcher — starts the FastAPI/uvicorn server on 127.0.0.1:8000.
 # Prefers the project venv (./.venv/bin/python) if present, else python3.
 cd "$(dirname "$0")" || exit 1
 

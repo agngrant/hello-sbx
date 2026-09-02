@@ -338,6 +338,60 @@ class TestLineOfSight(unittest.TestCase):
         # Viewing from the edge of the wall room: (1,0)->(1,1) is clear.
         self.assertTrue(has_line_of_sight(grid, (1, 0), (1, 1)))
 
+    def test_diagonal_corner_cut_is_blocked(self):
+        # Adversarial regression (three-tier awareness LOS, check #3a):
+        # a diagonal sight line must NOT "cut" through the zero-width gap
+        # between two wall corners — this mirrors the movement
+        # no-corner-cut rule (``is_valid_step``). The Bresenham line has NO
+        # wall cell on it (it only visits the diagonal), so the block must
+        # come from the two WALL ELBOWS of the diagonal step, not from an
+        # on-line wall. Both adjacent (squeezed) and the longer (2,2) line
+        # must be blocked.
+        grid = make_grid([
+            ["floor", "wall", "floor"],
+            ["wall", "floor", "floor"],
+            ["floor", "floor", "floor"],
+        ])
+        # (0,0)->(1,1): the single diagonal step touches wall elbows
+        # (1,0) and (0,1) — squeezed between two wall corners.
+        self.assertFalse(has_line_of_sight(grid, (0, 0), (1, 1)))
+        # (0,0)->(2,2): the first diagonal step is the same squeeze.
+        self.assertFalse(has_line_of_sight(grid, (0, 0), (2, 2)))
+
+    def test_diagonal_corner_cut_on_final_step_blocked(self):
+        # Same rule, but the squeeze happens on the FINAL diagonal step
+        # INTO the target cell (target endpoint never blocks, but the
+        # elbows of the step still must).
+        grid = make_grid([
+            ["floor", "floor", "wall"],
+            ["floor", "floor", "wall"],
+            ["floor", "wall", "floor"],
+        ])
+        # (0,0)->(2,2) last diagonal step (1,1)->(2,2): elbows (2,1) and
+        # (1,2) are both walls.
+        self.assertFalse(has_line_of_sight(grid, (0, 0), (2, 2)))
+
+    def test_single_elbow_wall_does_not_block(self):
+        # Guard against over-blocking: a diagonal that grazes ONE wall
+        # corner (only one elbow a wall) is NOT a corner cut and still has
+        # clear sight (the wall is adjacent to the line, not on it). This is
+        # the existing "wall off the line" behavior that must be preserved.
+        grid = make_grid([
+            ["floor", "wall"],
+            ["floor", "floor"],
+        ])
+        self.assertTrue(has_line_of_sight(grid, (0, 0), (1, 1)))
+
+    def test_clear_diagonal_still_has_sight(self):
+        # A diagonal through open floor (no corner pinch, no on-line wall)
+        # must remain unblocked.
+        grid = make_grid([
+            ["floor", "floor", "floor"],
+            ["floor", "floor", "floor"],
+            ["floor", "floor", "floor"],
+        ])
+        self.assertTrue(has_line_of_sight(grid, (0, 0), (2, 2)))
+
 
 if __name__ == "__main__":
     unittest.main()

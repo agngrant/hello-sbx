@@ -342,6 +342,22 @@ input[type="file"] { color: var(--text-muted); }
 }
 .awareness-row.is-own .awareness-name { color: var(--own-ring); font-weight: 700; }
 
+/* Approximate awareness contact (player view, §5): a muted gray "?" circle
+   — NO team color/shape, it reveals no identity, only a coarse position. */
+.dot-approx::before {
+  left: 1px; top: 1px;
+  width: 14px; height: 14px;
+  border-radius: 50%;
+  background: transparent;
+  border: 1.5px dashed var(--text-muted);
+  color: var(--text-muted);
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 13px;
+  text-align: center;
+  content: "?";
+}
+
 /* Legend (wireframes §4.4) */
 #legend {
   position: absolute;
@@ -360,6 +376,7 @@ input[type="file"] { color: var(--text-muted); }
 }
 .legend-chip { display: inline-flex; align-items: center; gap: 6px; }
 .legend-sep { color: var(--text-muted); }
+.legend-note { color: var(--text-muted); }
 .swatch { width: 12px; height: 12px; display: inline-block; border-radius: 2px; }
 .swatch.floor { background: var(--floor); }
 .swatch.wall { background: var(--wall-fill); border: 1px solid var(--wall-border); }

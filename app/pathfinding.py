@@ -192,15 +192,36 @@ def _bresenham(
             y += sy
 
 
+def _cell_is_wall(grid: Grid, cell: tuple[int, int]) -> bool:
+    """True if ``cell`` is an in-bounds ``wall`` cell (out-of-bounds → False).
+
+    Used by :func:`has_line_of_sight` for the corner-cut elbow test.  For an
+    in-bounds sight line the elbows are always in-bounds, so the OOB guard is
+    belt-and-braces.
+    """
+    x, y = _as_cell(cell)
+    return _in_bounds(grid, x, y) and grid.cells[y][x] == "wall"
+
+
 def has_line_of_sight(
     grid: Grid, a: tuple[int, int], b: tuple[int, int]
 ) -> bool:
     """True if a straight line from ``a`` to ``b`` is not blocked by a wall.
 
-    The line is digitized with Bresenham; if ANY cell strictly between
-    ``a`` and ``b`` is a ``wall`` cell → False, else True.  ``a == b`` →
-    True.  The endpoints themselves never block (entities can stand on the
-    cells they occupy).  Used by the optional fog-of-war toggle.
+    The line is digitized with Bresenham; it is blocked (→ False) when
+    EITHER:
+
+    * ANY cell strictly between ``a`` and ``b`` is a ``wall`` cell, OR
+    * a DIAGONAL step of the line squeezes between two wall corners — i.e.
+      BOTH orthogonal "elbow" cells the diagonal touches are walls.  This
+      mirrors the movement no-corner-cut rule (``is_valid_step``): a sight
+      line may not "cut" through the zero-width gap between two walls.  A
+      diagonal that merely grazes a single wall corner (one elbow open)
+      still passes — the wall is adjacent to the line, not on it.
+
+    ``a == b`` → True.  The endpoints themselves never block (entities can
+    stand on the cells they occupy).  Used by the awareness three-tier
+    model and the optional fog-of-war toggle.
     """
     a = _as_cell(a)
     b = _as_cell(b)
@@ -208,9 +229,16 @@ def has_line_of_sight(
         return True
     if not (_in_bounds(grid, *a) and _in_bounds(grid, *b)):
         return False
+    prev: tuple[int, int] | None = None
     for x, y in _bresenham(a[0], a[1], b[0], b[1]):
+        if prev is not None:
+            px, py = prev
+            if x != px and y != py:  # diagonal step: check corner cutting
+                if _cell_is_wall(grid, (x, py)) and _cell_is_wall(grid, (px, y)):
+                    return False  # squeezed between two wall corners
         if (x, y) == b:
             break  # endpoint never blocks; cells after are not "between"
         if (x, y) != a and grid.cells[y][x] == "wall":
-            return False
+            return False  # a wall lies directly on the sight line
+        prev = (x, y)
     return True

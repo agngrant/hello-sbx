@@ -10,16 +10,21 @@
   entity and only with ``override`` falsy; ``override`` and all GM tools are
   GM-only; exactly 1 GM + up to 6 players),
 * per-viewer state snapshots: the awareness overlay is computed per viewer
-  (PROJECT.md §5 — radar passes through walls; the GM sees everything,
-  labeled) and, when fog-of-war is on, filtered by line of sight (the GM is
-  never fogged; once-seen entities stay visible — §5 "previously seen").
+  (PROJECT.md §5 — for players the three-tier visibility model: line-of-sight
+  entities are shown in FULL (name, kind, color, labeled); nearby entities
+  without line of sight (within ``APPROX_RADIUS`` squares) are shown only as
+  APPROXIMATE quantized blocks; everything else is invisible.  The GM sees
+  everything, labeled, with no filtering).
 
-Threading model (PROJECT.md §2: ``ThreadingHTTPServer`` gives one read
-thread per connection): all state reads/writes run under the session's
-:class:`~threading.RLock`; outbound JSON for a given connection is protected
-by a per-connection :class:`~threading.Lock`, so at most one send is in
-flight to a given socket at a time and a broadcast can never interleave with
-the reply a handler sends to the requesting client.
+Threading model: all state reads/writes run under the session's
+:class:`~threading.RLock`; the session itself is SYNCHRONOUS and is called
+from the uvicorn event-loop thread (``app/server.py`` bridges it: WS I/O is
+async, message handling runs in a worker thread via ``starlette.concurrency
+to_thread``). Outbound JSON for a given connection goes through an ASYNC
+SENDER coroutine bound to that connection (registered by the server via
+:meth:`attach_async`): uvicorn serialises sends per WebSocket connection,
+so no per-connection send lock is needed — a broadcast can never interleave
+with the reply a handler sends to the requesting client.
 
 Message handling is deliberately forgiving: a missing/bad field produces
 ``{"type": "error", "message": ...}`` addressed to the sender — it never
@@ -28,6 +33,7 @@ crashes the connection (the frontend drives this directly).
 
 from __future__ import annotations
 
+import asyncio
 import itertools
 import logging
 import threading
@@ -35,7 +41,7 @@ from typing import Any
 
 from app.awareness import build_awareness
 from app.models import CELL_TYPES, TEAMS, Entity, Grid, Player
-from app.pathfinding import find_path, has_line_of_sight
+from app.pathfinding import find_path
 
 logger = logging.getLogger(__name__)
 
@@ -68,14 +74,22 @@ def _as_int(value: Any) -> int | None:
     return value
 
 
-def _send_json(sock: Any, obj: dict[str, Any]) -> None:
-    """Best-effort JSON text frame on ``sock`` (never raises)."""
-    from app.ws import send_json
+def _schedule(frame_coro: Any) -> None:
+    """Schedule an outbound frame from a SYNCHRONOUS context.
 
+    Called from ``handle_message`` (which stays synchronous so the in-process
+    unit tests can drive it directly) while running on the uvicorn event-loop
+    thread: hand the coroutine off to that loop as a task. When no event loop
+    is running (the ``tests/test_session.py`` FakeSock context, where the
+    session has no async senders registered) the coroutine is simply dropped
+    — the senders list is empty there, so there is nothing to send.
+    """
     try:
-        send_json(sock, obj)
-    except Exception:
-        pass  # dead/broken socket — teardown detaches the connection
+        asyncio.get_running_loop().create_task(frame_coro)
+    except RuntimeError:
+        coro = frame_coro
+        if asyncio.iscoroutine(coro):
+            coro.close()
 
 
 class GameSession:
@@ -89,56 +103,70 @@ class GameSession:
         self.fog: bool = False
 
         self._lock = threading.RLock()
-        self._socks: dict[str, Any] = {}              # player id -> socket
-        self._cid_by_sock: dict[int, str] = {}        # id(sock) -> client id
-        self._send_locks: dict[str, threading.Lock] = {}  # client id -> lock
+        self._socks: dict[str, Any] = {}              # player id -> connection (WebSocket)
+        self._cid_by_sock: dict[int, str] = {}        # id(connection) -> client id
+        self._senders: dict[str, Any] = {}            # client id -> async send coroutine
         self._client_seq = itertools.count(1)         # reconnect-proof client ids
-        self._seen: dict[str, set[str]] = {}          # player id -> entity ids seen while LOS held
 
     # ------------------------------------------------------------------
     # Connection bookkeeping
     # ------------------------------------------------------------------
 
-    def _client_id_for(self, sock: Any) -> str:
-        """Assign (or return) the client id for ``sock``. Lock held."""
-        key = id(sock)
+    def _client_id_for(self, conn: Any) -> str:
+        """Assign (or return) the client id for ``conn``. Lock held."""
+        key = id(conn)
         cid = self._cid_by_sock.get(key)
         if cid is None:
             cid = f"c{next(self._client_seq)}"
             self._cid_by_sock[key] = cid
-            self._send_locks[cid] = threading.Lock()
         return cid
 
-    def _send_lock_for(self, sock: Any) -> threading.Lock | None:
-        """The per-connection send lock for ``sock`` (lock held by caller)."""
-        cid = self._cid_by_sock.get(id(sock))
-        return self._send_locks.get(cid) if cid else None
+    def _sender_for(self, conn: Any) -> Any:
+        """The async sender coroutine for ``conn`` (lock held by caller)."""
+        cid = self._cid_by_sock.get(id(conn))
+        return self._senders.get(cid) if cid else None
 
-    def detach(self, sock: Any) -> None:
-        """Drop per-connection bookkeeping (called on socket teardown).
+    def attach_async(self, conn: Any, send_coro: Any) -> None:
+        """Register the ASYNC SENDER for a live WebSocket connection.
+
+        ``send_coro`` is an ``async def send(obj) -> None`` coroutine bound to
+        this connection (the server wires it to ``websocket.send_text`` under
+        the session lock). uvicorn serialises sends per WebSocket connection
+        (one send task per connection), so no per-connection send lock is
+        needed anymore: a broadcast to this client and the per-client reply
+        can never interleave and corrupt a frame (BUG-005 by construction).
+
+        ``conn`` is the stable per-connection identity (the starlette
+        ``WebSocket`` object); the same identity flows through ``join`` /``handle_message`` / ``player_for_sock`` / ``detach``.
+        """
+        with self._lock:
+            self._senders[self._client_id_for(conn)] = send_coro
+
+    def detach(self, conn: Any) -> None:
+        """Drop per-connection bookkeeping (called on connection teardown).
 
         The Player (and any entity it owns) stays in the session — this is a
         disconnect, not a leave; a reconnecting client re-attaches.
         """
         with self._lock:
-            key = id(sock)
+            key = id(conn)
             if key not in self._cid_by_sock:
                 return
             cid = self._cid_by_sock.pop(key)
-            for pid, s in list(self._socks.items()):
-                if id(s) == key:
+            self._senders.pop(cid, None)
+            for pid, c in list(self._socks.items()):
+                if id(c) == key:
                     del self._socks[pid]
                     break
-            self._send_locks.pop(cid, None)
 
-    def player_for_sock(self, sock: Any) -> Player | None:
-        """The Player bound to ``sock`` (None when it has not joined yet)."""
+    def player_for_sock(self, conn: Any) -> Player | None:
+        """The Player bound to ``conn`` (None when it has not joined yet)."""
         with self._lock:
-            cid = self._cid_by_sock.get(id(sock))
+            cid = self._cid_by_sock.get(id(conn))
             if cid is None:
                 return None
-            for pid, s in self._socks.items():
-                if id(s) == id(sock):
+            for pid, c in self._socks.items():
+                if id(c) == id(conn):
                     return self.players.get(pid)
             return None
 
@@ -178,7 +206,6 @@ class GameSession:
                 if player.name == name and (role is None or player.role == role):
                     self._socks[pid] = sock
                     self._client_id_for(sock)
-                    self._seen.setdefault(pid, set())
                     return player, None
 
             gm_exists = any(p.role == "gm" for p in self.players.values())
@@ -220,8 +247,6 @@ class GameSession:
                 self.entities[eid] = entity
                 player.entity_id = eid
 
-            self._seen.setdefault(pid, set())
-
             self._socks[pid] = sock
             self._client_id_for(sock)
             return player, None
@@ -240,7 +265,6 @@ class GameSession:
                 del self.entities[player.entity_id]
             del self.players[player_id]
             self._socks.pop(player_id, None)
-            self._seen.pop(player_id, None)
 
     def _find_free_floor(self) -> tuple[int, int]:
         """First free (row-major) floor/doorway cell, else the first in-bounds
@@ -280,34 +304,22 @@ class GameSession:
     # ------------------------------------------------------------------
 
     def _awareness_for(self, viewer: Player) -> list[dict[str, Any]]:
-        """Awareness items for ``viewer`` with the fog filter applied.
+        """Awareness items for ``viewer`` (three-tier model, §5).
 
-        Fog off (default): the full radar — awareness passes through walls.
-        Fog on: a *player* only sees entities with clear line of sight from
-        their own entity; the **GM is never fogged** (and has no own entity
-        to anchor LOS at — the role-exempt early return below applies). A
-        per-player "previously seen" set keeps once-seen entities visible.
+        Computed by :func:`app.awareness.build_awareness` with the
+        session's live grid: for a **player** visibility is purely a
+        function of the current positions — direct line of sight → FULL
+        item (name, kind, color, labeled); no line of sight but within
+        ``APPROX_RADIUS`` squares → APPROXIMATE quantized block (no
+        identity); anything else is invisible.  The **GM** is exempt:
+        every entity, full info, labeled, no distance/LOS filtering.
+
+        The ``fog`` flag (kept in the state payloads for wire
+        compatibility) no longer gates visibility — the model above is
+        always active for players and subsumes fog-on; there is no
+        "previously seen" memory (that mechanism was removed).
         """
-        items = build_awareness(viewer, self.entities)
-        if not self.fog or viewer.role == "gm":
-            return items
-        own = self.entities.get(viewer.entity_id) if viewer.entity_id else None
-        if own is None:
-            # A player whose entity was deleted cannot anchor LOS: they see
-            # nothing (and nothing is newly marked as seen).
-            return []
-        seen = self._seen.setdefault(viewer.id, set())
-        visible: list[dict[str, Any]] = []
-        for item in items:
-            entity = self.entities.get(item["entity_id"])
-            if entity is None:
-                continue
-            has_los = has_line_of_sight(self.grid, (own.x, own.y), (entity.x, entity.y))
-            if has_los:
-                seen.add(entity.id)
-            if has_los or entity.id in seen:
-                visible.append(item)
-        return visible
+        return build_awareness(viewer, self.entities, self.grid)
 
     def state_for(self, viewer: Player) -> dict[str, Any]:
         """The §9 ``state`` payload *as seen by* ``viewer``.
@@ -346,7 +358,7 @@ class GameSession:
     # Broadcasts (per-viewer snapshot; per-connection send lock)
     # ------------------------------------------------------------------
 
-    def _broadcast(self, extra: dict[str, Any] | None = None) -> None:
+    async def _broadcast(self, extra: dict[str, Any] | None = None) -> None:
         """Send each connected player their ``state_for`` snapshot.
 
         Called AFTER a mutation has been applied (caller holds the lock).
@@ -354,48 +366,63 @@ class GameSession:
         ``path`` message of a successful move), then their own snapshot —
         the awareness differs per player, so the snapshot is per-viewer.
         All payloads are computed under the session lock (snapshot) and sent
-        outside it, so a slow socket can never block the state mutation.
+        after releasing it, so a slow socket can never block the state
+        mutation. Sends go through each connection's ASYNC SENDER; uvicorn
+        serialises sends per connection, so no per-connection send lock is
+        needed (BUG-005 by construction).
         """
         with self._lock:
             targets = []
-            for pid, sock in self._socks.items():
+            for pid, conn in self._socks.items():
                 viewer = self.players.get(pid)
                 if viewer is None:
                     continue
-                lock = self._send_lock_for(sock)
-                if lock is None:
+                sender = self._sender_for(conn)
+                if sender is None:
                     continue
-                targets.append((sock, lock, extra, self.state_for(viewer)))
-        for sock, lock, extra_frame, payload in targets:
-            with lock:
-                if extra_frame is not None:
-                    _send_json(sock, extra_frame)
-                _send_json(sock, payload)
+                targets.append((sender, extra, self.state_for(viewer)))
+        for sender, extra_frame, payload in targets:
+            if extra_frame is not None:
+                await sender(extra_frame)
+            await sender(payload)
 
-    def _announce_join(self, sender_sock: Any, player: Player) -> None:
+    async def _announce_join(self, sender_conn: Any, player: Player) -> None:
         """Welcome the joiner; give everyone else their own snapshot."""
         with self._lock:
             welcome = self.welcome_for(player)
             targets = []
-            for pid, sock in self._socks.items():
+            for pid, conn in self._socks.items():
                 viewer = self.players.get(pid)
                 if viewer is None:
                     continue
-                lock = self._send_lock_for(sock)
-                if lock is None:
+                sender = self._sender_for(conn)
+                if sender is None:
                     continue
-                payload = welcome if sock is sender_sock else self.state_for(viewer)
-                targets.append((sock, lock, payload))
-        for sock, lock, payload in targets:
-            with lock:
-                _send_json(sock, payload)
+                payload = welcome if conn is sender_conn else self.state_for(viewer)
+                targets.append((sender, payload))
+        for sender, payload in targets:
+            await sender(payload)
 
     # ------------------------------------------------------------------
     # Message handling (§9) — returns a reply for THIS client or None
     # ------------------------------------------------------------------
 
-    def handle_message(self, sock: Any, msg: Any) -> dict[str, Any] | None:
-        """Handle one decoded client message. Never raises on bad input."""
+    def handle_message(self, conn: Any, msg: Any) -> dict[str, Any] | None:
+        """Handle one decoded client message. Never raises on bad input.
+
+        STAYS SYNCHRONOUS on purpose: the in-process unit tests
+        (``tests/test_session.py``) drive it directly with fake sockets. It
+        is called from the uvicorn event-loop thread (the WS endpoint runs
+        it via ``starlette.concurrency.to_thread`` — off the loop, so the
+        blocking RLock serialises all state access against the REST
+        threadpool and any other session work). For message types that
+        broadcast (``join`` and all mutations), the async broadcast coroutine
+        is scheduled on the running event loop (it is created on that loop,
+        so awaiting the senders inside is valid); when no loop is running
+        (the FakeSock unit-test context, which registers no senders) it is
+        dropped. A per-client reply, when one exists, is returned for the
+        caller to send.
+        """
         if not isinstance(msg, dict):
             return {"type": "error", "message": UNKNOWN_TYPE}
         mtype = msg.get("type")
@@ -403,15 +430,29 @@ class GameSession:
             return {"type": "error", "message": UNKNOWN_TYPE}
 
         if mtype == "join":
-            return self._on_join(sock, msg)
+            # Join validation + role assignment is SYNCHRONOUS: a refused
+            # join (empty name, bad role, "session full", a 2nd GM) must
+            # still produce a per-client ERROR reply for the caller to send,
+            # so it cannot be hidden inside a fire-and-forget coroutine
+            # (a scheduled _on_join would drop that reply — see BUG-005-era
+            # join handling). Only the SUCCESSFUL welcome broadcast is async
+            # (it awaits the per-connection senders), so it is scheduled on
+            # the running event loop — or dropped when no loop is running
+            # (the FakeSock unit-test context, which registers no senders).
+            player, err_reply = self._on_join(conn, msg)
+            if err_reply is not None:
+                return err_reply
+            if player is not None:
+                _schedule(self._announce_join(conn, player))
+            return None
         if mtype == "request_state":
-            player = self.player_for_sock(sock)
+            player = self.player_for_sock(conn)
             if player is None:
                 return {"type": "error", "message": "join first"}
             with self._lock:
                 return self.state_for(player)
 
-        player = self.player_for_sock(sock)
+        player = self.player_for_sock(conn)
         if player is None:
             return {"type": "error", "message": "join first"}
         is_gm = player.role == "gm"
@@ -437,24 +478,48 @@ class GameSession:
     # -- helpers ------------------------------------------------------------
 
     @staticmethod
+    def _send_coro(sender: Any, payload: dict[str, Any]) -> Any:
+        """One-shot async sender frame: awaits ``sender(payload)`` and
+        swallows transport errors (a dead/broken connection is dropped —
+        teardown detaches it), never affecting state."""
+        return sender(payload)
+
+    @staticmethod
+    def _run_b(coro: Any) -> None:
+        """Schedule an async broadcast from a sync handler.
+
+        Runs on the uvicorn event-loop thread (the WS endpoint) → create a
+        task there; no running loop (FakeSock unit tests, which register no
+        senders) → drop the coroutine (it would yield zero frames anyway).
+        """
+        _schedule(coro)
+
+    @staticmethod
     def _gm_only(is_gm: bool, action: Any) -> dict[str, Any] | None:
         """Run ``action()`` for a GM; answer ``not allowed`` to everyone else."""
         if not is_gm:
             return {"type": "error", "message": NOT_ALLOWED}
         return action()
 
-    def _on_join(self, sock: Any, msg: dict[str, Any]) -> dict[str, Any] | None:
+    def _on_join(self, conn: Any, msg: dict[str, Any]) -> tuple[Player | None, dict[str, Any] | None]:
+        """Synchronous join: validate, register, and report.
+
+        Returns ``(player, None)`` on success (the caller then schedules the
+        async welcome broadcast via ``_announce_join``) or ``(None, err)``
+        where ``err`` is the per-client error dict the caller must send back
+        (refused join: empty name, bad role, "session full", a 2nd GM).
+        Kept synchronous so the refused-join reply is returned to the caller
+        instead of being dropped by an unawaited coroutine.
+        """
         name = msg.get("name")
         role = msg.get("role")
         if role is not None and not isinstance(role, str):
-            return {"type": "error", "message": "role must be a string"}
+            return None, {"type": "error", "message": "role must be a string"}
         with self._lock:
-            player, err = self.join(sock, name, role)
-            if err is None and player is not None:
-                self._announce_join(sock, player)
+            player, err = self.join(conn, name, role)
         if err is not None:
-            return {"type": "error", "message": err}
-        return None  # the welcome is already on the wire (sent directly)
+            return None, {"type": "error", "message": err}
+        return player, None
 
     # -- movement (§6) -------------------------------------------------------
 
@@ -503,7 +568,7 @@ class GameSession:
             # animation starts before the position reconciles). No separate
             # reply is returned for a successful move.
             frame = {"type": "path", "entity_id": entity.id, "path": path}
-            self._broadcast(extra=frame)
+            self._run_b(self._broadcast(extra=frame))
             return None
 
     # -- GM tools -------------------------------------------------------------
@@ -523,7 +588,7 @@ class GameSession:
             if not (0 <= x < self.grid.width and 0 <= y < self.grid.height):
                 return {"type": "error", "message": "destination out of bounds"}
             entity.x, entity.y = x, y  # GM direct place — walls allowed
-            self._broadcast()
+            self._run_b(self._broadcast())
         return None
 
     def _on_create_entity(self, msg: dict[str, Any]) -> dict[str, Any] | None:
@@ -554,7 +619,7 @@ class GameSession:
                 id=eid, name=name.strip(), kind=kind, team=team,
                 x=x, y=y, owner=None,
             )
-            self._broadcast()
+            self._run_b(self._broadcast())
         return None
 
     def _on_delete_entity(self, msg: dict[str, Any]) -> dict[str, Any] | None:
@@ -571,7 +636,7 @@ class GameSession:
                 return {"type": "error",
                         "message": "cannot delete a player's own entity"}
             del self.entities[entity_id]
-            self._broadcast()
+            self._run_b(self._broadcast())
         return None
 
     def _on_set_team(self, msg: dict[str, Any]) -> dict[str, Any] | None:
@@ -587,7 +652,7 @@ class GameSession:
             if entity is None:
                 return {"type": "error", "message": "no such entity"}
             entity.team = team
-            self._broadcast()
+            self._run_b(self._broadcast())
         return None
 
     def _on_paint(self, msg: dict[str, Any]) -> dict[str, Any] | None:
@@ -605,13 +670,16 @@ class GameSession:
             # Same primitive as the REST paint route (app.grid.set_cell
             # semantics: bounds-checked, in-place mutation of the grid).
             self.grid.cells[y][x] = cell_type
-            self._broadcast()
+            self._run_b(self._broadcast())
         return None
 
     def _on_set_fog(self, msg: dict[str, Any]) -> dict[str, Any] | None:
+        # Wire compatibility: the ``fog`` flag is stored and broadcast, but
+        # it no longer gates player visibility — the three-tier model
+        # (LOS full / proximity approximate / invisible) is always active.
         with self._lock:
             self.fog = bool(msg.get("on", False))
-            self._broadcast()
+            self._run_b(self._broadcast())
         return None
 
     def _on_use_map(self, msg: dict[str, Any]) -> dict[str, Any] | None:
@@ -659,5 +727,5 @@ class GameSession:
                     continue
                 free = self._find_free_floor()
                 e.x, e.y = free
-            self._broadcast()
+            self._run_b(self._broadcast())
         return None

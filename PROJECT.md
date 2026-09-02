@@ -1,11 +1,17 @@
 # LittleDungeons — Multi-User Tactical Map for TTRPGs
 
-**Version:** 2.0 — **stdlib pivot** (team contract). The v1 FastAPI/uvicorn/
-pillow/numpy/pytest stack is **not installable** in this sandbox (egress proxy
-blocks `files.pythonhosted.org`; all mirrors 403; no cached wheels; empty
-system python). We therefore build on the **Python standard library only** with
-a **static frontend**. All product requirements, the data model, the REST API,
-the WebSocket protocol, and the awareness/movement rules are **unchanged**.
+**Version:** 3.0 — **package stack** (FastAPI / uvicorn / websockets / Pillow /
+pytest), adopted per the recommendation in
+`docs/reviews/simplification-review.md`. v2.0 was a **stdlib pivot** (team
+contract) because the egress proxy blocked `files.pythonhosted.org`. The
+sandbox now allows the pinned packages in `requirements.txt` (probed
+installable), so the hand-rolled `http.server` + raw RFC 6455 server +
+`zlib`/`struct` image codec are replaced by their package equivalents. All
+product requirements, the data model, the REST API, the WebSocket protocol,
+and the awareness/movement rules are **unchanged** — only the plumbing
+underneath them changed. The external surface (routes, JSON error shapes,
+`/ws?session=<id>` protocol, static files, startup banner) is frozen and
+pinned by the test suite + `scripts/e2e_proof.py`.
 
 **Owner:** PM (team lead). Contributors: designer, awesome_engineer, qa.
 **Workspace:** `agentteam/` (the repository root)
@@ -33,60 +39,73 @@ overlay** (colored dots for friends/NPCs/enemies); the GM sees everything.
 4. **Doorways / gaps** are walkable.
 5. **GM override**: the GM may move a character through walls ("ignore walls")
    as a deliberate exception.
-6. **Awareness overlay** is unique per player and **passes through walls**
-   (radar-style). Colors: **green** = friend, **white** = neutral (player or
-   NPC), **red** = enemy. The **GM sees all** entities with true colors +
-   labels, no masking.
+6. **Awareness overlay** is unique per player and is a **three-tier visibility
+   model**: a player gets **full information** (color + name + kind + label) about
+   an entity they can **see** (line of sight), an **approximate (coarse, identity-
+   free) location** for a sight-blocked entity within 4 squares, and **nothing**
+   beyond that. Colors: **green** = friend, **white** = neutral (player or NPC),
+   **red** = enemy. The **GM sees all** entities with true colors + labels, no
+   masking, no distance/LOS filter.
 7. A player may **only move their own character**. The GM may move any entity.
 8. Maps are **uploaded as image files**; the system **detects and marks walls
    and doorways** automatically, with a manual paint/edit fallback for the GM.
 
 ### Soft / nice-to-have (do not block delivery)
-- Fog-of-war toggle (line-of-sight based), off by default.
 - Smooth animated movement along the path.
 - Session save/load to disk.
 
 ---
 
-## 2. Tech stack (FINAL — standard library only)
+## 2. Tech stack (FINAL — pinned packages, see `requirements.txt`)
 
 - **Runtime:** Python 3.14 (`.venv/bin/python` at `<repo-root>/.venv`).
-  **No third-party packages. No pip installs. No requirements.txt needed.**
-- **HTTP server:** `http.server.ThreadingHTTPServer` + `BaseHTTPRequestHandler`.
-  Serves the static frontend and the REST API, and upgrades the `/ws` route to
-  a WebSocket.
-- **WebSocket:** hand-rolled **RFC 6455** server in `app/ws.py` (handshake +
-  frame codec). One handler thread per connection (ThreadingHTTPServer), which
-  fits the 1-GM + 6-player scale.
-- **Image decode (PIL-free):** `zlib` + `struct` in `app/imaging.py`. Decodes
-  non-interlaced **PNG** (grayscale/RGB/RGBA/palette, 8-bit; 16-bit → high byte)
-  and **BMP** (24/32-bit BI_RGB), plus a PNG *encoder* (used by tests to make
-  synthetic fixtures) and grayscale/resize/Otsu/median operations in pure
-  Python.
-- **Detection:** `app/detection.py` (pure Python) — gray → resize → Otsu
-  threshold → 3×3 majority → classify walls → doorway heuristic.
+  Install the pinned packages once: `.venv/bin/pip install -r requirements.txt`
+  (fastapi, uvicorn, websockets, pillow, pydantic, pytest, pytest-timeout).
+- **HTTP server / ASGI:** **FastAPI** app in `app/server.py` served by
+  **uvicorn** (`run_server` in `app/server.py`). Serves the static frontend
+  and the REST API and speaks RFC 6455 on `/ws` natively via the
+  **websockets** library. A `ThreadingHTTPServer`-shaped adapter
+  (`app.server.ThreadingHTTPServer`) wraps a uvicorn Server on a pre-bound
+  socket so the existing tests / `scripts/e2e_proof.py` boot code works
+  unchanged.
+- **WebSocket:** uvicorn + **websockets** (hand-rolled server codec deleted;
+  `app/ws.py` now holds ONLY the client-side test helpers the raw-socket
+  test client uses).
+- **Image decode:** **Pillow** in `app/imaging.py` (`Image.open` / `Image.save`).
+  Decodes non-interlaced **PNG** and **BMP** (24/32-bit) and rejects the same
+  inputs as the old codec (non-PNG/BMP, interlaced PNG, other BMP bit
+  depths). The *algorithmic* pixel ops (BT.601 `to_gray`, nearest `resize`,
+  Otsu, 3×3 majority) are kept in `app/imaging.py` because the app pins their
+  exact behavior in tests (Pillow's `MedianFilter` differs on tie/OOB rules).
+- **Detection:** `app/detection.py` — gray → resize → Otsu threshold → 3×3
+  majority → classify walls → doorway heuristic (unchanged).
 - **Pathfinding:** `app/pathfinding.py` — A* (8-dir, no wall-corner cutting),
-  `has_line_of_sight` (Bresenham) for optional fog.
-- **Models:** `app/models.py` — **`dataclasses`** + plain dicts for JSON. Field
-  names and shapes are identical to v1 so the frontend and tests match.
+  `has_line_of_sight` (Bresenham) for optional fog. (Kept as-is per the
+  review: it's domain logic and no package wins here.)
+- **Models:** `app/models.py` — **`dataclasses`** + plain dicts for JSON.
+  Field names and shapes are identical to v1 so the frontend and tests match.
+  (The review's Pydantic row was intentionally NOT adopted — manual
+  `to_dict`/`from_dict` stay, by contract.)
 - **Frontend:** plain static HTML/CSS/JS (no build step) in `app/static/`.
   Canvas-based map rendering. Responsive.
-- **Tests:** stdlib **`unittest`** (no pytest). `tests/` with a stdlib WS
-  client helper. Run with `python -m unittest discover -s tests -t .`.
+- **Tests:** **pytest** (primary; `pytest.ini`, per-test `timeout = 30` via
+  pytest-timeout) — the suite is written in `unittest` style so the stdlib
+  runner still works too. `tests/` with a raw-socket WS client helper.
 
 ### How to run
 ```
 cd agentteam   # repo root
+.venv/bin/pip install -r requirements.txt   # once
 .venv/bin/python -m app.main --host 127.0.0.1 --port 8000
 # open http://127.0.0.1:8000
 # run tests:
-.venv/bin/python -m unittest discover -s tests -t .
+.venv/bin/python -m pytest                    # primary
+.venv/bin/python -m unittest discover -s tests -t .   # also supported
 ```
 
-> **Iteration 1 gate:** no install step is needed. The gate is instead:
-> `python -m app.main` boots, `GET /health` → `{"status":"ok"}`, and
-> `python -m unittest discover` is green. Because there are zero deps this gate
-> is trivially satisfiable offline.
+> **Gate:** `python -m app.main` boots, `GET /health` → `{"status":"ok"}`,
+> and the test suite is green under **both** runners, plus
+> `python scripts/e2e_proof.py` is all-✓.
 
 ---
 
@@ -94,16 +113,19 @@ cd agentteam   # repo root
 
 ```
 agentteam/
-├── PROJECT.md                # this file (contract v2)
+├── PROJECT.md                # this file (contract v3)
 ├── README.md                 # how to run, features, limitations (final)
+├── requirements.txt          # pinned deps (fastapi, uvicorn, websockets, pillow, ...)
+├── pytest.ini                # pytest config (timeout=30, thread method)
 ├── run.sh                    # convenience launcher
 ├── app/
 │   ├── __init__.py
-│   ├── main.py               # http.server app, REST routes, /ws upgrade, static
+│   ├── main.py               # CLI entry + in-memory state (registry, sessions, id helpers)
+│   ├── server.py             # FastAPI app: REST routes, /ws, static mount; uvicorn runner + ThreadingHTTPServer-shaped test adapter
 │   ├── models.py             # dataclasses (Grid, Entity, Player, Session) + JSON
 │   ├── grid.py               # cell helpers + sample map + geometry
-│   ├── ws.py                 # RFC6455 handshake + frame codec (server + test client)
-│   ├── imaging.py            # PNG/BMP decode + PNG encode + gray/resize/otsu/median
+│   ├── ws.py                 # RFC6455 CLIENT helpers only (test client; server side deleted)
+│   ├── imaging.py            # Pillow-backed PNG/BMP decode + encode + gray/resize/otsu/median
 │   ├── detection.py          # image -> grid wall/doorway detection
 │   ├── pathfinding.py        # A* (8-dir, no corner cut), has_line_of_sight
 │   ├── awareness.py          # per-player overlay color computation
@@ -113,7 +135,7 @@ agentteam/
 │       ├── app.js
 │       └── style.css
 └── tests/
-    ├── wsclient.py           # stdlib WebSocket client for tests
+    ├── wsclient.py           # raw-socket WebSocket client for tests
     ├── test_grid.py
     ├── test_imaging.py       # PNG encode->decode roundtrip, Otsu, resize, median
     ├── test_detection.py
@@ -183,34 +205,58 @@ Team → awareness color (base rule; explicit `color` wins if set):
 
 ## 5. Awareness overlay (the core feature)
 
-The overlay is **per player** and is a **radar that ignores walls** (spec:
-"the awareness can pass through walls"). For a connected player `P`:
+The overlay is **per viewer**, computed server-side on every mutation. It is a
+**three-tier visibility model** for players (anchored at the player's own
+token `O`); the **GM is exempt** and always sees everything, unmasked.
 
 ```
-for each entity E (E != P's own entity):
-    if P.role == "gm":
-        show E with true color + label + all info
-    else:
-        relation = relation_of(P, E)
-        color = green if relation=="friend"
-                else white if relation=="neutral"
-                else red
-        show a dot at (E.x, E.y) with that color
+for each entity E (E != the viewer's own token):
+    if viewer.role == "gm":
+        show E with true color + name + kind + label   # always, no filter
+    else:  # player — anchored at own token O
+        if has_line_of_sight(grid, O, E):            # FULL
+            show E with exact position, color (green/white/red or override),
+                  name + kind + label   # full information
+        elif chebyshev(O, E) <= APPROX_RADIUS (4):   # APPROXIMATE
+            show a generic "unseen contact" marker at a COARSE position
+                  (block origin (E.x//2, E.y//2)) — NO color, NO name, NO kind,
+                  NO real id (a non-revealing "<approx-N>" surrogate)
+        else:                                        # INVISIBLE
+            show nothing (E is absent from the awareness list)
 ```
 
-`relation_of(P, E)`:
-- `E.team == "party" and P.team == "party"` → `friend`
-- `E.team == "neutral"` → `neutral`
-- `E.team == "hostile"` → `enemy`
-- (A party member marked hostile by the GM then shows red to the party.)
-- The **GM always sees everything** (no masking, no color reduction).
+**Tiers (player):**
+- **FULL** — direct line of sight to `E`: exact position + color + **name, kind,
+  and label** (identical shape to the GM item). Color is the explicit `entity.color`
+  override, else the team color.
+- **APPROXIMATE** — **no** line of sight, but `E` within `APPROX_RADIUS = 4`
+  squares (Chebyshev `max(|dx|,|dy|) ≤ 4`): a coarse **2×2-block-quantized**
+  position (`x//2, y//2`) with **no identity at all** (no color/name/kind/team/real
+  id). The client renders a muted gray "?" marker.
+- **INVISIBLE** — no line of sight **and** farther than 4 squares: `E` does not
+  appear in the player's awareness list at all.
+
+`relation_of` / `overlay_color` (used by the FULL tier and the GM) — judged by the
+**target's** team:
+- `E.team == "party"` → `friend` → **green**
+- `E.team == "neutral"` → `neutral` → **white**
+- `E.team == "hostile"` → `enemy` → **red**
+- (An explicit `entity.color` override wins. A party member marked hostile by the
+  GM shows red, because the target's team is what matters.)
+- The **own token** is always excluded from awareness (rendered via `you_entity`).
+- A player whose own token was deleted has no anchor and sees nothing.
+- The **GM always sees everything** (no masking, no color reduction, no distance or
+  LOS filter).
 
 **Line of sight** (`has_line_of_sight`) is implemented (Bresenham over the
-grid, blocked by `wall`) and powers the *optional* fog-of-war toggle. It is
-**off by default** so the radar passes through walls per spec. When fog is on,
-a player only sees entities with clear LOS (or previously seen); the GM is
-never fogged. This satisfies "walls block sight" (fog mode) while keeping
-"awareness passes through walls" (default radar mode).
+grid, blocked by `wall`) and drives the player **three-tier** awareness
+model (FULL on LOS / APPROXIMATE within 4 squares without LOS / INVISIBLE
+beyond). It is blocked by any wall cell strictly on the line, AND by a
+diagonal step that squeezes between two wall corners (both orthogonal "elbow"
+cells walls) — the same no-corner-cut rule as movement. Endpoints never
+block (``a == b`` → True). The ``fog`` flag is retained in the payloads for
+wire compatibility but no longer gates visibility. The GM is never fogged or
+filtered.
 
 ---
 
@@ -357,9 +403,12 @@ iteration's deliverable.
 
 ## 11. Definition of done (overall)
 
-- `python -m unittest discover -s tests -t .` fully green.
-- `python -m app.main` starts the app offline; `http://127.0.0.1:8000` serves
-  the UI; upload → detect → move → awareness works end to end.
-- README explains roles, how to start (stdlib only), controls, and limitations
-  (e.g. PNG/BMP only, no-interlace PNG; JSON-base64 upload; no zoom/pan in v1).
+- `python -m pytest` **and** `python -m unittest discover -s tests -t .` fully green
+  (the suite is unittest-style, so both runners pass).
+- `python -m app.main` starts the FastAPI/uvicorn server; `http://127.0.0.1:8000`
+  serves the UI; upload → detect → move → awareness works end to end
+  (`python scripts/e2e_proof.py` is all-✓).
+- README explains roles, how to start (pinned packages via `requirements.txt`),
+  controls, and limitations (e.g. PNG/BMP only, no-interlace PNG; JSON-base64 upload;
+  no zoom/pan in v1).
 - All 8 hard requirements in §1 are demonstrably met (QA signs off).

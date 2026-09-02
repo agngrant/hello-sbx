@@ -39,6 +39,17 @@ Each test maps to the specific QA report it proves:
 * BUG-011  a join rejection (e.g. "session full") went to a hidden toast.
            onError, while not yet joined, must surface the message on the
            lobby status slot instead.
+
+Awareness tier rendering (player three-tier model, §5):
+* the canvas must render the three states: FULL contacts (line of sight)
+  as a colored token WITH a name label + colorblind shape marker (players
+  now see labels, reusing the GM label rendering); APPROXIMATE contacts
+  (no line of sight, within 4 squares) as a faint gray "?" circle at the
+  CENTER of the reported 2×2 block (no identity drawn); ABSENT contacts
+  render nothing (the item never arrives).
+* the sidebar must list approximate contacts as "Unknown" rows with a
+  muted dot-approx chip and an "unseen" count in the summary.
+* the legend (index.html) documents all three states.
 """
 
 from __future__ import annotations
@@ -266,6 +277,125 @@ class TestBug003PathAnimation(FrontendBase):
         self.assertIn('"droppedDuring":0', out, out)
         # ...and once the animation stops, the same move goes through.
         self.assertIn('"move"', out, out)
+
+
+class TestAwarenessTiersPlayer(FrontendBase):
+    """Player three-tier awareness rendering (the server decides the tiers
+    and sends the items; the client must render the three states)."""
+
+    def _player_state(self):
+        return (
+            "(()=>{const map={name:'m',width:16,height:12,cells:Array.from("
+            "{length:12},()=>Array(16).fill('floor'))};"
+            "api.onWelcome({type:'welcome',you:{id:'p2',name:'Alice',"
+            "role:'player',entity_id:'e2'},map,entities:[],"
+            "you_entity:{id:'e2',name:'Alice',kind:'player',team:'party',"
+            "x:1,y:1},players:[],awareness:"
+            "[{entity_id:'e1',x:3,y:1,color:'green',name:'Bob',kind:'player',"
+            "label:true},"
+            "{entity_id:'<approx-1>',x:2,y:1,approximate:true,label:false}],"
+            "fog:false});")
+
+    def test_canvas_renders_full_token_with_label_and_gray_approx_question(self):
+        # 16x12 grid on the 800x600 harness canvas → cell 50, origin (0,0).
+        # FULL item (3,1):  token circle arc(175,75,r); name label "Bob".
+        # APPROX item (2,1): block spans pixels (200..300, 100..200);
+        # the "?" marker sits at the block CENTER → arc(250,150,r).
+        expr = (
+            self._player_state()
+            + "api.els.mapView.hidden=false;"
+            + "api.renderAll();"
+            + "const c=api.els.canvas.getContext('2d');"
+            + "return {arcs:c._arcs,texts:c._texts};})()"
+        )
+        out = js(expr)
+        # Full contact (3,1) → token circle drawn at the EXACT cell center.
+        self.assertIn('[176,76,18.24', out, out)
+        self.assertIn('"Bob"', out, out)          # FULL name label drawn
+        self.assertIn('"B"', out)                 # identity letter drawn
+        self.assertIn('"?"', out, out)            # approximate marker glyph
+        # The "?" marker is at the block CENTER (248,148) — NOT at the block
+        # origin cell center (128,120) and NOT where an "item.x is a cell"
+        # render would put it (128,76).
+        self.assertIn('[248,148,14.39', out, out)
+        self.assertNotIn('[128,120', out)
+        self.assertNotIn('[128,76', out)
+
+    def test_approx_item_renders_no_identity(self):
+        # An approximate item must NOT leak the entity's name/id anywhere in
+        # the drawn output: only the full contact's text and the "?" glyph.
+        expr = (
+            self._player_state()
+            + "api.els.mapView.hidden=false;"
+            + "api.renderAll();"
+            + "const c=api.els.canvas.getContext('2d');"
+            + "return {texts:c._texts};})()"
+        )
+        out = js(expr)
+        texts = json.loads(out)["texts"]
+        self.assertIn("Bob", texts)        # the FULL contact IS named
+        self.assertIn("?", texts)          # the approximate marker glyph
+        self.assertNotIn("e1", texts)      # no entity id leak
+
+    def test_canvas_renders_nothing_for_absent_contacts(self):
+        # A player state with NO awareness items (everything out of sight)
+        # must not draw any token/label/"?" beyond the own character.
+        expr = (
+            "(()=>{const map={name:'m',width:16,height:12,cells:Array.from("
+            "{length:12},()=>Array(16).fill('floor'))};"
+            "api.onWelcome({type:'welcome',you:{id:'p2',name:'Alice',"
+            "role:'player',entity_id:'e2'},map,entities:[],"
+            "you_entity:{id:'e2',name:'Alice',kind:'player',team:'party',"
+            "x:1,y:1},players:[],awareness:[],fog:false});"
+            "api.els.mapView.hidden=false;"
+            "api.renderAll();"
+            "const c=api.els.canvas.getContext('2d');"
+            "return {arcs:c._arcs,texts:c._texts};})()"
+        )
+        out = js(expr)
+        texts = json.loads(out)["texts"]
+        self.assertIn("A", texts)    # own token letter only
+        self.assertIn("YOU", texts)  # own label
+        self.assertNotIn("?", texts)  # no approximate markers
+
+    def test_player_sidebar_rows_for_full_and_approx(self):
+        # The stub DOM's appendChild/innerHTML don't maintain live child
+        # lists, so rows are captured at creation time (the established
+        # harness pattern) and the span children are tracked per row.
+        expr = (
+            self._player_state()
+            + "api.els.mapView.hidden=false;"
+            + "const doc=api.document;const rows=[];const realCreate=doc.createElement;"
+            + "doc.createElement=(t)=>{const el=realCreate(t);"
+            + "if(t==='li'){const row={el,spans:[],texts:[]};rows.push(row);"
+            + "el.appendChild=(c)=>{row.spans.push(c.className);"
+            + "row.texts.push(c.textContent||'');return c};}"
+            + "return el};"
+            + "api.drawSidebar();"
+            + "doc.createElement=realCreate;"
+            + "return {rows:rows.map(r=>({cls:r.el.className,spans:r.spans,"
+            + "texts:r.texts})),summary:api.els.awarenessSummary.textContent};})()"
+        )
+        out = js(expr)
+        data = json.loads(out)
+        rows = data["rows"]
+        # Row 1: own character (YOU, blue-ringed dot).
+        self.assertIn("is-own", rows[0]["cls"])
+        self.assertIn("YOU", " ".join(rows[0]["texts"]))
+        self.assertIn("dot-own", " ".join(rows[0]["spans"]))
+        # Row 2: FULL contact — named, team-colored shape dot, exact coords.
+        self.assertIn("dot-tri team-party", " ".join(rows[1]["spans"]))
+        self.assertIn("Bob", " ".join(rows[1]["texts"]))
+        self.assertIn("(3, 1)", " ".join(rows[1]["texts"]))
+        # Row 3: approximate contact — muted "Unknown" chip, NO name,
+        # block coordinates.
+        self.assertIn("dot-approx", " ".join(rows[2]["spans"]))
+        self.assertIn("Unknown", " ".join(rows[2]["texts"]))
+        self.assertNotIn("Bob", " ".join(rows[2]["texts"]))
+        self.assertIn("(2, 1)", " ".join(rows[2]["texts"]))
+        # Summary counts the 1 ally + the 1 unseen approximate contact.
+        self.assertIn("1 ally", data["summary"])
+        self.assertIn("1 unseen", data["summary"])
 
 
 class TestBug006GmRosterInSidebar(FrontendBase):
@@ -713,6 +843,20 @@ class TestIndexHtml(FrontendBase):
         # The player-facing default title is in the markup; the GM title is
         # applied per role by applyState (checked in TestGmControllerView).
         self.assertIn('title="GM controls fog of war"', self.html)
+
+    def test_legend_documents_approximate_and_hidden_contacts(self):
+        # The canvas legend must document the three player visibility
+        # states: full (labeled) contacts, the gray "?" approximate contact
+        # (within 4 squares, sight blocked), and that anything beyond 4
+        # squares or blocked farther away is hidden.
+        self.assertIn('dot-approx', self.html)
+        self.assertIn("unseen contact", self.html)
+        import re
+        m = re.search(r'<div id="legend">(.*?)</div>', self.html, re.DOTALL)
+        self.assertIsNotNone(m, "could not find #legend")
+        legend = re.sub(r"\s+", " ", m.group(1)).lower()
+        self.assertIn("4 square", legend)
+        self.assertIn("hidden", legend)
 
 
 if __name__ == "__main__":

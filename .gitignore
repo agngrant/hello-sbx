@@ -23,3 +23,7 @@ dist/
 .ruff_cache/
 .cache/
 .DS_Store
+
+# Runtime server artifacts (launched process)
+server.log
+server.pid

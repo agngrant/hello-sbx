@@ -1,5 +1,18 @@
 # LittleDungeons — Code-Simplification Review (package-based)
 
+> **Status: IMPLEMENTED (v3.0).** This review's recommendations have been adopted:
+> the stdlib-only build was replaced with the pinned package stack in
+> [`requirements.txt`](../requirements.txt). Adopted: row 1 (Pillow → `imaging.py`),
+> row 3 (websockets → native uvicorn RFC 6455; hand-rolled server codec deleted,
+> `ws.py` now holds only client test helpers), row 4 (FastAPI + uvicorn → `server.py`,
+> with a `ThreadingHTTPServer`-shaped adapter keeping the tests/e2e boot code intact),
+> row 5 (session async bridge via `attach_async`/`_schedule` + uvicorn per-connection
+> send serialization), row 7 (pytest + pytest-timeout; `pytest.ini`).
+> **Not adopted** (by contract): row 6 Pydantic (`models.py` keeps manual
+> `to_dict`/`from_dict`) and row 2 (`pathfinding.py` kept — domain logic, no package
+> wins). The external HTTP/WS surface is frozen and pinned by the test suite +
+> `scripts/e2e_proof.py`. The text below is the original review, kept for reference.
+
 **Scope:** review only. No code changed by this document.
 **Context:** the codebase is stdlib-only **by explicit contract** (PROJECT.md §2 "stdlib pivot"):
 the sandbox has no egress to PyPI, so the app was deliberately built without third-party

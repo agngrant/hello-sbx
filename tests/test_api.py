@@ -17,7 +17,7 @@ os.environ.setdefault("LITTLEDUNGEONS_QUIET_LOGS", "1")
 
 from app.grid import build_sample_map
 from app.imaging import encode_png
-from app.main import LittleDungeonsHandler, ThreadingHTTPServer
+from app.server import ThreadingHTTPServer
 
 
 class ServerTestCase(unittest.TestCase):
@@ -25,7 +25,12 @@ class ServerTestCase(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        cls.httpd = ThreadingHTTPServer(("127.0.0.1", 0), LittleDungeonsHandler)
+        # The ``ThreadingHTTPServer`` here is the drop-in adapter in
+        # ``app.server`` (a uvicorn Server running the FastAPI app in a
+        # background thread). It accepts and ignores the legacy handler
+        # argument, so this boot code is shape-identical to the old stdlib
+        # server. Passing ``None`` for the handler makes that explicit.
+        cls.httpd = ThreadingHTTPServer(("127.0.0.1", 0), None)
         cls.httpd.daemon_threads = True
         cls.httpd.handle_error = lambda *a, **k: None  # quiet test server
         cls.host, cls.port = cls.httpd.server_address[:2]

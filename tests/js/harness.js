@@ -67,22 +67,32 @@ function makeSend() {
 }
 
 /* No-op 2D canvas context: every method is a no-op, every prop settable,
-   measureText returns a fixed width so label sizing never throws. */
-function makeCtx() {
+   measureText returns a fixed width so label sizing never throws.
+   ``arc`` and ``fillText`` are RECORDED (per canvas element, in draw order)
+   so the Python tests can assert WHERE markers are drawn and WHICH labels
+   are drawn (the awareness tier-rendering tests). */
+function makeCtx(el) {
   const noop = function () { return undefined; };
   return {
+    _el: el,
+    _arcs: [],      // [cx, cy, r] in draw order
+    _texts: [],     // fillText strings in draw order
     fillStyle: "", strokeStyle: "", lineWidth: 1, globalAlpha: 1,
     font: "", textAlign: "", textBaseline: "",
     fillRect: noop, strokeRect: noop, clearRect: noop, beginPath: noop,
-    moveTo: noop, lineTo: noop, arc: noop, arcTo: noop, rect: noop,
-    closePath: noop, fill: noop, stroke: noop, save: noop, restore: noop,
-    clip: noop, setTransform: noop, transform: noop, fillText: noop,
-    strokeText: noop, measureText() { return { width: 10 }; },
+    moveTo: noop, lineTo: noop,
+    arc(cx, cy, r) { this._arcs.push([cx, cy, r]); },
+    arcTo: noop, rect: noop, closePath: noop,
+    fill: noop, stroke: noop, save: noop, restore: noop,
+    clip: noop, setTransform: noop, transform: noop, setLineDash: noop,
+    fillText(t, x, y) { this._texts.push(String(t)); },
+    strokeText: noop,
+    measureText() { return { width: 10 }; },
   };
 }
 
 function makeEl() {
-  return {
+  const el = {
     id: "", hidden: false, textContent: "", value: "", checked: false,
     disabled: false, tabIndex: 0, innerHTML: "", files: [],
     style: {}, dataset: {},
@@ -97,9 +107,13 @@ function makeEl() {
     insertBefore() {}, querySelector() { return null; }, querySelectorAll() { return []; },
     getBoundingClientRect() { return { left: 0, top: 0, width: 800, height: 600 }; },
     setPointerCapture() {},
-    getContext() { return makeCtx(); },
     closest() { return null; }, children: { length: 0 }, firstChild: null,
   };
+  // One shared context per canvas element (arc/fillText recordings persist
+  // across the layout -> render passes within a single test expression).
+  let _ctx = null;
+  el.getContext = () => { if (!_ctx) _ctx = makeCtx(el); return _ctx; };
+  return el;
 }
 
 function buildApi() {
@@ -150,7 +164,8 @@ function buildApi() {
     ";global.__TAPI__ = { state, els, document," +
     "allEntities, onPath, stopAnim, findEntity, isAnimating," +
     "applyState, onWelcome, onState, onServerMessage, onError," +
-    "entityAtCell, drawSidebar, openUploadedMap, sendMove, selectEntity," +
+    "entityAtCell, drawSidebar, renderAll, drawDot, drawUnknownDot," +
+    "openUploadedMap, sendMove, selectEntity," +
     "createEntity, toggleFog, canvasHint, showGmFirstRunHint, dismissGmFirstRunHint, updateControlHint," +
     "join, connectWs, setConn, scheduleReconnect, showView, wsSend, wsUrl," +
     "_timer: timer, _send: __SEND }";
