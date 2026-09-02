@@ -1,0 +1,10 @@
+# Python 3.14.4 — verified installable in this sandbox (pip 26.2.1), probed 2026-09-02.
+# Only packages confirmed to install into the .venv are listed, pinned to the
+# version that actually installed. All 7 probe candidates succeeded.
+fastapi==0.141.1
+pillow==12.3.0
+pydantic==2.13.5
+pytest==9.1.1
+pytest-timeout==2.4.0
+uvicorn==0.52.4
+websockets==17.1
