@@ -942,6 +942,89 @@ class TestFindFreeFloorFallback(unittest.TestCase):
         self.assertEqual(s._find_free_floor(), (1, 1))
 
 
+# ---------------------------------------------------------------------------
+# BUG-QA-001: a GAP in the e-ids (from a GM delete) must not wedge the
+# id allocator. The buggy probe recomputed the SAME value
+# (``eid = f"e{len(self.entities)+1}"``) on every loop pass and spun forever
+# the moment the probe landed on an occupied id. The fix increments a counter
+# so the probe always advances. The functional test below would hang on a
+# regression, so it runs the wedging create on a daemon watchdog thread with a
+# bounded join; a second cheap static guard checks the source increments.
+# ---------------------------------------------------------------------------
+
+
+class TestIdAllocationGap(unittest.TestCase):
+    def setUp(self) -> None:
+        self.session = GameSession("t", build_sample_map())
+        self.gm_s = FakeSock()
+        self.p1_s = FakeSock()
+        self.gm, err = self.session.join(self.gm_s, "Gamer", "gm")
+        self.p1, err1 = self.session.join(self.p1_s, "Alice", "player")
+        self.assertIsNone(err)
+        self.assertIsNone(err1)
+
+    def _create(self, name: str, kind: str, team: str, x: int, y: int):
+        return self.session.handle_message(
+            self.gm_s,
+            {"type": "create_entity", "name": name, "kind": kind,
+             "team": team, "x": x, "y": y},
+        )
+
+    def test_create_delete_create_does_not_wedge_id_allocation(self):
+        # Cheap static guard: the allocator in BOTH id-allocation sites
+        # increments a counter (the old bug recomputed the same value).
+        import inspect
+
+        self.assertIn("n += 1", inspect.getsource(self.session.join))
+        self.assertIn("n += 1", inspect.getsource(self.session._on_create_entity))
+
+        # e1 = the player's starting token (GM is a pure controller: no token).
+        p1_ent = self.session.players[self.p1.id].entity_id
+        self.assertEqual(p1_ent, "e1")
+
+        # GM creates A (npc) -> e2, B (enemy) -> e3.
+        self.assertIsNone(self._create("A", "npc", "neutral", 5, 5))
+        self.assertIsNone(self._create("B", "enemy", "hostile", 6, 6))
+        self.assertEqual(set(self.session.entities), {"e1", "e2", "e3"})
+        a_id = next(e.id for e in self.session.entities.values()
+                    if e.name == "A")
+        self.assertEqual(a_id, "e2")
+
+        # GM deletes A -> {e1, e3}: a GAP at e2, and len==2, so the next
+        # probe is e3 (occupied). This is exactly the wedge condition.
+        self.assertIsNone(self.session.handle_message(
+            self.gm_s, {"type": "delete_entity", "entity_id": a_id}
+        ))
+        self.assertEqual(set(self.session.entities), {"e1", "e3"})
+
+        # GM creates C -> must return promptly (not loop forever).
+        # Watchdog: run on a daemon thread with a bounded join so a regression
+        # fails the suite instead of hanging it.
+        result: dict = {}
+
+        def do_create() -> None:
+            result["reply"] = self._create("C", "npc", "neutral", 7, 7)
+
+        worker = threading.Thread(target=do_create, daemon=True)
+        worker.start()
+        worker.join(timeout=5)
+        self.assertFalse(
+            worker.is_alive(),
+            "id allocation wedged on the e-id gap (BUG-QA-001 regression)",
+        )
+        self.assertIsNone(result.get("reply"))
+
+        c = next((e for e in self.session.entities.values()
+                  if e.name == "C"), None)
+        self.assertIsNotNone(c, "entity C was not created")
+        # Fresh, unique id: none of the pre-existing ids, present, and no
+        # duplicate ids anywhere in the session.
+        self.assertNotIn(c.id, {"e1", "e2", "e3"})
+        self.assertIn(c.id, self.session.entities)
+        ids = [e.id for e in self.session.entities.values()]
+        self.assertEqual(len(ids), len(set(ids)), "duplicate entity id")
+        self.assertEqual(c.id, "e4")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -208,9 +208,11 @@ class GameSession:
                 # Players only get a starting token (the GM is a pure
                 # controller — it never gets one).
                 x, y = self._find_free_floor()
-                eid = f"e{len(self.entities) + 1}"
+                n = len(self.entities)
+                eid = f"e{n + 1}"
                 while eid in self.entities:
-                    eid = f"e{len(self.entities) + 1}"
+                    n += 1
+                    eid = f"e{n + 1}"
                 entity = Entity(
                     id=eid, name=name, kind="player", team="party",
                     x=x, y=y, owner=pid,
@@ -543,9 +545,11 @@ class GameSession:
         with self._lock:
             if not (0 <= x < self.grid.width and 0 <= y < self.grid.height):
                 return {"type": "error", "message": "destination out of bounds"}
-            eid = f"e{len(self.entities) + 1}"
+            n = len(self.entities)
+            eid = f"e{n + 1}"
             while eid in self.entities:
-                eid = f"e{len(self.entities) + 1}"
+                n += 1
+                eid = f"e{n + 1}"
             self.entities[eid] = Entity(
                 id=eid, name=name.strip(), kind=kind, team=team,
                 x=x, y=y, owner=None,
