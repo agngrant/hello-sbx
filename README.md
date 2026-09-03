@@ -131,6 +131,19 @@ have seen before render greyed out, and never-seen cells aren't drawn at all
 (the map reads as a fog of war with memory). The GM always sees the full map.
 Entity awareness (the overlay above) is independent and unchanged.
 
+### Doors
+
+Every doorway is a **door**, and doors start **closed + locked** by default.
+The **GM** unlocks/locks doors and can open/close them (the bottom-bar **🚪
+Door** tool with its unlock / lock / open / close sub-buttons); **players**
+can open/close a door that is **unlocked** by simply **tapping** it — a locked
+door refuses with a "door is locked" toast. A **closed** door blocks sight
+and movement exactly like a wall; an **open** door is walkable and
+sight-transparent. Awareness and the explored map work through doors the same
+way they do through walls (the far side greys out / hides). The three states
+are colour-distinct in the legend: **locked = red + padlock**, **closed-
+unlocked = amber + bar**, **open = amber + arch**.
+
 ---
 
 ## Upload & automatic wall/doorway detection
@@ -273,6 +286,12 @@ python -m unittest discover -s tests -t .   # also supported (suite is unittest-
   full info only on entities with clear line of sight, an approximate (identity-free)
   marker within 4 squares when sight is blocked, and nothing beyond. The old
   fog-of-war toggle no longer affects visibility (kept on the wire for compat).
+- **Shared map state across sessions on an unregistered map id.** Multiple
+  sessions on a map that is not explicitly registered (e.g. the built-in
+  sample map reached via a bare session id) share the same live grid, so door
+  states (and paints) made in one session are visible in the other; the normal
+  upload/generate → use_map flow gives each map its own grid
+  ([`docs/qa/BUG-DOORS-001.md`](docs/qa/BUG-DOORS-001.md)).
 - **No authentication / no cross-host networking hardening.** It binds to a
   localhost host by default and trusts everyone who can reach it; it's a local
   tabletop tool, not a hardened public service.

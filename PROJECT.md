@@ -164,7 +164,11 @@ class Grid:
     height: int
     cells: list[list[str]]          # cells[y][x] -> CellType
     image: str | None = None        # stored source image name (optional)
-    def to_dict(self) -> dict: ...   # {"name","width","height","cells","image"}
+    doors: dict[str, str] | None = None  # ADDITIVE (door-features spec §3):
+                                         # "<x>,<y>" -> "L"/"U"/"O"; absent/None ⇒
+                                         # all doors closed+locked; keys only on
+                                         # doorway cells
+    def to_dict(self) -> dict: ...   # {"name","width","height","cells","image"} + additive "doors"
     @classmethod
     def from_dict(cls, d: dict) -> "Grid": ...
 
@@ -260,7 +264,8 @@ diagonal step that squeezes between two wall corners (both orthogonal "elbow"
 cells walls) — the same no-corner-cut rule as movement. Endpoints never
 block (``a == b`` → True). The ``fog`` flag is retained in the payloads for
 wire compatibility but no longer gates visibility. The GM is never fogged or
-filtered.
+filtered. A **CLOSED** door blocks sight exactly like a wall (door-features
+spec); an open door does not.
 
 > **Map tiers (explored map, additive):** the *grid* is now also tiered per
 > player — seen (line of sight, full detail) / explored (greyed) / hidden
@@ -280,7 +285,9 @@ filtered.
 - **Pathfinding (`pathfinding.py`):** A* on 8 directions. A diagonal step is
   forbidden if *either* of the two adjacent orthogonal cells is a wall
   (prevents squeezing through a corner). `wall` is blocked; `floor` and
-  `doorway` are walkable. If a path exists, the entity moves along it (server
+  `doorway` are walkable. A **closed** door blocks movement exactly like a
+  wall; an **open** door is walkable; GM override bypasses closed doors. If
+  a path exists, the entity moves along it (server
   stores/records the path; client animates). If no path and no override →
   reject with `{type:"error", message:"no route — wall in the way"}`. With
   `override:true`, the entity is moved directly to the target (walls ignored).
@@ -348,6 +355,12 @@ record). Full spec: `docs/design/generated-maps.md`.
 | POST | `/api/maps/generate` | GM | `{"name","cols","rows","seed"?}` → procedurally generated map (same response shape as upload, §7) |
 | POST | `/api/maps/{id}/paint` | GM | `{"x","y","cell_type"}` set one cell |
 
+**Map objects (additive, door-features spec §8.1):** every map object in the
+REST responses — `GET /api/maps/{id}`, the upload and generate responses —
+now carries the additive `doors` field (a `"<x>,<y>" → "L"/"U"/"O"` dict over
+the doorway cells; absent ⇒ all doors closed+locked; the key is omitted
+entirely for a grid with no doorways). No new routes.
+
 **Role assignment:** the first client to send `role:"gm"` over WebSocket (or
 the first client when no GM exists) becomes the GM. Server enforces max 1 GM
 and max 6 players; further joins get `{type:"error", message:"session full"}`.
@@ -372,11 +385,19 @@ Endpoint: `ws://host/ws` (upgrade from `GET /ws` with `Upgrade: websocket`).
   `"awareness must be an integer 0–20"`).
 - `{type:"paint", x, y, cell_type}` — GM edit grid.
 - `{type:"set_fog", on}` — GM toggle fog of war.
+- `{type:"door", x, y, action}` — door action on the doorway cell at (x, y)
+  (door-features spec §4): `action` ∈ `unlock`/`lock`/`open`/`close`;
+  `unlock`/`lock` are GM-only, players may `open`/`close` an unlocked door;
+  a closed door blocks LOS and movement; errors per
+  `docs/design/door-features.md` §4.3.
 
 **Server → client** (JSON text frames):
 - `{type:"welcome", you:{id,name,role,entity_id}, map, entities, players, fog}`
 - `{type:"state", map, entities, players, fog}` — full snapshot broadcast to
   everyone on any mutation (small game → snapshot is simplest + testable).
+  Every `map` object now carries the additive `doors` field (a
+  `"<x>,<y>" → "L"/"U"/"O"` dict over the doorway cells; absent ⇒ all doors
+  closed+locked; the key is omitted when the grid has no doorways).
 - **`visibility`** (additive, explored map) — an extra field on player
   `welcome`/`state` payloads only: a `height`×`width` matrix of `S`/`E`/`H`
   tier rows. **Absent for the GM** (no key) — the GM's payload is unchanged.

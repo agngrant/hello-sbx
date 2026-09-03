@@ -795,12 +795,15 @@ class GameSession:
           3. the cell is a ``doorway`` → ``"not a doorway"``
           4. ``action`` is valid → ``"action must be one of unlock/lock/
              open/close"``
-          5. the ``(state, action)`` transition is legal (with the
-             occupancy guard folded in — a transition that would make the
-             door closed with a token on it is rejected) → the state-
-             specific error
+          5. the ``(state, action)`` transition is legal → the
+             state-specific error
           6. the action is role-allowed (``unlock``/``lock`` are GM-only)
              → ``"not allowed"``
+          7. occupancy: a transition that would make the door closed —
+             ``close``, and ``lock`` from ``open`` (force-closes) — with a
+             token on it is rejected → ``"cannot close a door with a
+             token on it"``. This runs AFTER the role check, so a player
+             ``lock`` on an open+token door reports ``"not allowed"``.
 
         On success the state is applied and the ``state`` broadcast carries
         the new ``map.doors`` (no per-client reply, cf. ``paint``). The
@@ -823,9 +826,10 @@ class GameSession:
                         "message": "action must be one of unlock/lock/open/close"}
             cur = self.grid.door_state_at(x, y)  # "L" | "U" | "O"
             # Transition legality (before role, so a state failure is the
-            # more informative one — spec §4.3). The occupancy guard is
-            # folded in: it fires on exactly the transitions that make the
-            # door CLOSED (``close``, and ``lock`` from ``open`` — A5), never
+            # more informative one — spec §4.3). The occupancy guard runs
+            # AFTER the role check (§4.3 orders role #6 before occupancy
+            # #7): it fires on exactly the transitions that make the door
+            # CLOSED (``close``, and GM ``lock`` from ``open`` — A5), never
             # on ``lock`` from ``unlocked`` (already closed).
             if action == "open" and cur == "O":
                 return {"type": "error", "message": "door is already open"}
@@ -842,15 +846,19 @@ class GameSession:
                 return {"type": "error", "message": "door is already unlocked"}
             if action == "lock" and cur == "L":
                 return {"type": "error", "message": "door is already locked"}
-            if action == "lock" and cur == "O" and self._any_entity_at(x, y):
-                # lock-while-open force-closes → same occupancy guard as close.
-                return {"type": "error",
-                        "message": "cannot close a door with a token on it"}
             # Role: unlock/lock are GM-only (open/close already gated by the
             # locked/unlocked state above, so a locked door reports
-            # "door is locked" even for a player).
+            # "door is locked" even for a player). §4.3 orders this BEFORE
+            # occupancy, so a player `lock` on an open+token door reports
+            # "not allowed", never the occupancy string (BUG-DOORS-002).
             if action in ("unlock", "lock") and not is_gm:
                 return {"type": "error", "message": NOT_ALLOWED}
+            # Occupancy (A5, §4.3 #7): `lock` from `open` force-closes →
+            # same occupancy guard as `close`. Only a GM can reach this —
+            # the role check above runs first.
+            if action == "lock" and cur == "O" and self._any_entity_at(x, y):
+                return {"type": "error",
+                        "message": "cannot close a door with a token on it"}
             new_state = {
                 ("unlock", "L"): "U",
                 ("open", "U"): "O",

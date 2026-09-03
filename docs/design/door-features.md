@@ -683,11 +683,14 @@ greyed door reads as "a door I know about, not in front of me"):
 | **closed, unlocked (`U`)** | `#6b7280` | `#9a8f7a` (desaturated amber) + bar |
 | **closed, locked (`L`)** | `#6b7280` | `#a06b6b` (desaturated red) + padlock |
 
-(Exact hex for the two desaturated explored variants are the engineer's to
-finalize at build time within the constraint: *a grey-family value, value-
-distinct from the explored floor `#6b7280` and from each other, and
-distinguishable at the 8px minimum cell size* — the full-tier hexes above are
-pinned; the explored variants must preserve the same three-way distinguishability.)
+(**ERRATUM / build note:** the three explored-tier border hexes above
+— `#8b94a3` / `#9a8f7a` / `#a06b6b` — are the values that were actually
+shipped and are the *final* hexes (they match the `T` tokens in
+§7.3 and `app/static/app.js`/`style.css` byte-for-byte). They satisfy the
+constraint: grey-family, value-distinct from the explored floor `#6b7280`
+and from each other, and distinguishable at the 8px minimum cell size. The
+"engineer to finalize at build time" phrasing is therefore resolved in
+favour of the pinned values above; there is no remaining ambiguity.)
 
 **Grid-line / hatch treatment:** door cells (all three states) are **floor-
 based** (fill = floor color, not wall), so they get the **grid line** of their
@@ -773,16 +776,32 @@ sub-buttons, consistent with the existing select/floor/wall/doorway bar):
 
 ### 7.6 Player open/close (D7) — tap the door cell
 
+> **ERRATUM (QA, door-features sign-off):** the original wording of this
+> section mapped the player tap to the *same-direction* action — `U` → `close`,
+> `O` → `open`. That mapping is **logically incoherent**: a door can only be
+> `U` (closed, unlocked) when it is closed, so `U → close` is always
+> "already closed", and an open door (`O → open`) is always "already open" —
+> the player could **never** open a door, contradicting the user requirement
+> "doors can be opened and closed" (the very behavior the feature exists to
+> provide). It also contradicted this same section's *second* bullet ("tapping
+> an open door toggles it closed", i.e. `O → close`) and AC11(d). The shipped
+> mapping is the **inverse action** — a tap performs the action that *changes*
+> the door — which is the only mapping that lets a player actually open a door.
+> This section (and AC11(d)) is corrected below to pin the **shipped, coherent**
+> behavior.
+
 A **player** (no door tool) interacts by **tapping a doorway cell**:
 
 - In the canvas `click` handler, **before** the "move" branch: if the cell is
-  a `doorway` and the cell is a **door** (it always is) and its state is
-  **`U` (closed, unlocked)** or **`O` (open)** and the clicked cell has **no
-  entity** on it, the player's tap is interpreted as a **door action**:
-  `U` → `close`, `O` → `open` (send `{type:"door", x, y, action}`). A `L`
-  (locked) door tapped by a player sends `open` (or `close`) and the server
-  replies `"door is locked"` (shown as a toast) — the player cannot unlock
-  (no such button), so this is the "locked door, you can't open it" feedback.
+  a `doorway` (it is therefore always a **door**) and the clicked cell has **no
+  entity** on it, the player's tap is interpreted as the **inverse door action**
+  for the door's current state (send `{type:"door", x, y, action}`):
+  `U` (closed, unlocked) → `open`, `O` (open) → `close`, `L` (locked) → `open`
+  (the server replies `"door is locked"` — shown as a toast — since a locked
+  door is closed). The `L → open` case is the "locked door, you can't open it"
+  feedback: the player cannot unlock (no such button), so the toast is the
+  signal. A tap on a cell occupied by an entity is **not** a door action
+  (entity selection/movement keeps priority).
 - **Priority with movement:** a player taps a **door cell** (doorway) to
   *act on the door*; a player taps a **floor cell** to *move*. Because a door
   is a `doorway` (not a `floor`), there is no ambiguity: tapping a doorway cell
@@ -1269,10 +1288,11 @@ over the live server. All deterministic.
   (no matrix) renders full-tier. (b) `state.doors` is set from `msg.map.doors`
   (`{}` when absent); a malformed `doors` ⇒ `{}` (all locked), never crashes.
   (c) GM Door tool: selecting an action + clicking a door cell sends
-  `{type:"door", x, y, action}`. (d) Player: tapping a `U` door cell sends
-  `close`, tapping an `O` door cell sends `open`, tapping a `L` door cell
-  sends `open` (server replies `"door is locked"`). (e) Preview canvas
-  untouched (still no door state beyond the map's).
+  `{type:"door", x, y, action}`. (d) Player tap sends the **inverse** action for
+  the door's state (ERRATUM — see §7.6): tapping a `U` (closed, unlocked) door
+  cell sends `open`, tapping an `O` (open) door cell sends `close`, tapping a
+  `L` (locked) door cell sends `open` (server replies `"door is locked"`).
+  (e) Preview canvas untouched (still no door state beyond the map's).
 - **AC12 — Backward compatibility (A2).** A `Grid.from_dict` of a payload with
   **no** `doors` key yields an all-locked grid; the old two/three-argument
   `walkable`/`is_valid_step`/`has_line_of_sight` calls still run (and behave

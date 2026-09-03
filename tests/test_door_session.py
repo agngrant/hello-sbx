@@ -255,6 +255,39 @@ class TestDoorOccupancy(DoorSessionBase):
         self.assertIsNone(self.gm_door(5, 5, "lock"))  # allowed (not guarded)
         self.assertEqual(self.session.grid.door_state_at(5, 5), "L")
 
+    def test_player_lock_on_open_door_with_token_is_not_allowed(self):
+        # BUG-DOORS-002: the §4.3 order is role (#6) BEFORE occupancy (#7).
+        # A player `lock` on an open door with a token on it must get the
+        # role rejection "not allowed" — never the occupancy string.
+        # Regression test: the GM close path below is unchanged.
+        self.assertIsNone(self.gm_door(5, 5, "unlock"))
+        self.assertIsNone(self.gm_door(5, 5, "open"))
+        self.assertIsNone(drive(self.session, self.gm_s,
+                                {"type": "place", "entity_id": self.p1_ent,
+                                 "x": 5, "y": 5}))
+        # Player `lock` on the open+token door: role check fires first.
+        self.assertEqual(
+            self.p1_door(5, 5, "lock"),
+            {"type": "error", "message": "not allowed"},
+        )
+        # GM `close` on the same open+token door: still the occupancy error
+        # (close is not GM-only, so the role gate passes and occupancy #7
+        # fires) — unchanged by the reorder.
+        self.assertEqual(
+            self.gm_door(5, 5, "close"),
+            {"type": "error",
+             "message": "cannot close a door with a token on it"},
+        )
+        # And GM `lock` from open is still the occupancy error (force-close
+        # guard, AC9) — the reorder only reorders the player-role path.
+        self.assertEqual(
+            self.gm_door(5, 5, "lock"),
+            {"type": "error",
+             "message": "cannot close a door with a token on it"},
+        )
+        # All three rejections left the door open.
+        self.assertEqual(self.session.grid.door_state_at(5, 5), "O")
+
 
 class TestDoorWireState(DoorSessionBase):
     """I3/I5/AC10: every welcome/state map object carries the FULL door set."""
