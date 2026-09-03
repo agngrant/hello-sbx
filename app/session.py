@@ -42,6 +42,7 @@ from typing import Any
 from app.awareness import AWARENESS_MAX, AWARENESS_MIN, build_awareness
 from app.models import CELL_TYPES, TEAMS, Entity, Grid, Player
 from app.pathfinding import find_path
+from app.visibility import build_visibility_mask, visible_cells
 
 logger = logging.getLogger(__name__)
 
@@ -107,6 +108,15 @@ class GameSession:
         self._cid_by_sock: dict[int, str] = {}        # id(connection) -> client id
         self._senders: dict[str, Any] = {}            # client id -> async send coroutine
         self._client_seq = itertools.count(1)         # reconnect-proof client ids
+        # Explored-map (docs/design/explored-map.md §3.3): per-player memory
+        # of cells ever in line of sight on the CURRENT map. Session-level on
+        # purpose (NOT a Player field) so the ``players[]`` wire shape stays
+        # byte-identical; keyed by player id, which is stable across
+        # reconnects (memory survives disconnect/re-attach). Lifecycle:
+        # created lazily on first sight; folded on every recompute; frozen
+        # for token-less players; cleared on ``use_map`` (D3); pruned on
+        # ``leave`` (D6). GMs never get an entry (D4).
+        self._explored: dict[str, set[tuple[int, int]]] = {}
 
     # ------------------------------------------------------------------
     # Connection bookkeeping
@@ -265,6 +275,7 @@ class GameSession:
                 del self.entities[player.entity_id]
             del self.players[player_id]
             self._socks.pop(player_id, None)
+            self._explored.pop(player_id, None)
 
     def _find_free_floor(self) -> tuple[int, int]:
         """First free (row-major) floor/doorway cell, else the first in-bounds
@@ -329,10 +340,19 @@ class GameSession:
         carries a player's own character dict — which ``build_awareness``
         excludes — so the client can render its own token; it is ``None``
         for the GM, which has no entity at all.
+
+        Explored map (§3.5): for a **player** this is the single choke
+        point where the additive ``"visibility"`` tier matrix is computed
+        — the player's currently-seen cells are folded into their explored
+        set (frozen when the player has no token) and the mask (S/E/H rows
+        over the grid) is added to the payload. For the **GM** the key is
+        simply never added (D4 — the GM payload is untouched by the
+        feature). Every player snapshot (welcome, broadcast, request_state)
+        routes through here, all under the session lock.
         """
         is_gm = viewer.role == "gm"
         own = self.entities.get(viewer.entity_id) if viewer.entity_id else None
-        return {
+        payload = {
             "type": "state",
             "map": self.grid.to_dict(),
             "players": [p.to_dict() for p in self.players.values()],
@@ -341,6 +361,36 @@ class GameSession:
             "awareness": self._awareness_for(viewer),
             "fog": self.fog,
         }
+        if not is_gm:
+            payload["visibility"] = self._visibility_for(viewer, own)
+        return payload
+
+    def _visibility_for(self, viewer: Player, own: Entity | None) -> list[str]:
+        """The additive ``visibility`` tier matrix for a PLAYER (spec §3.3–§3.5).
+
+        ``own`` is the viewer's live entity (``None`` when they have no
+        token: ``entity_id`` is ``None`` or the entity was deleted).
+
+        * With a token: ``pos = (own.x, own.y)``; the visible set
+          (``visible_cells(grid, pos)``) is folded into the player's
+          explored set — memory is monotonic within a map, a cell never
+          goes S/E → H — and the mask renders S around the token, E where
+          memory reaches, H elsewhere.
+        * Without a token: the explored set is FROZEN (nothing new folds in
+          — the anchor is gone, so no new sight can be generated) and the
+          mask is built with ``pos=None`` → E/H only, no S anywhere.
+
+        Called from :meth:`state_for` (lock held); the fold is per-viewer
+        only — no cross-viewer coupling.
+        """
+        pos = (own.x, own.y) if own is not None else None
+        explored = self._explored.setdefault(viewer.id, set())
+        if pos is not None:
+            visible = visible_cells(self.grid, pos)
+            explored |= visible  # idempotent, amortized O(1) per new cell
+        else:
+            visible = set()      # frozen memory: no new cells are revealed
+        return build_visibility_mask(self.grid, explored, pos, visible)
 
     def welcome_for(self, viewer: Player) -> dict[str, Any]:
         """§9 ``welcome`` = :meth:`state_for` plus ``"you"``."""
@@ -764,5 +814,10 @@ class GameSession:
                     continue
                 free = self._find_free_floor()
                 e.x, e.y = free
+            # Explored map (D3): old cells reference a different map (possibly
+            # a different size) — clear EVERY player's memory BEFORE the
+            # broadcast, so the post-swap snapshots re-seed from the NEW
+            # positions and no stale-coordinate cell can ever render E.
+            self._explored.clear()
             self._run_b(self._broadcast())
         return None

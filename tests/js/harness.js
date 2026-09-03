@@ -73,17 +73,32 @@ function makeSend() {
    are drawn (the awareness tier-rendering tests). */
 function makeCtx(el) {
   const noop = function () { return undefined; };
+  const path = [];       // {m:[x,y], l:[x,y]} | {r:[x,y,w,h]} — stroke() snapshot
+  let m = null;
   return {
     _el: el,
     _arcs: [],      // [cx, cy, r] in draw order
     _texts: [],     // fillText strings in draw order
+    _fills: [],     // {x,y,w,h,style} fillRect calls in draw order
+    _strokes: [],   // {style, path:[...]} per stroke() call, in draw order
     fillStyle: "", strokeStyle: "", lineWidth: 1, globalAlpha: 1,
     font: "", textAlign: "", textBaseline: "",
-    fillRect: noop, strokeRect: noop, clearRect: noop, beginPath: noop,
-    moveTo: noop, lineTo: noop,
+    fillRect(x, y, w, h) { this._fills.push({ x: x, y: y, w: w, h: h,
+                                               style: this.fillStyle }); },
+    strokeRect: noop, clearRect: noop, beginPath() { path.length = 0; m = null; },
+    moveTo(x, y) { m = [x, y]; },
+    lineTo(x, y) {
+      if (m) { path.push({ m: m.slice(), l: [x, y] }); m = null; }
+      else { path.push({ m: [x, y], l: [x, y] }); }
+    },
+    rect(x, y, w, h) { path.push({ r: [x, y, w, h] }); },
     arc(cx, cy, r) { this._arcs.push([cx, cy, r]); },
-    arcTo: noop, rect: noop, closePath: noop,
-    fill: noop, stroke: noop, save: noop, restore: noop,
+    arcTo: noop, closePath: noop,
+    fill: noop, stroke() {
+      this._strokes.push({ style: this.strokeStyle, path: path.slice() });
+      path.length = 0; m = null;
+    },
+    save: noop, restore: noop,
     clip: noop, setTransform: noop, transform: noop, setLineDash: noop,
     fillText(t, x, y) { this._texts.push(String(t)); },
     strokeText: noop,
@@ -215,6 +230,7 @@ function buildApi() {
     "allEntities, onPath, stopAnim, findEntity, isAnimating," +
     "applyState, onWelcome, onState, onServerMessage, onError," +
     "entityAtCell, drawSidebar, renderAll, drawDot, drawUnknownDot," +
+    "drawGridOnCanvas, layoutCanvas, validateVisibilityMatrix," +
     "openUploadedMap, sendMove, selectEntity," +
     "createEntity, toggleFog, canvasHint, showGmFirstRunHint, dismissGmFirstRunHint, updateControlHint," +
     "join, connectWs, setConn, scheduleReconnect, showView, wsSend, wsUrl," +

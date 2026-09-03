@@ -24,15 +24,26 @@ from __future__ import annotations
 
 import asyncio
 import threading
+import time
 import unittest
 
+from app.awareness import build_awareness
 from app.grid import build_sample_map
-from app.models import Entity, Grid
+from app.models import Entity, Grid, Player
+from app.pathfinding import is_valid_step
 from app.session import (
     GameSession,
     MAX_PLAYERS,
     NO_ROUTE,
     SESSION_FULL,
+)
+from tests.test_visibility import (
+    W4_MASK,
+    assert_well_formed,
+    cell as mask_cell,
+    mask_counts,
+    mask_rows,
+    oracle_visible,
 )
 
 
@@ -104,6 +115,11 @@ def make_grid(rows: list[list[str]]) -> Grid:
     height = len(rows)
     width = len(rows[0])
     return Grid(name="test", width=width, height=height, cells=[list(r) for r in rows])
+
+
+def s_cells(mask: list[str]) -> set[tuple[int, int]]:
+    """The (x, y) cells the mask renders as S."""
+    return {(x, y) for y, row in enumerate(mask) for x, ch in enumerate(row) if ch == "S"}
 
 
 class SessionTestCase(unittest.TestCase):
@@ -1275,6 +1291,545 @@ class TestIdAllocationGap(unittest.TestCase):
         ids = [e.id for e in self.session.entities.values()]
         self.assertEqual(len(ids), len(set(ids)), "duplicate entity id")
         self.assertEqual(c.id, "e4")
+
+
+# ---------------------------------------------------------------------------
+# Explored map (docs/design/explored-map.md) — the additive per-player
+# "visibility" tier matrix: S = in sight now, E = explored (greyed memory),
+# H = never seen. GM payloads are structurally untouched (no key at all).
+#
+# Oracle note: the S/E/H spot tiers below are derived from the spec's S1/S2
+# rules applied to the REAL has_line_of_sight (the tests also assert equality
+# with that oracle live). Where a §12 fixture in the spec disagrees with the
+# spec's own rules (AC3 (10,8) and (13,6)), the re-derivation defines
+# correctness per the spec's AC2 doctrine and the corrected tier is pinned
+# here with a comment.
+# ---------------------------------------------------------------------------
+
+
+class TestExploredMapPayloadShape(unittest.TestCase):
+    """AC1 — payload shape (players vs GM)."""
+
+    def setUp(self) -> None:
+        self.session = GameSession("t", build_sample_map())
+        self.gm_s, self.p1_s, self.p2_s = FakeConn(), FakeConn(), FakeConn()
+        self.gm, err = self.session.join(self.gm_s, "Gamer", "gm")
+        self.p1, e1 = self.session.join(self.p1_s, "Alice", "player")
+        self.p2, e2 = self.session.join(self.p2_s, "Bob", "player")
+        self.assertIsNone(err); self.assertIsNone(e1); self.assertIsNone(e2)
+        attach(self.session, self.gm_s)
+        attach(self.session, self.p1_s)
+        attach(self.session, self.p2_s)
+
+    def _check(self, payload: dict) -> None:
+        self.assertIn("visibility", payload)
+        mask = payload["visibility"]
+        assert_well_formed(self, mask, self.session.grid)
+        self.assertEqual(len(mask), self.session.grid.height)
+        for row in mask:
+            self.assertEqual(len(row), self.session.grid.width)
+            self.assertTrue(set(row) <= {"S", "E", "H"})
+
+    def test_welcome_and_state_carry_well_formed_visibility(self):
+        for p in (self.p1, self.p2):
+            w = self.session.welcome_for(p)
+            self.assertEqual(w["type"], "welcome")
+            self._check(w)
+            st = self.session.state_for(p)
+            self._check(st)
+
+    def test_gm_payload_has_no_visibility_key(self):
+        # ABSENT — not null, not [] (spec §4.1, D4).
+        for payload in (self.session.state_for(self.gm),
+                        self.session.welcome_for(self.gm)):
+            self.assertNotIn("visibility", payload)
+
+    def test_broadcast_frames_carry_visibility_players_only(self):
+        drive(self.session, self.gm_s,
+              {"type": "paint", "x": 14, "y": 10, "cell_type": "wall"})
+        for sock in (self.p1_s, self.p2_s):
+            st = sock.last("state")
+            self.assertIn("visibility", st)
+            assert_well_formed(self, st["visibility"], self.session.grid)
+        self.assertNotIn("visibility", self.gm_s.last("state"))
+
+    def test_request_state_carry_visibility(self):
+        reply = drive(self.session, self.p1_s, {"type": "request_state"})
+        self.assertEqual(reply["type"], "state")
+        self.assertIn("visibility", reply)
+        assert_well_formed(self, reply["visibility"], self.session.grid)
+
+    def test_leave_prunes_explored_entry(self):
+        # D6: a full exit deletes the Player record AND their memory.
+        self.session.state_for(self.p1)
+        self.assertIn(self.p1.id, self.session._explored)
+        self.session.leave(self.p1.id)
+        self.assertNotIn(self.p1.id, self.session.players)
+        self.assertNotIn(self.p1.id, self.session._explored)
+        # GM entries never exist (D4) — leaving the GM is a no-op on memory.
+        self.session.leave(self.gm.id)
+        self.assertNotIn(self.gm.id, self.session._explored)
+
+
+class TestExploredMapInitialMask(unittest.TestCase):
+    """AC2 / E1 — the first player's welcome mask is the exact W4 mask."""
+
+    def _player_session(self):
+        # Spec AC2 setup: the GM joins FIRST so the next joiner is a
+        # player (a fresh session's first client would become the GM).
+        s = GameSession("t2", build_sample_map())
+        s.join(FakeConn(), "Gamer", "gm")
+        p1_s = FakeConn()
+        p, err = s.join(p1_s, "Alice", "player")
+        self.assertIsNone(err)
+        return s, p1_s, p
+
+    def test_welcome_mask_equals_w4_literal(self):
+        s, p1_s, p1 = self._player_session()
+        w = s.welcome_for(p1)
+        vis = w["visibility"]
+        self.assertEqual(vis, W4_MASK,
+                         f"\ngot:\n{mask_rows(vis)}\nwant:\n{mask_rows(W4_MASK)}")
+        s_count, e_count, h_count = mask_counts(vis)
+        # 70 S / 0 E / 122 H — see W4_MASK note in tests/test_visibility.py
+        # (the spec literal's (6,7)=H is corrected by the spec's own S2 rule;
+        # the oracle re-derivation defines correctness).
+        self.assertEqual((s_count, e_count, h_count), (70, 0, 122))
+        self.assertEqual(mask_cell(vis, 1, 1), "S")  # the token cell
+        self.assertEqual(s_cells(vis), oracle_visible(s.grid, (1, 1)))
+
+
+class TestExploredMapMoveMemory(unittest.TestCase):
+    """AC3 — tiers flip correctly on a move (E monotonic) + AC4 — the
+    explored set equals exactly the union of every S cell ever seen."""
+
+    FURTHER_MOVES = ((12, 2), (13, 6), (12, 5), (9, 7), (9, 9))
+
+    def setUp(self) -> None:
+        self.session = GameSession("t", build_sample_map())
+        self.gm_s, self.p1_s = FakeConn(), FakeConn()
+        self.gm, _ = self.session.join(self.gm_s, "Gamer", "gm")
+        self.p1, _ = self.session.join(self.p1_s, "Alice", "player")
+        attach(self.session, self.p1_s)
+        self.ent = self.p1.entity_id
+        self.welcome = self.session.welcome_for(self.p1)
+
+    def _gm_move(self, x: int, y: int) -> dict:
+        reply = drive(self.session, self.gm_s,
+                      {"type": "move", "entity_id": self.ent, "x": x, "y": y})
+        self.assertIsNone(reply)
+        path_frame = self.p1_s.sent("path")[-1]
+        path = path_frame["path"]
+        self.assertEqual(path[-1], {"x": x, "y": y})
+        # The path's steps are legal is_valid_steps (no corner cuts).
+        for i in range(len(path) - 1):
+            a = (path[i]["x"], path[i]["y"])
+            b = (path[i + 1]["x"], path[i + 1]["y"])
+            self.assertTrue(is_valid_step(self.session.grid, a, b))
+        return self.p1_s.last("state")
+
+    @staticmethod
+    def _track(mask: list[str], seen: set[tuple[int, int]]) -> None:
+        for y, row in enumerate(mask):
+            for x, ch in enumerate(row):
+                if ch == "S":
+                    seen.add((x, y))
+
+    def test_move_tiers_flip_and_memory_is_monotonic(self):
+        seen: set[tuple[int, int]] = set()
+        self._track(self.welcome["visibility"], seen)
+        self.assertEqual(self.welcome["visibility"], W4_MASK)  # AC2 baseline
+
+        # GM moves the player (1,1) -> (7,2) (one A* move through the
+        # (5,5) doorway).
+        st = self._gm_move(7, 2)
+        vis = st["visibility"]
+        # (1) The S-set equals the oracle re-derivation for the new position.
+        self.assertEqual(s_cells(vis), oracle_visible(self.session.grid, (7, 2)))
+        # (2) Hand-verified spot cells (oracle-derived tiers, documented):
+        for x, y in ((7, 2), (6, 6), (5, 5), (6, 1), (6, 5), (9, 7), (12, 5)):
+            self.assertEqual(mask_cell(vis, x, y), "S", f"{(x, y)} expected S")
+        for x, y in ((1, 1), (2, 5), (4, 9), (0, 5), (3, 11)):
+            self.assertEqual(mask_cell(vis, x, y), "E", f"{(x, y)} expected E")
+        for x, y in ((13, 1), (14, 9), (12, 9)):
+            self.assertEqual(mask_cell(vis, x, y), "H", f"{(x, y)} expected H")
+        # (10,8): the spec AC3 fixture said S, but the real Bresenham line
+        # (7,2)->(10,8) samples wall (10,7) -> H (oracle wins; documented).
+        self.assertEqual(mask_cell(vis, 10, 8), "H")
+        # (13,6): the spec AC3 fixture said H, but the real line
+        # (7,2)->(13,6) passes through the (10,4) doorway with open elbows ->
+        # S (oracle wins; documented).
+        self.assertEqual(mask_cell(vis, 13, 6), "S")
+        self._track(vis, seen)
+
+        # (3) Monotonicity: 5 further GM moves (right room, through the
+        # (9,7) door, down into the bottom band) — no cell ever goes S/E -> H.
+        for x, y in self.FURTHER_MOVES:
+            st = self._gm_move(x, y)
+            v = st["visibility"]
+            for py, row in enumerate(v):
+                for px, ch in enumerate(row):
+                    self.assertNotIn(
+                        ch, ("H",) if (px, py) in seen else (),
+                        f"cell ({px},{py}) regressed S/E -> H at move {((x, y))}",
+                    )
+            self._track(v, seen)
+
+    def test_explored_set_equals_union_of_all_seen_s_cells(self):
+        # AC4: no phantom cells, no missing cells.
+        seen: set[tuple[int, int]] = set()
+        self._track(self.welcome["visibility"], seen)
+        self._gm_move(7, 2)
+        for x, y in self.FURTHER_MOVES:
+            self._track(self._gm_move(x, y)["visibility"], seen)
+        self.assertEqual(self.session._explored[self.p1.id], seen)
+
+
+class TestExploredMapMapSwap(unittest.TestCase):
+    """AC7 / D3 — use_map clears every explored set before the broadcast."""
+
+    def setUp(self) -> None:
+        from app.main import maps_registry
+
+        self.session = GameSession("t", build_sample_map())
+        self.gm_s, self.p1_s = FakeConn(), FakeConn()
+        self.gm, _ = self.session.join(self.gm_s, "Gamer", "gm")
+        self.p1, _ = self.session.join(self.p1_s, "Alice", "player")
+        attach(self.session, self.p1_s)
+        self.ent = self.p1.entity_id
+        self.session.welcome_for(self.p1)
+        self.sid = "exploredmap-swap"
+        # 8x8 target: walled border, open interior (no doors needed here).
+        target = Grid(
+            name="SwapTarget", width=8, height=8,
+            cells=[["wall" if (x in (0, 7) or y in (0, 7)) else "floor"
+                    for x in range(8)] for y in range(8)],
+        )
+        maps_registry[self.sid] = {"grid": target, "entities": {}, "players": {}}
+
+    def test_use_map_clears_memory_fresh_s_no_e(self):
+        # The player explores (moves >= 2): explored is non-empty...
+        drive(self.session, self.gm_s, {"type": "move", "entity_id": self.ent,
+                                        "x": 4, "y": 4})
+        drive(self.session, self.gm_s, {"type": "move", "entity_id": self.ent,
+                                        "x": 5, "y": 5})
+        explored_before = set(self.session._explored[self.p1.id])
+        self.assertGreater(len(explored_before), 0)
+
+        # ...then the GM swaps the map: memory is cleared, S is fresh around
+        # the (re-parked) token, and there is NO E anywhere.
+        reply = drive(self.session, self.gm_s, {"type": "use_map", "map_id": self.sid})
+        self.assertIsNone(reply)
+        self.assertEqual((self.session.grid.width, self.session.grid.height), (8, 8))
+        st = self.p1_s.last("state")
+        self.assertEqual((st["map"]["width"], st["map"]["height"]), (8, 8))
+        vis = st["visibility"]
+        assert_well_formed(self, vis, self.session.grid)
+        self.assertNotIn("E", "".join(vis))
+        e = self.session.entities[self.ent]
+        pos = (e.x, e.y)
+        self.assertEqual(mask_cell(vis, *pos), "S")
+        self.assertEqual(s_cells(vis), oracle_visible(self.session.grid, pos))
+        # No stale coordinates: the explored set is EXACTLY the fresh sight
+        # from the new map (nothing from the old 16x12 map survives).
+        self.assertEqual(self.session._explored[self.p1.id],
+                         oracle_visible(self.session.grid, pos))
+        for x, y in self.session._explored[self.p1.id]:
+            self.assertLess(x, 8)
+            self.assertLess(y, 8)
+
+
+class TestExploredMapTokenDeleted(unittest.TestCase):
+    """AC8 / D2 — token deleted: frozen memory, E/H only, nothing new."""
+
+    def setUp(self) -> None:
+        self.session = GameSession("t", build_sample_map())
+        self.gm_s, self.p1_s = FakeConn(), FakeConn()
+        self.gm, _ = self.session.join(self.gm_s, "Gamer", "gm")
+        self.p1, _ = self.session.join(self.p1_s, "Alice", "player")
+        attach(self.session, self.p1_s)
+        self.ent = self.p1.entity_id
+        self.session.welcome_for(self.p1)
+        drive(self.session, self.gm_s, {"type": "move", "entity_id": self.ent,
+                                        "x": 4, "y": 3})
+        self.explored = set(self.session._explored[self.p1.id])
+        self.assertGreater(len(self.explored), 0)
+
+    def test_tokenless_player_gets_frozen_eh_only_memory(self):
+        # The token is protected from delete_entity — construct the
+        # anchor-missing state directly (the existing awareness suite's way).
+        del self.session.entities[self.ent]
+        self.p1.entity_id = None
+        st = self.session.state_for(self.p1)
+        vis = st["visibility"]
+        self.assertIn("visibility", st)  # the key IS present...
+        flat = "".join(vis)
+        self.assertNotIn("S", flat)      # ...but no S anywhere (no anchor)
+        self.assertIn("E", flat)
+        for y, row in enumerate(vis):
+            for x, ch in enumerate(row):
+                expect = "E" if (x, y) in self.explored else "H"
+                self.assertEqual(ch, expect, f"{(x, y)} expected {expect}")
+        # Awareness anchor-missing rule untouched: [] (AC6 cross-check).
+        self.assertEqual(st["awareness"], [])
+        self.assertIsNone(st["you_entity"])
+
+        # A further mutation reveals nothing new: same mask, same E set.
+        drive(self.session, self.gm_s, {"type": "paint", "x": 13, "y": 9,
+                                        "cell_type": "wall"})
+        st2 = self.session.state_for(self.p1)
+        self.assertEqual(st2["visibility"], vis)
+        self.assertEqual(set(self.session._explored[self.p1.id]), self.explored)
+
+
+class TestExploredMapReconnect(unittest.TestCase):
+    """AC9 / D2 — disconnect + re-join keeps the explored set."""
+
+    def setUp(self) -> None:
+        self.session = GameSession("t", build_sample_map())
+        self.gm_s = FakeConn()
+        self.gm, _ = self.session.join(self.gm_s, "Gamer", "gm")
+        self.sock1 = FakeConn()
+        self.p1, _ = self.session.join(self.sock1, "Alice", "player")
+        attach(self.session, self.sock1)
+        self.ent = self.p1.entity_id
+        self.session.welcome_for(self.p1)
+        drive(self.session, self.gm_s, {"type": "move", "entity_id": self.ent,
+                                        "x": 7, "y": 2})
+        self.explored = set(self.session._explored[self.p1.id])
+        self.current = (self.session.entities[self.ent].x,
+                        self.session.entities[self.ent].y)
+        self.assertEqual(self.current, (7, 2))
+        self.session.detach(self.sock1)  # disconnect (Player survives)
+
+    def test_reconnect_welcome_carries_full_memory(self):
+        self.assertIn(self.p1.id, self.session.players)      # Player kept
+        self.assertIn(self.p1.id, self.session._explored)    # memory kept
+        self.sock2 = FakeConn()
+        p2, err = self.session.join(self.sock2, "Alice", "player")
+        self.assertIsNone(err)
+        self.assertEqual(p2.id, self.p1.id)  # re-attached, stable id
+        attach(self.session, self.sock2)
+        vis = self.session.welcome_for(p2)["visibility"]
+        s = s_cells(vis)
+        e = {(x, y) for y, row in enumerate(vis) for x, ch in enumerate(row)
+             if ch == "E"}
+        # S around the current token (oracle) + E at every explored cell
+        # that is no longer in sight — full memory, nothing lost.
+        self.assertEqual(s, oracle_visible(self.session.grid, self.current))
+        self.assertEqual(e, self.explored - s)
+        self.assertIn((1, 1), e)  # the spawn cell: seen, now behind walls
+        self.assertEqual(self.session._explored[self.p1.id], self.explored)
+
+
+class TestExploredMapGmPayload(unittest.TestCase):
+    """AC10 — GM payload deep-equals the pre-feature dict (machine-checked)."""
+
+    def test_gm_state_for_deep_equals_pre_feature(self):
+        s = GameSession("t", build_sample_map())
+        s.join(FakeConn(), "Gamer", "gm")
+        p1, _ = s.join(FakeConn(), "Alice", "player")
+        p2, _ = s.join(FakeConn(), "Bob", "player")
+        gm = s.players["p1"]
+        e1 = s.entities[p1.entity_id]  # e1 — Alice's token
+        e2 = s.entities[p2.entity_id]  # e2 — Bob's token
+        # Hand-written pre-feature expectation: EXACTLY the 7 keys the
+        # payload had before this feature, with their values.
+        expected = {
+            "type": "state",
+            "map": s.grid.to_dict(),
+            "players": [
+                {"id": "p1", "name": "Gamer", "role": "gm",
+                 "entity_id": None, "awareness_radius": 4},
+                {"id": "p2", "name": "Alice", "role": "player",
+                 "entity_id": "e1", "awareness_radius": 4},
+                {"id": "p3", "name": "Bob", "role": "player",
+                 "entity_id": "e2", "awareness_radius": 4},
+            ],
+            "entities": [e1.to_dict(), e2.to_dict()],
+            "you_entity": None,
+            "awareness": [
+                {"entity_id": "e1", "x": 1, "y": 1, "color": "green",
+                 "name": "Alice", "kind": "player", "label": True},
+                {"entity_id": "e2", "x": 2, "y": 1, "color": "green",
+                 "name": "Bob", "kind": "player", "label": True},
+            ],
+            "fog": False,
+        }
+        st = s.state_for(gm)
+        self.assertNotIn("visibility", st)  # absent — not null, not []
+        self.assertEqual(st, expected)  # deep-equal: keys AND values
+        # Cross-check the awareness field against the pure function.
+        self.assertEqual(st["awareness"], build_awareness(gm, s.entities, s.grid))
+
+
+class TestExploredMapAwarenessUnchanged(unittest.TestCase):
+    """AC6 — AWARENESS UNCHANGED (the hard constraint): for fixed scenarios
+    the ``awareness`` list in the new state_for payload is exactly equal
+    (deep assertEqual, ordering and surrogate ids included) to what an
+    independent call to app.awareness.build_awareness produces for the same
+    inputs — i.e. byte-identical to the pre-feature build."""
+
+    def test_party_with_los_all_full(self):
+        s = GameSession("t", build_sample_map())
+        s.join(FakeConn(), "G", "gm")
+        p1, _ = s.join(FakeConn(), "Alice", "player")   # (1,1)
+        s.join(FakeConn(), "Bob", "player")             # (2,1)
+        s.join(FakeConn(), "Carl", "player")            # (3,1)
+        s.join(FakeConn(), "Dee", "player")             # (4,1)
+        st = s.state_for(p1)
+        # Independently: the same inputs straight into build_awareness.
+        self.assertEqual(st["awareness"],
+                         build_awareness(p1, s.entities, s.grid))
+        # And the pre-feature literal list (copied from the current test
+        # expectations: all four line-of-sight tokens are FULL, sorted by
+        # entity_id, surrogate-free).
+        self.assertEqual(st["awareness"], [
+            {"entity_id": "e2", "x": 2, "y": 1, "color": "green",
+             "name": "Bob", "kind": "player", "label": True},
+            {"entity_id": "e3", "x": 3, "y": 1, "color": "green",
+             "name": "Carl", "kind": "player", "label": True},
+            {"entity_id": "e4", "x": 4, "y": 1, "color": "green",
+             "name": "Dee", "kind": "player", "label": True},
+        ])
+
+    def test_no_los_pair_chebyshev3_default_and_radius7(self):
+        s = GameSession("t2", build_sample_map())
+        gm_s = FakeConn()
+        s.join(gm_s, "G", "gm")
+        p1, _ = s.join(FakeConn(), "Alice", "player")   # (1,1)
+        bob, _ = s.join(FakeConn(), "Bob", "player")    # (2,1)
+        attach(s, gm_s)
+        # Wall (3,1) + Bob at (4,1): no LOS (line crosses the wall),
+        # Chebyshev distance 3.
+        drive(s, gm_s, {"type": "paint", "x": 3, "y": 1, "cell_type": "wall"})
+        drive(s, gm_s, {"type": "place", "entity_id": bob.entity_id,
+                        "x": 4, "y": 1})
+        # Default radius (4): 3 <= 4 -> exactly one APPROXIMATE block.
+        st = s.state_for(p1)
+        self.assertEqual(st["awareness"],
+                         build_awareness(p1, s.entities, s.grid))
+        self.assertEqual(st["awareness"], [
+            {"entity_id": "<approx-1>", "x": 4 // 2, "y": 1 // 2,
+             "approximate": True, "label": False},
+        ])
+        # Radius 7: same single block (identity must not change with radius).
+        p1.awareness_radius = 7
+        st = s.state_for(p1)
+        self.assertEqual(st["awareness"],
+                         build_awareness(p1, s.entities, s.grid))
+        self.assertEqual(st["awareness"], [
+            {"entity_id": "<approx-1>", "x": 4 // 2, "y": 1 // 2,
+             "approximate": True, "label": False},
+        ])
+
+    def test_sample_dungeon_spawn_layout_gm_sees_all(self):
+        s = GameSession("t3", build_sample_map())
+        s.join(FakeConn(), "G", "gm")
+        p1, _ = s.join(FakeConn(), "Alice", "player")
+        s.join(FakeConn(), "Bob", "player")
+        gm = s.players["p1"]
+        st = s.state_for(gm)
+        self.assertEqual(st["awareness"],
+                         build_awareness(gm, s.entities, s.grid))
+        self.assertEqual(len(st["awareness"]), 2)
+        for item in st["awareness"]:
+            self.assertTrue(item["label"] and "name" in item and "kind" in item)
+        # The player's list matches its own independent derivation too.
+        self.assertEqual(s.state_for(p1)["awareness"],
+                         build_awareness(p1, s.entities, s.grid))
+
+
+class TestExploredMapPlayersShapeUnchanged(unittest.TestCase):
+    """§10 — players[] entries keep their EXACT shape (id/name/role/
+    entity_id/awareness_radius): no new fields, for any payload, player or
+    GM. The explored state is session-level, never on the players wire."""
+
+    def test_players_entries_exact_shape_in_all_payloads(self):
+        s = GameSession("t", build_sample_map())
+        gm, _ = s.join(FakeConn(), "Gamer", "gm")
+        p1, _ = s.join(FakeConn(), "Alice", "player")
+        s.state_for(p1)  # trigger the explored fold first
+        gm_st = s.state_for(gm)
+        p1_st = s.state_for(p1)
+        self.assertEqual(sorted(gm_st), [
+            "awareness", "entities", "fog", "map", "players",
+            "type", "you_entity",
+        ])
+        self.assertEqual(sorted(p1_st), [
+            "awareness", "entities", "fog", "map", "players",
+            "type", "visibility", "you_entity",
+        ])
+        for st in (gm_st, p1_st):
+            self.assertEqual(len(st["players"]), 2)
+            for entry in st["players"]:
+                self.assertEqual(
+                    sorted(entry),
+                    ["awareness_radius", "entity_id", "id", "name", "role"],
+                )
+        self.assertEqual(
+            gm_st["players"],
+            [
+                {"id": gm.id, "name": "Gamer", "role": "gm",
+                 "entity_id": None, "awareness_radius": 4},
+                {"id": p1.id, "name": "Alice", "role": "player",
+                 "entity_id": p1.entity_id, "awareness_radius": 4},
+            ],
+        )
+        # The Player model itself gained no field.
+        self.assertEqual(
+            sorted(Player(id="p1", name="x", role="player").to_dict()),
+            ["awareness_radius", "entity_id", "id", "name", "role"],
+        )
+
+
+class TestExploredMapPerformance(unittest.TestCase):
+    """AC11 — performance budget (spec §9): 60x60 grid, 6 players + GM,
+    one full recompute (state_for for all 6 players) within budget.
+
+    Measured on the reference machine: ~5 ms per single-player 60x60 mask
+    build, ~30 ms for all six. The spec budget is < 250 ms for the full
+    recompute; the assertions below use the generous CI margins the spec
+    pins (500 ms full recompute, 150 ms per player) — with the suite's 30 s
+    per-test timeout even a 10x regression fails loudly here.
+    """
+
+    BUDGET_ALL_MS = 500.0   # spec AC11 assertion bound (target 250 ms)
+    BUDGET_ONE_MS = 150.0   # spec §9 per-player budget
+
+    def test_one_full_recompute_within_budget(self):
+        from app.generation import generate_grid
+
+        grid = generate_grid(60, 60, "perf", seed=1)
+        s = GameSession("perf", grid)
+        s.join(FakeConn(), "G", "gm")
+        for i in range(6):
+            _, err = s.join(FakeConn(), f"P{i}", "player")
+            self.assertIsNone(err)
+        players = [p for p in s.players.values() if p.role == "player"]
+        self.assertEqual(len(players), 6)
+
+        # Warm-up (cold-set noise is not what the budget measures).
+        for p in players:
+            s.state_for(p)
+
+        t0 = time.perf_counter()
+        for p in players:
+            s.state_for(p)
+        all_ms = (time.perf_counter() - t0) * 1000.0
+        self.assertLess(
+            all_ms, self.BUDGET_ALL_MS,
+            f"6-player full recompute took {all_ms:.1f} ms "
+            f"(budget {self.BUDGET_ALL_MS:.0f} ms)",
+        )
+        t0 = time.perf_counter()
+        s.state_for(players[0])
+        one_ms = (time.perf_counter() - t0) * 1000.0
+        self.assertLess(
+            one_ms, self.BUDGET_ONE_MS,
+            f"single 60x60 mask took {one_ms:.1f} ms "
+            f"(budget {self.BUDGET_ONE_MS:.0f} ms)",
+        )
 
 
 if __name__ == "__main__":

@@ -1284,5 +1284,296 @@ class TestGeneratedMapsFrontend(FrontendBase):
                 self.assertIn('"mapped":false', out)
 
 
+# ══════════════════════════════════════════════════════════════════════
+# Explored map (docs/design/explored-map.md §6/§7 — AC13 frontend)
+# ══════════════════════════════════════════════════════════════════════
+# The player's map is tiered by the server's "visibility" matrix:
+#   S  → full detail (floor #efe9dc / wall #3b4252)   [in sight now]
+#   E  → greyed     (floor #6b7280 / wall #4b5563)   [explored]
+#   H  → nothing drawn (the #171b26 canvas bg shows)  [hidden]
+# The GM and the upload-preview canvas NEVER receive a matrix → full detail.
+
+class TestIndexHtmlExploredLegend(FrontendBase):
+    """AC13a — the real index.html carries the three PLAYER legend chips and
+    the pre-existing chips are all still present (regression guard)."""
+
+    def setUp(self):
+        with open(INDEX, encoding="utf-8") as fh:
+            self.html = fh.read()
+
+    def test_three_player_legend_chips_present(self):
+        # The three new chips are `legend-chip legend-explored` with their
+        # swatch + copy, plus a `legend-sep legend-explored` separator. Assert
+        # each chip's swatch+copy and that exactly 3 chips carry the class.
+        self.assertIn('<i class="swatch floor"></i>in sight', self.html)
+        self.assertIn('<i class="swatch explored"></i>explored', self.html)
+        self.assertIn('<i class="swatch hidden"></i>hidden (not shown)', self.html)
+        self.assertEqual(self.html.count("legend-chip legend-explored"), 3,
+                         "expected exactly 3 legend-explored chips")
+
+    def test_preexisting_legend_chips_still_present(self):
+        for chip in (
+            '<i class="swatch floor"></i>floor',
+            '<i class="swatch wall"></i>wall',
+            '<i class="swatch doorway"></i>doorway',
+            '<i class="dot dot-tri team-party"></i>friend',
+            '<i class="dot dot-circle team-neutral"></i>neutral',
+            '<i class="dot dot-square team-hostile"></i>enemy',
+            '<i class="dot dot-approx"></i>unseen contact',
+            '<i class="ring-swatch"></i>awareness range',
+        ):
+            self.assertIn(chip, self.html, f"regression: {chip} missing")
+
+
+@unittest.skipUnless(shutil.which("node") is not None,
+                     "Node.js not found; skipping CSS static checks")
+class TestStyleCssExplored(FrontendBase):
+    """AC13a — the CSS defines the greyed/hidden swatches + tokens and the
+    body.is-gm gating that hides the chips from the GM."""
+
+    def setUp(self):
+        css_path = os.path.join(os.path.dirname(INDEX), "style.css")
+        with open(css_path, encoding="utf-8") as fh:
+            self.css = fh.read()
+
+    def test_explored_and_hidden_swatch_styles(self):
+        self.assertIn(".swatch.explored", self.css)
+        self.assertIn(".swatch.hidden", self.css)
+        self.assertIn("#6b7280", self.css)      # explored floor
+        self.assertIn("#4b5563", self.css)      # explored wall
+
+    def test_gm_gating_hides_explored_chips(self):
+        self.assertIn("body.is-gm .legend-explored { display: none; }", self.css)
+
+
+class TestExploredMapStateAndValidate(FrontendBase):
+    """AC13b (state half) — applyState stores a well-formed player matrix,
+    treats a MALFORMED matrix (wrong row length) as null, and stores null for
+    a GM payload (no "visibility" key)."""
+
+    _MAP = ({"name": "m", "width": 5, "height": 4,
+             "cells": [["floor"] * 5 for _ in range(4)]})
+
+    def _welcome(self, extra: str = "") -> str:
+        return (
+            "(()=>{const map=" + json.dumps(self._MAP) + ";"
+            "api.onWelcome({type:'welcome',"
+            "you:{id:'p2',name:'Alice',role:'player',entity_id:'e2'},"
+            "map,entities:[],"
+            "you_entity:{id:'e2',name:'Alice',kind:'player',team:'party',"
+            "x:1,y:1},players:[],awareness:[],fog:false" + extra + "});"
+            "return api.state.visibility;})()"
+        )
+
+    def test_player_welcome_stores_wellformed_matrix(self):
+        # A well-formed 4x5 matrix (S/E/H) is stored verbatim (NOT null).
+        vis = json.dumps(["SESSH", "SESSS", "SSSHS", "HHHSS"])
+        out = js(self._welcome(",visibility:" + vis))
+        # Stored verbatim and NOT collapsed to null.
+        self.assertIn('"SESSH"', out)
+        self.assertIn('"SSSHS"', out)
+        self.assertNotIn("null", out)
+
+    def test_malformed_matrix_wrong_row_length_is_null(self):
+        # Row 0 is 6 chars on a 5-wide grid → malformed → treated as null.
+        out = js(self._welcome(",visibility:['SESSSS','SESSS','SESSS','SESSS']"))
+        self.assertIn("null", out, out)
+
+    def test_malformed_matrix_wrong_row_count_is_null(self):
+        # Only 3 rows for a 4-row grid → malformed → treated as null.
+        out = js(self._welcome(",visibility:['SESSS','SESSS','SESSS']"))
+        self.assertIn("null", out, out)
+
+    def test_malformed_matrix_bad_char_is_null(self):
+        # Row 1 ('SESXS') has a char ('X') outside SEH → malformed → null.
+        out = js(self._welcome(",visibility:['SESSS','SESXS','SESSS','SESSS']"))
+        self.assertIn("null", out, out)
+
+    def test_gm_state_stores_null(self):
+        # GM welcome: no "visibility" key at all → state.visibility stays null
+        # even though the harness canvas renders (layoutCanvas gates on role).
+        out = js(
+            "(()=>{const map=" + json.dumps(self._MAP) + ";"
+            "api.onWelcome({type:'welcome',"
+            "you:{id:'p1',name:'Gamer',role:'gm',entity_id:null},"
+            "map,entities:[],players:[],awareness:[],fog:false});"
+            "return api.state.visibility;})()"
+        )
+        self.assertIn("null", out, out)
+
+    def test_validate_visibility_matrix_direct(self):
+        out = js(
+            "(()=>{const g={width:5,height:4};"
+            "return {good:!!api.validateVisibilityMatrix("
+            "['SESSS','SESSS','SESSS','SESSS'],g),"
+            "badLen:api.validateVisibilityMatrix("
+            "['SESSS','SESS','SESSS','SESSS'],g),"
+            "badChar:api.validateVisibilityMatrix("
+            "['SESSS','SESXS','SESSS','SESSS'],g),"
+            "nullIn:api.validateVisibilityMatrix(null,g),"
+            "absent:api.validateVisibilityMatrix(undefined,g)};})()"
+        )
+        self.assertIn('"good":true', out, out)
+        self.assertIn('"badLen":null', out)
+        self.assertIn('"badChar":null', out)
+        self.assertIn('"nullIn":null', out)
+        self.assertIn('"absent":null', out)
+
+
+class TestExploredMapRender(FrontendBase):
+    """AC13b/c — the real drawGridOnCanvas tiers cells for a player and stays
+    full-detail for the GM and the preview (no third argument)."""
+
+    # 5x4 map: a 3x2 open floor block (x1-3, y1-2) inside a wall ring.
+    #   y0: all wall ; y1: wall floor floor floor wall ; y2: same ; y3: all wall
+    _GRID = [
+        ["wall"] * 5,
+        ["wall", "floor", "floor", "floor", "wall"],
+        ["wall", "floor", "floor", "floor", "wall"],
+        ["wall"] * 5,
+    ]
+    _MAP_JS = json.dumps({"name": "m", "width": 5, "height": 4, "cells": _GRID})
+    _GRID_JS = json.dumps(_GRID)
+    # Row y=1 floors in sight (S), row y=2 floors explored (E): the two floor
+    # rows are adjacent, so S-S edges draw full lines and the E-E edges between
+    # the three E floors draw the 30%-alpha dimmed line.
+    _VIS_JS = json.dumps(["SSSSS", "SSSSS", "SEEES", "SSSSS"])
+
+    def test_player_render_tiers_cells(self):
+        # Render a player whose S cell is (1,1) and E cell is (3,1); every
+        # other cell is H (nothing drawn). Assert via the recorded fillRect
+        # calls: S floor filled #efe9dc, E floor filled #6b7280, no H-cell
+        # fill at all, and the grid-line dim (30% alpha) is used for E edges.
+        expr = (
+            "(()=>{const map=" + self._MAP_JS + ";"
+            "api.onWelcome({type:'welcome',"
+            "you:{id:'p2',name:'Alice',role:'player',entity_id:'e2'},"
+            "map,entities:[],"
+            "you_entity:{id:'e2',name:'Alice',kind:'player',team:'party',"
+            "x:1,y:1},players:[],awareness:[],fog:false,"
+            "visibility:" + self._VIS_JS + "});"
+            "api.els.mapView.hidden=false;api.renderAll();"
+            "const c=api.els.canvas.getContext('2d');"
+            "return {fills:c._fills.map(f=>[f.x,f.y,f.w,f.h,f.style]),"
+            "strokes:c._strokes.map(s=>s.style)};})()"
+        )
+        out = json.loads(js(expr))
+        fills = out["fills"]
+        # The player path must have filled the two floor cells with their
+        # tiers' floor colors.
+        self.assertTrue(any(f[4] == "#efe9dc" for f in fills),
+                        "no full-detail (S) floor fill: %s" % fills)
+        self.assertTrue(any(f[4] == "#6b7280" for f in fills),
+                        "no greyed (E) floor fill: %s" % fills)
+        # No hidden cell may be filled with either floor color: every fill
+        # besides the background + the two tiered floors must be absent. We
+        # check specifically that the H floor cells (only (1,1) and (3,1) are
+        # floor; the S/E are those two, so there are no H floor cells here).
+        # But the grid-line dim must be present (E cell edges use 30% alpha).
+        self.assertIn("rgba(217, 209, 189, 0.3)", out["strokes"] + [""]
+                      , "no dimmed grid line for E cells: %s" % out["strokes"])
+        # The full grid line is also present (S cell edges).
+        self.assertIn("#d9d1bd", out["strokes"])
+
+    def test_player_render_no_fill_over_hidden_cell(self):
+        # A matrix whose ONLY S/E cells are (1,1) [S] and (3,2) [E]; every
+        # other cell is H. No fill may cover an H cell. With s=146, ox=27,
+        # oy=0 the two S/E floors land at known rects; any OTHER floor fill
+        # would be a bug.
+        vis = json.dumps(["HHHHH", "HSHHH", "HHHEH", "HHHHH"])
+        expr = (
+            "(()=>{const map=" + self._MAP_JS + ";"
+            "api.onWelcome({type:'welcome',"
+            "you:{id:'p2',name:'Alice',role:'player',entity_id:'e2'},"
+            "map,entities:[],"
+            "you_entity:{id:'e2',name:'Alice',kind:'player',team:'party',"
+            "x:1,y:1},players:[],awareness:[],fog:false,"
+            "visibility:" + vis + "});"
+            "api.els.mapView.hidden=false;api.renderAll();"
+            "const c=api.els.canvas.getContext('2d');"
+            "return c._fills.filter(f=>f.style==='#efe9dc'||f.style==='#6b7280')"
+            ".map(f=>[f.x,f.y,f.w,f.h,f.style]);})()"
+        )
+        out = json.loads(js(expr))
+        # S/E floor rects (s=146, ox=27, oy=0):
+        #   (1,1) [S] -> (27+146, 0+146) = (173,146,146,146)
+        #   (3,2) [E] -> (27+3*146, 0+2*146) = (465,292,146,146)
+        expected = {(173, 146, 146, 146), (465, 292, 146, 146)}
+        got = {(f[0], f[1], f[2], f[3]) for f in out}
+        self.assertEqual(got, expected,
+                         "floor fills must land EXACTLY on the S and E cells, "
+                         "never on an H cell: got %s expected %s" % (got, expected))
+
+    def test_gm_render_full_detail_no_tiers(self):
+        # A GM welcome (no visibility key) must render the whole grid with
+        # the full floor fill in ONE rect (the no-tier path) — no greyed
+        # floor color anywhere.
+        expr = (
+            "(()=>{const map=" + self._MAP_JS + ";"
+            "api.onWelcome({type:'welcome',"
+            "you:{id:'p1',name:'Gamer',role:'gm',entity_id:null},"
+            "map,entities:[],players:[],awareness:[],fog:false});"
+            "api.els.mapView.hidden=false;api.renderAll();"
+            "const c=api.els.canvas.getContext('2d');"
+            "const styles=c._fills.map(f=>f.style);"
+            "return {styles:styles, hasGrey:styles.includes('#6b7280'),"
+            "hasFull:styles.includes('#efe9dc')};})()"
+        )
+        out = json.loads(js(expr))
+        self.assertTrue(out["hasFull"], "GM path must use the full floor: %s"
+                        % out["styles"])
+        self.assertFalse(out["hasGrey"], "GM path must NOT grey any cell: %s"
+                         % out["styles"])
+
+    def test_preview_render_full_detail(self):
+        # showUploadPreview() draws the grid on #preview-canvas with NO third
+        # argument → full detail. Drive it directly with a small uploadedMap
+        # and assert no greyed floor fill appears.
+        expr = (
+            "(()=>{api.state.joined=true;api.state.role='gm';"
+            "api.state.you={id:'p1',name:'Gamer',role:'gm',entity_id:null};"
+            "api.state.grid=null;"
+            "api.state.uploadedMap={id:'x',name:'x',width:5,height:4,"
+            "cells:" + self._GRID_JS + ",thumbnail:null,dataUrl:null};"
+            "api.state.uploadSource='upload';"
+            "api.showUploadPreview();"
+            "const c=api.els.previewCanvas.getContext('2d');"
+            "const styles=c._fills.map(f=>f.style);"
+            "return {styles:styles, hasGrey:styles.includes('#6b7280'),"
+            "hasFull:styles.includes('#efe9dc')};})()"
+        )
+        out = json.loads(js(expr))
+        self.assertTrue(out["hasFull"], "preview must use the full floor: %s"
+                        % out["styles"])
+        self.assertFalse(out["hasGrey"],
+                         "preview must NEVER receive a tier matrix: %s"
+                         % out["styles"])
+
+    def test_draw_grid_on_canvas_with_null_visibility_matches_today(self):
+        # drawGridOnCanvas(canvas, ctx, null) is byte-for-byte today's
+        # behavior — one WHOLE-GRID floor base fill (not per-cell) + wall
+        # fills per cell. Call it directly and assert the single whole-grid
+        # floor base fill (width = s*g.width, height = s*g.height) in the full
+        # floor color, and that NO cell is greyed.
+        expr = (
+            "(()=>{const map=" + self._MAP_JS + ";"
+            "api.state.role='gm';api.state.grid=map;"
+            "api.els.canvas.width=800;api.els.canvas.height=600;"
+            "const c=api.els.canvas.getContext('2d');"
+            "c._fills.length=0;c._strokes.length=0;"
+            "api.drawGridOnCanvas(api.els.canvas,c,null);"
+            "const whole=c._fills.find(f=>f.style==='#efe9dc'&&"
+            "f.w===750&&f.h===600);"
+            "const grey=c._fills.some(f=>f.style==='#6b7280');"
+            "return {hasWhole:!!whole,grey:grey};})()"
+        )
+        out = json.loads(js(expr))
+        self.assertTrue(out["hasWhole"],
+                        "null path must draw a single whole-grid floor base: %s"
+                        % out)
+        self.assertFalse(out["grey"],
+                         "null path must NOT grey any cell: %s" % out)
+
+
 if __name__ == "__main__":
     unittest.main()

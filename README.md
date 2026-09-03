@@ -123,6 +123,14 @@ explicit per-entity color override, if set, wins.
 For color-blind accessibility each full contact is **also encoded by shape**:
 **triangle = friend**, **circle = neutral**, **square = enemy** (see the legend).
 
+### The explored map
+
+Separate from entity awareness, **the map itself** is tiered per player:
+cells in the player's current line of sight render in full detail, cells they
+have seen before render greyed out, and never-seen cells aren't drawn at all
+(the map reads as a fog of war with memory). The GM always sees the full map.
+Entity awareness (the overlay above) is independent and unchanged.
+
 ---
 
 ## Upload & automatic wall/doorway detection

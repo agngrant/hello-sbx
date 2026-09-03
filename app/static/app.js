@@ -108,6 +108,8 @@ const state = {
   youEntity: null,      // a player's own character (server "you_entity" field)
   awareness: [],        // per-player awareness items (always present)
   players: [],
+  visibility: null,     // explored map: player's S/E/H tier matrix (null for the
+                        //   GM and for a malformed matrix → full-detail render)
   fog: false,
   selectedEntityId: null,
   expectCreatedToken: false, // GM "Add" armed: the next state auto-selects the new token
@@ -255,6 +257,12 @@ function applyState(msg) {
   }
   state.awareness = msg.awareness || [];
   state.players = msg.players || [];
+  // Explored map (explored-map spec §6.4): store the player's S/E/H tier
+  // matrix. Players get it from the server; the GM's payload has no
+  // "visibility" key at all, and a malformed matrix (wrong lengths/charset)
+  // is treated as absent. The render branch (layoutCanvas) additionally
+  // gates on state.role === "player" before drawing with it.
+  state.visibility = validateVisibilityMatrix(msg.visibility, state.grid);
   const fogChanged = state.fog !== msg.fog;
   state.fog = !!msg.fog;
   // The fog toggle is GM-only and stays ENABLED for the GM: fog is applied
@@ -442,6 +450,15 @@ const T = {
   wallHatch: "#262b36",
   wallBorder: "#20242f",
   doorway: "#d97706",
+  // Explored map — greyed ("E") palette (spec §6.1). Same art as the full-
+  // detail tiers, recolored to a flat grey scale so memory reads as "known,
+  // but not in front of me". `gridLineDim` is the full grid line at 30% alpha.
+  exploredFloor: "#6b7280",
+  exploredWall: "#4b5563",
+  exploredWallHatch: "#3f4753",
+  exploredWallBorder: "#3f4753",
+  exploredDoor: "#8b94a3",
+  gridLineDim: "rgba(217, 209, 189, 0.3)",
   accent: "#4dabf7",
   danger: "#e03131",
   ownRing: "#1971c2",
@@ -455,6 +472,29 @@ const T = {
 const reducedMotion =
   window.matchMedia &&
   window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+/* ───────────────────── Explored map: visibility tier matrix ─────────────────────
+   docs/design/explored-map.md §4.1 / §6. The server sends every PLAYER a
+   "visibility" matrix: `height` row-strings, each exactly `width` chars,
+   over the alphabet "S" (seen now — full detail) / "E" (explored — greyed)
+   / "H" (hidden — not drawn). The GM's payload has the key ABSENT. A
+   well-formed matrix is validated before it is ever used to tier the render;
+   anything malformed is treated as absent (null → full-detail), so a bad
+   payload can never crash the render. */
+const VIS_CHARS = "SEH";
+function validateVisibilityMatrix(vis, grid) {
+  if (vis == null) return null;
+  if (!Array.isArray(vis) || !grid) return null;
+  if (vis.length !== grid.height) return null;
+  for (let y = 0; y < grid.height; y++) {
+    const row = vis[y];
+    if (typeof row !== "string" || row.length !== grid.width) return null;
+    for (let x = 0; x < row.length; x++) {
+      if (VIS_CHARS.indexOf(row[x]) === -1) return null;
+    }
+  }
+  return vis;
+}
 
 /* ───────────────────────────── Canvas: layout + shared cell renderer ── */
 
@@ -483,14 +523,32 @@ function layoutCanvas() {
   // Background outside the grid
   ctx.fillStyle = "#171b26";
   ctx.fillRect(0, 0, availW, availH);
-  drawGridOnCanvas(canvas, ctx);
+  // Explored map (§6.3): the map-canvas pass tiers cells ONLY for a player
+  // holding a well-formed visibility matrix. The GM (and any absent/malformed
+  // matrix) renders full detail — `null` → today's renderer, byte-identical.
+  const vis = (state.role === "player") ? state.visibility : null;
+  drawGridOnCanvas(canvas, ctx, vis);
 }
 
 /* Single cell-renderer shared by #map-canvas and #preview-canvas
    (wireframes §12.7) — floor / wall / doorway look must be identical.
-   Self-contained: computes cell size + origin from the canvas itself. */
+   Self-contained: computes cell size + origin from the canvas itself.
 
-function drawGridOnCanvas(canvas, ctx) {
+   `visibility` (explored map, §6.2) — an OPTIONAL `height×width` matrix of
+   "S" / "E" / "H" chars. When it is `null`/`undefined` (the GM pass and the
+   upload-preview pass — see §6.3) the renderer runs EXACTLY as before: every
+   cell full detail. When a matrix is present (a player's live map), each cell
+   is tiered at `visibility[y][x]`:
+     "S"  → rendered exactly as today (full detail palette);
+     "E"  → greyed (same geometry, desaturated §6.1 palette);
+     "H"  → nothing drawn (no fill, no grid line, no wall/door art — the
+              canvas background shows through).
+   A cell's tier is decided once up-front and honored in EVERY pass, so a
+   hidden cell contributes no fill AND no grid line (its grid lines would
+   otherwise outline the dark region). The entity/token pass (step 3) is
+   untouched — it runs on top exactly as today. */
+
+function drawGridOnCanvas(canvas, ctx, visibility = null) {
   const g = state.grid;
   if (!g) return;
   const dpr = window.devicePixelRatio || 1;
@@ -500,60 +558,140 @@ function drawGridOnCanvas(canvas, ctx) {
   const ox = Math.floor((availW - s * g.width) / 2);
   const oy = Math.floor((availH - s * g.height) / 2);
 
-  // 1. Floor base + grid lines
-  ctx.fillStyle = T.floor;
-  ctx.fillRect(ox, oy, s * g.width, s * g.height);
-  ctx.strokeStyle = T.gridLine;
-  ctx.lineWidth = 1;
-  ctx.beginPath();
-  for (let x = 0; x <= g.width; x++) {
-    const px = Math.round(ox + x * s) + 0.5;
-    ctx.moveTo(px, oy);
-    ctx.lineTo(px, oy + g.height * s);
-  }
-  for (let y = 0; y <= g.height; y++) {
-    const py = Math.round(oy + y * s) + 0.5;
-    ctx.moveTo(ox, py);
-    ctx.lineTo(ox + g.width * s, py);
-  }
-  ctx.stroke();
+  // Re-validated here so a direct caller passing a raw matrix (rather than
+  // the already-validated state.visibility) can never crash the render.
+  const vis = validateVisibilityMatrix(visibility, g);
+  const tier = (x, y) => (vis ? vis[y][x] : "S");
+  const palette = (t) => (t === "E")
+    ? { floor: T.exploredFloor, wallFill: T.exploredWall,
+        hatch: T.exploredWallHatch, border: T.exploredWallBorder,
+        door: T.exploredDoor, line: T.gridLineDim }
+    : { floor: T.floor, wallFill: T.wallFill,
+        hatch: T.wallHatch, border: T.wallBorder,
+        door: T.doorway, line: T.gridLine };
 
-  // 2. Walls (fill + diagonal hatch) then doorways
-  const hatches = [];
+  // ── 1. Floor / floor-tinted base + grid lines ──
+  if (!vis) {
+    // No tiering (GM / preview): one fill for the whole grid + one grid-line
+    // pass — byte-for-byte today's behavior.
+    ctx.fillStyle = T.floor;
+    ctx.fillRect(ox, oy, s * g.width, s * g.height);
+    ctx.strokeStyle = T.gridLine;
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    for (let x = 0; x <= g.width; x++) {
+      const px = Math.round(ox + x * s) + 0.5;
+      ctx.moveTo(px, oy);
+      ctx.lineTo(px, oy + g.height * s);
+    }
+    for (let y = 0; y <= g.height; y++) {
+      const py = Math.round(oy + y * s) + 0.5;
+      ctx.moveTo(ox, py);
+      ctx.lineTo(ox + g.width * s, py);
+    }
+    ctx.stroke();
+  } else {
+    // Tiered (player): fill each S/E cell with its tier's floor color (a wall
+    // or doorway cell gets the floor base too — its own art overpaints it in
+    // step 2), and draw each grid segment between two *drawn* (S/E) neighbors
+    // in that tier's line style (full vs 30%-alpha dim). Hidden cells
+    // contribute neither a fill nor a grid line, so the dark region has no
+    // outline. A shared S|E edge is drawn at full (the "S" wins) style.
+    for (let y = 0; y < g.height; y++) {
+      for (let x = 0; x < g.width; x++) {
+        const t = tier(x, y);
+        if (t === "H") continue;
+        ctx.fillStyle = palette(t).floor;
+        ctx.fillRect(ox + x * s, oy + y * s, s, s);
+      }
+    }
+    const gx = (x) => Math.round(ox + x * s) + 0.5;
+    const gy = (y) => Math.round(oy + y * s) + 0.5;
+    ctx.lineWidth = 1;
+    for (let y = 0; y < g.height; y++) {
+      for (let x = 0; x < g.width; x++) {
+        const t = tier(x, y);
+        if (t === "H") continue;
+        const lineStyle = (full) => (full ? T.gridLine : T.gridLineDim);
+        // Right edge: shared with the cell to the east.
+        if (x + 1 < g.width) {
+          const te = tier(x + 1, y);
+          if (te !== "H") {
+            ctx.strokeStyle = lineStyle(t === "S" || te === "S");
+            ctx.beginPath();
+            ctx.moveTo(gx(x + 1), oy + y * s);
+            ctx.lineTo(gx(x + 1), oy + (y + 1) * s);
+            ctx.stroke();
+          }
+        }
+        // Bottom edge: shared with the cell to the south.
+        if (y + 1 < g.height) {
+          const ts = tier(x, y + 1);
+          if (ts !== "H") {
+            ctx.strokeStyle = lineStyle(t === "S" || ts === "S");
+            ctx.beginPath();
+            ctx.moveTo(ox + x * s, gy(y + 1));
+            ctx.lineTo(ox + (x + 1) * s, gy(y + 1));
+            ctx.stroke();
+          }
+        }
+      }
+    }
+  }
+
+  // ── 2. Walls (fill + diagonal hatch) then doorways ──
+  // Only S/E wall/doorway cells are drawn, each with its tier's palette. We
+  // record each visible wall's [px, py, tier] once, then batch the fill, the
+  // diagonal hatch, and the border per tier so each tier uses its own colors.
+  const walls = [];
   for (let y = 0; y < g.height; y++) {
     for (let x = 0; x < g.width; x++) {
-      if (g.cells[y][x] === "wall") hatches.push([ox + x * s, oy + y * s]);
+      if (g.cells[y][x] !== "wall") continue;
+      const t = tier(x, y);
+      if (t === "H") continue;
+      walls.push([ox + x * s, oy + y * s, t]);
     }
   }
-  ctx.strokeStyle = T.wallHatch;
-  ctx.lineWidth = 1;
-  ctx.beginPath();
-  for (const [px, py] of hatches) {
-    for (let d = -s; d < s; d += Math.max(4, s / 4)) {
-      ctx.moveTo(px + d, py + s);
-      ctx.lineTo(px + d + s, py);
+  for (const wantTier of ["S", "E"]) {
+    const sel = walls.filter((w) => w[2] === wantTier);
+    if (!sel.length) continue;
+    const pal = palette(wantTier);
+    // Wall fill (tier's flat grey for "E", the full-detail blue-grey for "S").
+    ctx.fillStyle = pal.wallFill;
+    for (const [px, py] of sel) ctx.fillRect(px, py, s, s);
+    // Diagonal hatch (same texture; the tier's dimmed hatch color for "E").
+    ctx.strokeStyle = pal.hatch;
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    for (const [px, py] of sel) {
+      for (let d = -s; d < s; d += Math.max(4, s / 4)) {
+        ctx.moveTo(px + d, py + s);
+        ctx.lineTo(px + d + s, py);
+      }
     }
+    ctx.save();
+    ctx.beginPath();
+    for (const [px, py] of sel) ctx.rect(px, py, s, s);
+    ctx.clip();
+    ctx.stroke();
+    ctx.restore();
+    // Border (the tier's border color; "E" is a flatter, low-contrast grey).
+    ctx.strokeStyle = pal.border;
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    for (const [px, py] of sel) ctx.rect(px + 0.5, py + 0.5, s - 1, s - 1);
+    ctx.stroke();
   }
-  ctx.save();
-  ctx.beginPath();
-  for (const [px, py] of hatches) ctx.rect(px, py, s, s);
-  ctx.clip();
-  ctx.stroke();
-  ctx.restore();
 
-  ctx.strokeStyle = T.wallBorder;
-  ctx.lineWidth = 1;
-  ctx.beginPath();
-  for (const [px, py] of hatches) ctx.rect(px + 0.5, py + 0.5, s - 1, s - 1);
-  ctx.stroke();
-
-  // Doorways: amber border + arch glyph
+  // Doorways: border + arch glyph, per tier (full amber or desaturated grey).
   for (let y = 0; y < g.height; y++) {
     for (let x = 0; x < g.width; x++) {
       if (g.cells[y][x] !== "doorway") continue;
+      const t = tier(x, y);
+      if (t === "H") continue;
       const px = ox + x * s;
       const py = oy + y * s;
-      ctx.strokeStyle = T.doorway;
+      ctx.strokeStyle = palette(t).door;
       ctx.lineWidth = Math.max(2, Math.min(3, s / 8));
       ctx.strokeRect(px + 1.5, py + 1.5, s - 3, s - 3);
       const r = s * 0.28;
@@ -569,7 +707,9 @@ function drawGridOnCanvas(canvas, ctx) {
     }
   }
 
-  // 3. Entity tokens (GM / own character) — the #map-canvas pass only
+  // 3. Entity tokens (GM / own character) — the #map-canvas pass only,
+  //    UNCHANGED by the explored map (rings / own token / awareness items /
+  //    hover / paint all render on top exactly as today).
   if (canvas.id === "map-canvas") drawEntitiesAndDots(ctx, s, ox, oy);
 }
 

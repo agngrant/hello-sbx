@@ -23,6 +23,12 @@
   --wall-border: #20242f;
   --doorway: #d97706;
 
+  /* Explored map — greyed ("E") tiers (explored-map spec §6.4). Mirrors the
+     JS `T` tokens; the hidden tier reuses the canvas background. */
+  --explored-floor: #6b7280;
+  --explored-wall: #4b5563;
+  --canvas-bg: #171b26;
+
   /* Awareness vocabulary (shape + color, never color alone) */
   --ally: #2f9e44;        /* ▲ green  */
   --neutral-dot: #f1f3f5; /* ● white  */
@@ -384,6 +390,10 @@ input[type="file"] { color: var(--text-muted); }
 .swatch.floor { background: var(--floor); }
 .swatch.wall { background: var(--wall-fill); border: 1px solid var(--wall-border); }
 .swatch.doorway { background: var(--floor); border: 2px solid var(--doorway); }
+/* Explored map tiers (explored-map spec §7): "explored" = greyed floor with a
+   grey wall border; "hidden" = the canvas background (nothing drawn). */
+.swatch.explored { background: var(--explored-floor); border: 1px solid var(--explored-wall); }
+.swatch.hidden { background: var(--canvas-bg); border: 1px solid #2a3040; }
 /* Awareness ring swatch (legend): matches the canvas awareness ring —
    a dashed accent-blue square with a faint fill (§4.2). */
 .ring-swatch {
@@ -547,6 +557,11 @@ body.is-gm #no-map.gm-only { display: block; }
 #paint-group.gm-only { display: none; }
 body.is-gm #controls-bar .gm-only,
 body.is-gm #paint-group.gm-only { display: inline-flex; }
+/* Explored map legend chips (explored-map spec §7): shown to players, hidden
+   for the GM (the GM's map is always full detail, so the tier legend is moot).
+   The chips live in the shared map-view legend, gated by a body class — the
+   legend has no `gm-only`-classed wrapper of its own. */
+body.is-gm .legend-explored { display: none; }
 
 /* ─────────────────────────── Responsive (wireframes §8) ───────────────────────────
    Desktop ≥1024: sidebar docked. Tablet 768–1023 & <768: drawer. */

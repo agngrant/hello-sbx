@@ -165,6 +165,13 @@
           <span class="legend-chip"><i class="dot dot-approx"></i>unseen contact (within awareness range, sight blocked)</span>
           <span class="legend-chip"><i class="ring-swatch"></i>awareness range</span>
           <span class="legend-note">in sight → named token · blocked within the player's awareness range (default 4 squares) → gray “?” block · beyond the awareness range or blocked farther away → hidden</span>
+          <!-- Explored map (player-only, explored-map spec §7): the three map
+               CELL tiers. Shown to players; hidden for the GM via
+               `body.is-gm .legend-explored { display:none }`. -->
+          <span class="legend-sep legend-explored">|</span>
+          <span class="legend-chip legend-explored"><i class="swatch floor"></i>in sight</span>
+          <span class="legend-chip legend-explored"><i class="swatch explored"></i>explored</span>
+          <span class="legend-chip legend-explored"><i class="swatch hidden"></i>hidden (not shown)</span>
         </div>
 
         <span id="coord-readout" class="muted"></span>

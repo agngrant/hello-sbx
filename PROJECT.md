@@ -262,6 +262,10 @@ block (``a == b`` → True). The ``fog`` flag is retained in the payloads for
 wire compatibility but no longer gates visibility. The GM is never fogged or
 filtered.
 
+> **Map tiers (explored map, additive):** the *grid* is now also tiered per
+> player — seen (line of sight, full detail) / explored (greyed) / hidden
+> (undrawn) — but the **entity awareness model above is unchanged**.
+
 ---
 
 ## 6. Movement, permissions, pathfinding
@@ -373,6 +377,9 @@ Endpoint: `ws://host/ws` (upgrade from `GET /ws` with `Upgrade: websocket`).
 - `{type:"welcome", you:{id,name,role,entity_id}, map, entities, players, fog}`
 - `{type:"state", map, entities, players, fog}` — full snapshot broadcast to
   everyone on any mutation (small game → snapshot is simplest + testable).
+- **`visibility`** (additive, explored map) — an extra field on player
+  `welcome`/`state` payloads only: a `height`×`width` matrix of `S`/`E`/`H`
+  tier rows. **Absent for the GM** (no key) — the GM's payload is unchanged.
 - `{type:"path", entity_id, path:[{x,y}...]}` — for client animation.
 - `{type:"error", message}` — sent to the offending client.
 

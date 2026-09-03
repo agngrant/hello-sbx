@@ -42,6 +42,13 @@ scenario and prints a check per behaviour:
      corner route through the generated doorways — legal A* steps, no
      corner cuts). The GM then paints a wall on the generated map and the
      state broadcast carries it (editor of record works on generated maps).
+  9. EXPLORED MAP (spec AC13): GM + 1 player on a FRESH session. The player's
+     welcome carries a well-formed visibility whose S-set equals an INDEPENDENT
+     re-derivation (walkable LOS + 4-adjacent wall-face, no app.visibility
+     import); the GM never has the key. The GM walks the player through the
+     doorways; each player state's S-set re-derives while E accumulates
+     (monotonic — nothing ever goes S/E -> H), the old room is greyed (E, not
+     H), and awareness still renders the three-tier model.
 
 Run:  .venv/bin/python scripts/e2e_proof.py   (starts its own server)
 """
@@ -56,13 +63,56 @@ os.environ.setdefault("LITTLEDUNGEONS_QUIET_LOGS", "1")
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from app.models import Grid
-from app.pathfinding import is_valid_step
+from app.pathfinding import has_line_of_sight, is_valid_step
 from app.server import ThreadingHTTPServer
 from tests.wsclient import WSClient
 
 PASS = "\u2713"
 FAIL = "\u2717"
 failures = []
+
+
+# --- Explored-map step 9 helpers (INDEPENDENT re-derivation, spec AC13) ---
+# We deliberately do NOT import app.visibility: the script re-derives the S
+# set from the welcome/state map.cells + the you_entity position using the
+# SAME rules the spec states (S1 walkable LOS, S2 wall-face 4-adjacency),
+# so the wire is checked against the spec, not against the server's own code.
+
+def derive_visible(cells, w, h, pos):
+    """Re-derive the set of (x, y) cells in line of sight from ``pos``.
+
+    (S1) a walkable cell is visible iff it has line of sight from pos;
+    (S2) a wall cell is visible iff any of its 4 orthogonal in-bounds
+    neighbours is walkable and has line of sight from pos.  The anchor
+    itself always counts.  Uses app.pathfinding.has_line_of_sight only.
+    """
+    g = Grid.from_dict({"width": w, "height": h, "cells": cells})
+    pos = (pos[0], pos[1])
+    seen = {pos}
+    for y in range(h):
+        for x in range(w):
+            if cells[y][x] == "wall":
+                for nx, ny in ((x + 1, y), (x - 1, y), (x, y + 1), (x, y - 1)):
+                    if 0 <= nx < w and 0 <= ny < h \
+                            and cells[ny][nx] in ("floor", "doorway") \
+                            and has_line_of_sight(g, pos, (nx, ny)):
+                        seen.add((x, y))
+                        break
+            elif (x, y) == pos or has_line_of_sight(g, pos, (x, y)):
+                seen.add((x, y))
+    return seen
+
+
+def mask_char(mask, x, y):
+    """The tier char at grid cell (x, y) of a wire ``visibility`` matrix."""
+    return mask[y][x]
+
+
+def mask_wellformed(mask, w, h):
+    """True iff ``mask`` is ``h`` rows of exactly ``w`` chars in SEH."""
+    return (isinstance(mask, list) and len(mask) == h
+            and all(isinstance(r, str) and len(r) == w
+                    and set(r) <= set("SEH") for r in mask))
 
 
 def check(label, cond, detail=""):
@@ -511,6 +561,146 @@ def main():
         finally:
             g2.close()
             pl.close()
+
+        # 9. EXPLORED MAP (spec AC13 / §12): per-player fog of war with memory.
+        # GM + 1 player on a FRESH session on the sample dungeon. The player's
+        # welcome carries a well-formed visibility whose S-set equals an
+        # independent re-derivation (S1 walkable LOS + S2 wall-face); the GM
+        # never has the key. The GM walks the player through the doorways, and
+        # each player state's S-set re-derives while E accumulates (monotonic
+        # — nothing ever goes S/E -> H). Awareness still renders three-tier.
+        print("\n[9] explored map: doorway walk, S/E transitions, monotonicity")
+        gm9 = WSClient(host, port, path="/ws?session=e2e-explored",
+                       timeout=10).connect()
+        pl9 = WSClient(host, port, path="/ws?session=e2e-explored",
+                       timeout=10).connect()
+        try:
+            wgm9 = gm9.join("GM9", "gm")
+            check("fresh GM welcome: role=gm, NO visibility key",
+                  wgm9["type"] == "welcome" and wgm9["you"]["role"] == "gm"
+                  and "visibility" not in wgm9)
+            wpl9 = pl9.join("Alice9", "player")
+            check("fresh player welcome: role=player, visibility present",
+                  wpl9["type"] == "welcome" and wpl9["you"]["role"] == "player"
+                  and "visibility" in wpl9)
+            # The GM's join-broadcast state (no visibility for the GM).
+            gm9j = state_until(gm9)
+            check("GM join-state: NO visibility key", "visibility" not in gm9j)
+
+            pl_ent = wpl9["you"]["entity_id"]
+            pw, ph = wpl9["map"]["width"], wpl9["map"]["height"]
+            pc = wpl9["map"]["cells"]
+            wmask = wpl9["visibility"]
+            check("player welcome: visibility well-formed (h rows x w chars, SEH)",
+                  mask_wellformed(wmask, pw, ph),
+                  "type=%s len=%s" % (type(wmask).__name__,
+                                      len(wmask) if isinstance(wmask, list) else "?"))
+            spawn = (wpl9["you_entity"]["x"], wpl9["you_entity"]["y"])
+
+            def cells_of(mask, char):
+                return {(x, y) for y in range(ph) for x in range(pw)
+                        if mask[y][x] == char}
+
+            # (a) welcome S-set == independent re-derivation at the spawn.
+            seen_spawn = derive_visible(pc, pw, ph, spawn)
+            s_now = cells_of(wmask, "S")
+            check("welcome S-set == re-derived LOS set at spawn",
+                  s_now == seen_spawn,
+                  "server=%s derived=%s" % (sorted(s_now), sorted(seen_spawn)))
+            check("welcome has ZERO E (fresh session, no memory yet)",
+                  cells_of(wmask, "E") == set())
+
+            # GM adds a neutral npc in the right room (within awareness range of
+            # the player's final position) so the awareness overlay is non-empty
+            # and we can prove it still renders three-tier with visibility on.
+            gm9.send_json({"type": "create_entity", "name": "Shade",
+                           "kind": "npc", "team": "neutral", "x": 13, "y": 3})
+            gmcs = gm9.recv_json()      # GM state (entities now include the npc)
+            pls_c = pl9.recv_json()     # player state (visibility + awareness)
+            npc_ent = next(e["id"] for e in gmcs["entities"] if e["name"] == "Shade")
+            check("npc created in the right room (13,3)",
+                  npc_ent is not None and len(gmcs["entities"]) == 2)
+
+            # Trackers for monotonicity + the explored-so-far invariant.
+            ever_s = set(s_now)          # union of every S-set observed
+            ever_SE = set(s_now)         # union of every S/E cell observed
+            cur = spawn
+            pst = None
+            for (tx, ty) in [(5, 5), (9, 7), (12, 5)]:
+                gm9.send_json({"type": "move", "entity_id": pl_ent,
+                               "x": tx, "y": ty})
+                gmpath = gm9.recv_json()    # GM's path
+                gmstate = gm9.recv_json()   # GM's state
+                check("GM got a path to (%d,%d)" % (tx, ty),
+                      gmpath["type"] == "path" and gmpath["entity_id"] == pl_ent,
+                      json.dumps(gmpath))
+                proof_g = Grid.from_dict({"width": pw, "height": ph, "cells": pc})
+                steps = gmpath["path"]
+                check("every step (%s -> (%d,%d)) is a legal A* step" % (cur, tx, ty),
+                      all(is_valid_step(proof_g, (steps[i]["x"], steps[i]["y"]),
+                                        (steps[i + 1]["x"], steps[i + 1]["y"]))
+                          for i in range(len(steps) - 1)))
+                check("GM state after move: NO visibility key",
+                      "visibility" not in gmstate)
+                pl9.recv_json()             # player's path
+                pst = pl9.recv_json()       # player's state
+                np_ = (pst["you_entity"]["x"], pst["you_entity"]["y"])
+                seen_now = derive_visible(pst["map"]["cells"], pw, ph, np_)
+                pmask = pst["visibility"]
+                check("state after (%d,%d): visibility well-formed" % (tx, ty),
+                      mask_wellformed(pmask, pw, ph))
+                s_cell = cells_of(pmask, "S")
+                e_cell = cells_of(pmask, "E")
+                h_cell = cells_of(pmask, "H")
+                check("state after (%d,%d): S-set == re-derived at token pos" % (tx, ty),
+                      s_cell == seen_now)
+                check("state after (%d,%d): E-set == explored-so-far minus S" % (tx, ty),
+                      e_cell == (ever_s - s_cell),
+                      "expected %d got %d" % (len(ever_s - s_cell), len(e_cell)))
+                regressed = ever_SE & h_cell
+                check("monotonicity after (%d,%d): no S/E cell became H" % (tx, ty),
+                      not regressed, "regressed=%s" % sorted(regressed))
+                # Awareness stays the three-tier model whenever it is non-empty
+                # (approx => no identity; full => color+name+kind+label).
+                ok_shape = all(
+                    (i.get("approximate")
+                     and "name" not in i and "color" not in i and "kind" not in i)
+                    or (not i.get("approximate")
+                        and "color" in i and "name" in i
+                        and "kind" in i and i.get("label"))
+                    for i in pst["awareness"])
+                check("awareness after (%d,%d): well-formed three-tier shape" % (tx, ty),
+                      ok_shape, json.dumps(pst["awareness"]))
+                ever_s |= s_cell
+                ever_SE |= s_cell | e_cell
+                cur = np_
+
+            # Awareness is non-empty on the FINAL state (the npc sits within
+            # the player's awareness range of (12,5)) — proves awareness still
+            # works with the visibility matrix present.
+            check("final awareness: non-empty (npc within range of (12,5))",
+                  bool(pst["awareness"]), json.dumps(pst["awareness"]))
+
+            # Final marquee assertions on the last player state: old room is
+            # greyed (E), not dark (H); the new room is in sight (S); at least
+            # one previously-S cell is now E.
+            def mchar(x, y): return pst["visibility"][y][x]
+            check("final: left-region (1,1) is E (seen at spawn, no longer LOS)",
+                  mchar(1, 1) == "E", mchar(1, 1))
+            check("final: left-region (4,10) is E",
+                  mchar(4, 10) == "E", mchar(4, 10))
+            check("final: right-room (12,5) is S (token region)",
+                  mchar(12, 5) == "S", mchar(12, 5))
+            check("final: right-room (13,6) is S (in sight now)",
+                  mchar(13, 6) == "S", mchar(13, 6))
+            final_s = cells_of(pst["visibility"], "S")
+            final_e = cells_of(pst["visibility"], "E")
+            was_s_now_e = ever_s & final_e
+            check("final: >=1 previously-S cell is now E (not H)",
+                  bool(was_s_now_e), "count=%d" % len(was_s_now_e))
+        finally:
+            gm9.close()
+            pl9.close()
     finally:
         for c in (gm, alice, bob):
             c.close()
