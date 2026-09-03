@@ -421,7 +421,19 @@ then `awesome_engineer` (commit).
 - **Bug doc:** `docs/qa/BUG-EXPLORED-01.md` (matches BUG-001..011 format;
   P2; status FIXED, references commit `c9d9b83`).
 - **Committed** with this log update as a follow-up commit on
-  `feat/explored-map`. **Branch still NOT pushed.**
+  `feat/explored-map` (`51db1e1`). Branch was still NOT pushed at that
+  point.
+
+### Prompt 22
+> commit and push to remote branch in repo
+
+**Action:** Orchestrator logged prompt 22 in this file and committed the
+log, then transferred to `awesome_engineer` (git) to push
+`feat/explored-map` to `origin` with upstream tracking
+(`git push -u origin feat/explored-map`).
+**Outcome:** branch pushed (verification details in the engineer's report
+— see the §3 table, which was updated after the push). No merge to
+`main` was performed; `main` is untouched unless the owner asks for it.
 
 ---
 
