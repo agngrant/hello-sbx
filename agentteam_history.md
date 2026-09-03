@@ -399,13 +399,29 @@ tasked `awesome_engineer` (server ops + git) to stop + commit.
   skips non-line path segments (`if(!seg.m||!seg.l)continue;`);
   `qa_explored_map.py` → `next((p for p in {…}), None)`. Full re-verify:
   pytest + unittest green, e2e all-✓, live `qa_explored_map.py` all checks
-  pass. (Counts below to be confirmed in the final report.)
-- **Committed** (owner: "commit the current version"): all four items —
-  app.js, test_frontend.py, scripts/qa_explored_map.py, and this file —
-  as one commit on `feat/explored-map` (message: "fix: explored-map grid
-  frontier/frame lines (BUG-EXPLORED-01) + live QA script; session log").
-  **Convention change:** `agentteam_history.md` is now tracked (was
-  deliberately untracked). **Branch still NOT pushed.**
+  pass. See the verified results in the following bullet.
+- **Verified results:** pytest **347 passed**; unittest **347 OK**; e2e_proof **101 ok / 0 fail** (incl. step 9); live `qa_explored_map.py` **first-ever successful run: 39/39 checks, exit 0**. (The test rewrite also fixed inverted V/H key labels, an always-fail dup detector, and wrong expected coordinates; the true complete segment set is **12**; a second test `test_tiered_shared_s_e_edge_is_full` covers the shared S|E "S wins" rule.)
+- **Committed** (owner: "commit the current version"): **`c9d9b83`** on `feat/explored-map` "fix: explored-map grid frontier/frame lines (BUG-EXPLORED-01) + live QA script; session log" (4 files: app/static/app.js, tests/test_frontend.py, scripts/qa_explored_map.py new, agentteam_history.md new; 1129+/25-). Working tree clean. **Convention change:** `agentteam_history.md` is now tracked (was deliberately untracked). **Branch still NOT pushed** (no upstream configured).
+
+### Prompt 21
+> commit the QA bug doc for the grid lines fix and mark it signed off by QA
+
+**Action:** Orchestrator transferred to `qa` (read-only review + bug doc),
+then `awesome_engineer` (commit).
+**Outcome:**
+- **QA verdict: BUG-EXPLORED-01 FIXED.** Independent read-only review of
+  spec §6.1–6.3 vs the tiered line pass in `drawGridOnCanvas`
+  (`app/static/app.js`); both pinned test matrices re-derived by hand and
+  matching (12-segment and 27-segment exact sets); corner cases traced
+  (off-grid/border, isolated S cell, GM/preview/null paths untouched,
+  shared-edge double-stroke provably same-style). Four minor
+  non-blocking observations recorded (E-cell top/left frame unpinned,
+  isolated single-E cell unpinned, E|E double-stroke ≈51% alpha cosmetic,
+  no pinned W2 render — server-side concern covered by test_visibility).
+- **Bug doc:** `docs/qa/BUG-EXPLORED-01.md` (matches BUG-001..011 format;
+  P2; status FIXED, references commit `c9d9b83`).
+- **Committed** with this log update as a follow-up commit on
+  `feat/explored-map`. **Branch still NOT pushed.**
 
 ---
 
@@ -416,7 +432,7 @@ tasked `awesome_engineer` (server ops + git) to stop + commit.
 | Server | **Stopped** — no listener on 8000; no `.ld_server.log`/`.ld_server.pid` present (gitignored when created) |
 | Git — remote | `origin` → `https://github.com/agngrant/hello-sbx.git`; `origin/main` = `5ad236f` |
 | Git — `main` | `5ad236f` (in sync with `origin/main` at last check) |
-| Git — **current checkout** | **`feat/explored-map`** — `b5eafad` + the Prompt-20 commit (BUG-EXPLORED-01 fix, live QA script, session log), **NOT pushed** |
+| Git — **current checkout** | **`feat/explored-map`** — `c9d9b83` (i.e. `b5eafad` + the Prompt-20 commit: BUG-EXPLORED-01 fix, live QA script, session log), **NOT pushed** (no upstream) |
 | Working tree | Clean after the Prompt-20 commit (`.ld_server.*` deleted; `agentteam_history.md` now **tracked**) — verify with `git status` |
 | Docs vs code | PROJECT.md §5/§9 + README "explored map" section already updated for the feature |
 | Open items | see resume checklist below |
@@ -429,7 +445,7 @@ tasked `awesome_engineer` (server ops + git) to stop + commit.
    (`6fd9baf`).
 3. GM-generated X×Y maps + `#btn-generate` click fix (`5ad236f`).
 
-### NOT yet on `main` (on `feat/explored-map`, `b5eafad`)
+### NOT yet on `main` (on `feat/explored-map`, `c9d9b83`)
 4. **Explored map** (player fog of war with memory) + its follow-up fix
    **BUG-EXPLORED-01** (tiered grid frontier/frame lines) — now committed
    on the branch, not yet on `main`.
@@ -445,14 +461,17 @@ tasked `awesome_engineer` (server ops + git) to stop + commit.
    git status && git fetch && git log --oneline --all --decorate
    lsof -iTCP:8000 -sTCP:LISTEN   # expect: nothing listening
    ```
+   Expected at this writing: `feat/explored-map` at `c9d9b83`, 2 commits
+   ahead of `main` (`5ad236f`), not pushed, clean tree.
 2. **Establish the green baseline** before any new work:
    ```sh
    ./.venv/bin/python -m pytest                    # primary runner
    ./.venv/bin/python -m unittest discover -s tests -t .
    ./.venv/bin/python scripts/e2e_proof.py         # steps 1–9, all ✓
    ```
-   (Post-explored-map test counts were not re-counted in the refresh
-   session — the pytest output is the source of truth.)
+   (Baseline at Prompt 20: pytest 347 passed, unittest 347 OK, e2e_proof
+   101 checks, live qa_explored_map.py 39/39. The current output is the
+   source of truth.)
 3. **Live-wire the explored map** (needs a running server):
    ```sh
    cd /Users/agrant3/agentteam && PYTHONUNBUFFERED=1 nohup ./.venv/bin/python -m app.main --host 0.0.0.0 --port 8000 >> .ld_server.log 2>&1 & echo $! > .ld_server.pid
@@ -463,11 +482,14 @@ tasked `awesome_engineer` (server ops + git) to stop + commit.
    `feat/explored-map` → `main` (safe: `main` is exactly the branch
    point) — `git checkout main && git merge --ff-only feat/explored-map
    && git push` — or keep the feature branch / rebase. Nothing is pushed
-   yet, so there is no remote cleanup either way.
-5. **Record a QA sign-off for the explored map** if the owner wants the
-   docs current: `docs/qa/qa-signoff.md` still only covers the earlier
-   pass 2 (BUG-001…011). The feature has AC1–AC14 coverage + its own live
-   script; a `qa` agent pass would close the loop.
+   yet, so there is no remote cleanup either way. (The branch has no
+   upstream configured; a first push needs `git push -u origin
+   feat/explored-map`.)
+5. **QA sign-off for the explored map — DONE for BUG-EXPLORED-01**
+   (`docs/qa/BUG-EXPLORED-01.md`, verdict FIXED, Prompt 21). The earlier
+   `docs/qa/qa-signoff.md` still only covers pass 2 (BUG-001…011); an
+   optional broader explored-map sign-off pass could still be requested.
+   The feature has AC1–AC14 coverage + live script 39/39.
 6. **Small erratum (optional):** `docs/design/explored-map.md` §3.2 W4
    literal (69 S / 123 H, (6,7)=H) is superseded by the corrected test
    fixture (70 S / 122 H — (6,7) is S per the spec's own S2 wall-face
