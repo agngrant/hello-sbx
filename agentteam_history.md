@@ -2,8 +2,7 @@
 
 Saved: this file records the full context and prompts from the multi-agent
 orchestration session conducted in the repo at `/Users/agrant3/agentteam`.
-Last refreshed: Prompt 24 — team familiarisation + `working sight` tag +
-Openable/Closable Doors feature-request spec (see §2, prompt 24).
+Last refreshed: Prompt 26 — doors feature built, tested, QA-signed (PASS) on `feat/explored-map` (see §2, prompt 26).
 
 ---
 
@@ -518,18 +517,79 @@ except the new spec `docs/design/door-features.md` (uncommitted — commit
 with the implementation or the next checkpoint); doors implementation not
 yet started.
 
+### Prompt 26
+> start off the process of building and testing the new feature across the product
+
+**Action:** Orchestrator ran the full build → test → evaluate cycle, parallel
+where the wire contract allowed (backend + frontend concurrently, then QA),
+then routed QA findings back for fixes and re-verification. All delegated;
+orchestrator kept the plan `openable-doors` + `TODO.md` current.
+**Outcome — Doors feature SHIPPED on `feat/explored-map` (unpushed, unmerged):**
+- **Backend** (backend_engineer): `Grid.doors` (additive `"<x>,<y>" →
+  "L"/"U"/"O"`, absent ⇒ all locked); door-aware `walkable`/`is_valid_step`/
+  `find_path`/`has_line_of_sight` (closed door = wall, incl. diagonal
+  no-corner-cut); visibility D5 closed-door face branch only
+  (`awareness.py`/`grid.py` byte-unchanged — verified by QA); WS
+  `{type:"door",x,y,action}` state machine (GM unlock/lock; players
+  open/close unlocked; occupancy guard; §4.3 validation order); REST
+  additive `doors` field; paint sync (doorway ⇒ locked door; floor/wall ⇒
+  delete). A1: enumerated existing tests updated to open doors first.
+  New: tests/test_models.py, tests/test_door_session.py (~65 tests),
+  TestDoorWire in test_ws.py, e2e_proof doors step, scripts/qa_doors.py.
+- **Frontend** (frontend_engineer): three-state palette + glyphs (locked
+  red `#e03131` padlock / unlocked `#f59f00` bar / open `#d97706` arch;
+  explored greys `#a06b6b`/`#9a8f7a`/`#8b94a3`), GM Door tool +
+  Unlock/Lock/Open/Close sub-buttons, player tap-to-open/close (inverse
+  action: L→open, U→open, O→close), legend chips both roles, hints,
+  +35 Node-harness tests (99 passing incl. 64 pre-existing).
+- **Build incident:** first backend transfer came back with an empty report
+  (work ~85% done but TestDoorWire red on shared-sample-grid pollution,
+  scripts missing). Status pass diagnosed; second pass fixed TestDoorWire
+  (setUp re-locks the 3 sample doors via GM `lock`), created
+  scripts/qa_doors.py + e2e door step, and had to make e2e steps [8]/[9]
+  door-aware (generated doors are closed by default). Committed `a05a013`
+  (23 files, +5025/−203).
+- **QA** (qa): PASS-WITH-CONDITIONS initially → **PASS** final.
+  Re-runs: pytest **472**, unittest **472 OK**, e2e_proof **105 ✓**, live
+  qa_doors.py **74 ✓** (exit 0). AC1–AC16 all PASS. Independent checks:
+  awareness.py + grid.py byte-identical to baseline; visibility diff =
+  only the D5 branch. **BUG-DOORS-001 (P2):** cross-session door-state leak
+  via get_session() shared sample-grid identity (pre-existing, intentional,
+  e2e-pinned) → DOCUMENTED as accepted limitation (README + bug doc), no
+  behaviour change. **BUG-DOORS-002 (P3):** player `lock` on open+token
+  door returned occupancy error instead of `"not allowed"` (role check
+  must precede occupancy per §4.3) → FIXED in `69e87a2` + regression test
+  `test_player_lock_on_open_door_with_token_is_not_allowed`.
+  Spec errata (QA): §7.6 tap-mapping letters + AC11(d) corrected to the
+  shipped inverse-action mapping (the literal letters made it impossible
+  for a player to ever open a door); §7.1 explored-hex note resolved to
+  §7.3 values. Sign-off: `docs/qa/qa-signoff-doors.md` → **PASS**.
+- **Docs:** PROJECT.md §4 (Grid.doors) / §5 (closed door blocks sight) /
+  §6 (movement) / §8 (REST additive) / §9 (door message) — additive only,
+  frozen surface preserved; README new "Doors" section + limitation.
+- **Commits (on `feat/explored-map`, none pushed):** `a05a013` feature
+  (23 files) → `69e87a2` fix+docs (8 files, +667/−31) → `5d49e2c` docs
+  wrap-up (sign-off, TODO, this log).
+**State after Prompt 26:** server **STOPPED** (port 8000 free, no
+artifacts); branch `feat/explored-map` = `5d49e2c` — **9 ahead of `main`**
+(`5ad236f`), **4 ahead of `origin/feat/explored-map`** (`94a7a9b`, 0
+behind); tag `working sight` still on pre-feature `b1ff47e`; tree clean
+except pre-existing `docker-agent.yaml` mod + `sbx-diagnostics-*.zip`
+(untracked, both unrelated to doors); **feature is unpushed and unmerged —
+owner's call on push/merge.**
+
 ---
 
-## 3. Current State Summary (refreshed — Prompt 25)
+## 3. Current State Summary (refreshed — Prompt 26)
 
 | Item | Value |
 |---|---|
 | Server | **Stopped** — no listener on 8000; no `.ld_server.log`/`.ld_server.pid` present (gitignored when created) |
 | Git — remote | `origin` → `https://github.com/agngrant/hello-sbx.git`; `origin/main` = `5ad236f` |
 | Git — `main` | `5ad236f` (in sync with `origin/main`) |
-| Git — **current checkout** | **`feat/explored-map` = `b1ff47e`** — 1 ahead / 0 behind `origin/feat/explored-map` (`94a7a9b`); 6 ahead of `main` (`5ad236f`); **NOT merged to `main`**; local tag **`working sight`** → `b1ff47e` (unpushed) |
-| Working tree | Clean **except** new untracked `docs/design/door-features.md` (doors spec) + this log; commit with implementation or next checkpoint |
-| Docs vs code | Doors feature = **spec only** (`docs/design/door-features.md`); no code yet. PROJECT.md §5/§9 + README explored-map section current for the branch |
+| Git — **current checkout** | **`feat/explored-map` = `5d49e2c`** — 9 ahead of `main` (`5ad236f`); **4 ahead / 0 behind** `origin/feat/explored-map` (`94a7a9b`); **NOT pushed, NOT merged**; local tag **`working sight`** → `b1ff47e` (pre-doors baseline) |
+| Working tree | Clean except pre-existing `M docker-agent.yaml` (agent-roster rename, unrelated) + `?? sbx-diagnostics-*.zip` (sandbox artifact, untracked) |
+| Docs vs code | **In sync:** PROJECT.md §4/§5/§6/§8/§9 + README Doors section + spec errata all match the shipped doors feature; `docs/qa/qa-signoff-doors.md` = PASS |
 | Open items | see resume checklist below + `TODO.md` (repo root) |
 
 ### Shipped feature inventory (all on `main`, pushed)
@@ -540,7 +600,7 @@ yet started.
    (`6fd9baf`).
 3. GM-generated X×Y maps + `#btn-generate` click fix (`5ad236f`).
 
-### NOT yet on `main` (on `feat/explored-map`, `c9d9b83`)
+### NOT yet on `main` (on `feat/explored-map`, now `5d49e2c` — 9 ahead of `main`, 4 ahead of remote)
 4. **Explored map** (player fog of war with memory) + its follow-up fix
    **BUG-EXPLORED-01** (tiered grid frontier/frame lines) — now committed
    on the branch, not yet on `main`.
@@ -548,6 +608,33 @@ yet started.
    `tests/test_visibility.py`, `scripts/qa_explored_map.py`, e2e step 9.
    Modified: `app/session.py`, `app/static/*`. Entity awareness and the GM
    payload are contractually untouched (regression-pinned in tests).
+5. **Openable/Closable Doors** (QA PASS, Prompt 26) — every doorway cell is
+   a door with state locked/unlocked/open, default **closed+locked**; GM-only
+   unlock/lock; players open/close while unlocked (tap-to-open/close);
+   a closed door blocks movement AND line of sight exactly like a wall
+   (incl. the diagonal no-corner-cut rule); an open door is transparent +
+   walkable (= today's doorway). The awareness three-tier and the
+   explored-map S/E/H algorithms are **byte-unchanged** (`app/awareness.py`
+   + `app/grid.py` verified identical to baseline `b1ff47e` by QA) — they
+   inherit door-awareness via the door-aware `has_line_of_sight` + the tiny
+   D5 face branch in `visible_cells`. State on additive `Grid.doors`
+   ("<x>,<y>" → "L"/"U"/"O"; absent ⇒ all locked); new WS
+   `{type:"door",x,y,action}` message; REST additive `doors` field.
+   Palette: locked red `#e03131` padlock / unlocked amber `#f59f00` bar /
+   open amber `#d97706` arch (≠ floor `#efe9dc`, ≠ wall `#3b4252`) +
+   explored-grey variants; GM Door tool with state sub-buttons.
+   Spec: `docs/design/door-features.md` (AC1–AC16 + QA errata). New:
+   `tests/test_models.py`, `tests/test_door_session.py`,
+   `scripts/qa_doors.py`, e2e doors step. Modified: `app/models.py`,
+   `app/pathfinding.py`, `app/visibility.py`, `app/session.py`,
+   `app/server.py`, `app/static/*`, `tests/*`, `scripts/e2e_proof.py`,
+   PROJECT.md, README.md. QA: pytest 472 / unittest 472 OK, e2e 105 ✓,
+   live qa_doors 74 ✓; sign-off `docs/qa/qa-signoff-doors.md` → PASS.
+   Bug docs: `BUG-DOORS-001` (P2, DOCUMENTED accepted limitation — shared
+   sample-grid across unregistered sessions; README Limitations),
+   `BUG-DOORS-002` (P3, FIXED in `69e87a2` — role check precedes
+   occupancy for lock-from-open). Commits: `a05a013` feature, `69e87a2`
+   fix+docs, `5d49e2c` docs wrap-up.
 
 ### Resume checklist for the refreshed team
 1. **Verify state first** (no assumptions carried over):
@@ -556,32 +643,35 @@ yet started.
    git status && git fetch && git log --oneline --all --decorate
    lsof -iTCP:8000 -sTCP:LISTEN   # expect: nothing listening
    ```
-   Expected at this writing: `feat/explored-map` = `origin/feat/explored-map`
-   at `94a7a9b` (4 commits ahead of `main` = `5ad236f`), clean tree. The
-   explored-map feature is **pushed but NOT merged to `main`** — a
-   fast-forward `git checkout main && git merge --ff-only
-   feat/explored-map && git push` is the remaining disposition step.
+   Expected at this writing: `feat/explored-map` = `5d49e2c` (9 ahead of
+   `main` = `5ad236f`; 4 ahead / 0 behind `origin/feat/explored-map` =
+   `94a7a9b`), clean tree except pre-existing `docker-agent.yaml` mod +
+   untracked `sbx-diagnostics-*.zip`. Both the explored-map AND the doors
+   feature are **NOT merged to `main`** — a fast-forward `git checkout main
+   && git merge --ff-only feat/explored-map && git push` would land both;
+   the baseline tag `working sight` (`b1ff47e`) marks the pre-doors state.
 2. **Establish the green baseline** before any new work:
    ```sh
    ./.venv/bin/python -m pytest                    # primary runner
    ./.venv/bin/python -m unittest discover -s tests -t .
    ./.venv/bin/python scripts/e2e_proof.py         # steps 1–9, all ✓
    ```
-   (Baseline at Prompt 20: pytest 347 passed, unittest 347 OK, e2e_proof
-   101 checks, live qa_explored_map.py 39/39. The current output is the
-   source of truth.)
+   (Baseline at Prompt 26: pytest 472 passed, unittest 472 OK, e2e_proof
+   105 checks, live qa_doors.py 74/74. The current output is the source
+   of truth.)
 3. **Live-wire the explored map** (needs a running server):
    ```sh
    cd /Users/agrant3/agentteam && PYTHONUNBUFFERED=1 nohup ./.venv/bin/python -m app.main --host 0.0.0.0 --port 8000 >> .ld_server.log 2>&1 & echo $! > .ld_server.pid
    ./.venv/bin/python scripts/qa_explored_map.py   # exit 0 = all checks pass
    kill "$(cat .ld_server.pid)" && rm -f .ld_server.log .ld_server.pid
    ```
-4. **Merge to `main` (owner's call)** — the explored-map feature is
-   pushed to `origin/feat/explored-map` but `main` is still at `5ad236f`.
-   Fast-forward is safe (main is exactly the branch point):
-   `git checkout main && git merge --ff-only feat/explored-map &&
-   git push`. If the team prefers a PR/review flow, open the PR from
-   `feat/explored-map` → `main` (both ends now exist on the remote).
+4. **Merge to `main` (owner's call)** — `feat/explored-map` now carries
+   BOTH the explored-map and the doors features (9 commits ahead of
+   `main` = `5ad236f`; 4 ahead of `origin/feat/explored-map` = `94a7a9b`,
+   unpushed). Fast-forward is safe (main is exactly the branch point):
+   `git push` the branch, then `git checkout main && git merge --ff-only
+   feat/explored-map && git push`. If the team prefers a PR/review flow,
+   push first and open the PR from `feat/explored-map` → `main`.
 5. **QA sign-off for the explored map — DONE for BUG-EXPLORED-01**
    (`docs/qa/BUG-EXPLORED-01.md`, verdict FIXED, Prompt 21). The earlier
    `docs/qa/qa-signoff.md` still only covers pass 2 (BUG-001…011); an
