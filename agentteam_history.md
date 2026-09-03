@@ -578,13 +578,24 @@ except pre-existing `docker-agent.yaml` mod + `sbx-diagnostics-*.zip`
 (untracked, both unrelated to doors); **feature is unpushed and unmerged —
 owner's call on push/merge.**
 
+### Prompt 27
+> get the engineer to run the server on 0.0.0.0:8000
+
+**Action:** Transferred to `backend_engineer` (server ops).
+**Outcome:** Port 8000 confirmed free; branch `feat/explored-map` @
+`f0a4fe3` (the doors-shipped state) confirmed, no switching; launched per
+the established convention (direct venv command, `>> .ld_server.log`, PID
+file). Verified `*:8000 (LISTEN)`, `/health` ok, uvicorn banner on
+0.0.0.0:8000.
+- **PID: 42118** — left running in background (serves the doors feature).
+
 ---
 
 ## 3. Current State Summary (refreshed — Prompt 26)
 
 | Item | Value |
 |---|---|
-| Server | **Stopped** — no listener on 8000; no `.ld_server.log`/`.ld_server.pid` present (gitignored when created) |
+| Server | **RUNNING** (Prompt 27) — `*.8000` LISTEN, PID 42118, `.ld_server.log`/`.ld_server.pid` present (gitignored) |
 | Git — remote | `origin` → `https://github.com/agngrant/hello-sbx.git`; `origin/main` = `5ad236f` |
 | Git — `main` | `5ad236f` (in sync with `origin/main`) |
 | Git — **current checkout** | **`feat/explored-map` = `5d49e2c`** — 9 ahead of `main` (`5ad236f`); **4 ahead / 0 behind** `origin/feat/explored-map` (`94a7a9b`); **NOT pushed, NOT merged**; local tag **`working sight`** → `b1ff47e` (pre-doors baseline) |

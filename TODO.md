@@ -36,8 +36,10 @@ GM-generated BSP maps, **explored map** (S/E/H fog with memory), and now
 
 ## In progress
 
-- [ ] Nothing in flight. Next owner decision: **merge** `feat/explored-map` → `main`
-      (now 8+ commits ahead, 2 commits unpushed) and/or **push** the branch.
+- [ ] Nothing in flight. **Server RUNNING** on `0.0.0.0:8000` (PID 42118,
+      branch `feat/explored-map` @ `f0a4fe3`, doors feature live).
+- [ ] Next owner decision: **merge** `feat/explored-map` → `main`
+      (10 commits ahead) and/or **push** the branch (5 ahead of remote).
 
 ## Open items (backlog, no change)
 
