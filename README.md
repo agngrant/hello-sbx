@@ -106,9 +106,10 @@ they can actually **see**.
   **distance** (Chebyshev, "squares"):
   - **Full (in sight):** a token with its true color, **name, kind, and label** —
     the full picture.
-  - **Approximate (sight blocked, within 4 squares):** a muted gray **"?"** marker at
-    a *coarse* (2×2-block) position — **no color, name, or kind** (just "something
-    is roughly here").
+  - **Approximate (sight blocked, within awareness range):** a muted gray **"?"**
+    marker at a *coarse* (2×2-block) position — **no color, name, or kind** (just "something
+    is roughly here"). The range is **per-player** (default 4 squares; the GM can set 0–20
+    per player in GM Tools), drawn as a **dashed awareness ring** around the player's token.
   - **Invisible (sight blocked, beyond 4 squares):** not shown at all.
 
 A player's own entity is rendered as their **"YOU"** token and is excluded from the

@@ -281,6 +281,9 @@ input[type="file"] { color: var(--text-muted); }
 }
 .gm-field-row { display: flex; gap: var(--s2); align-items: center; margin: var(--s2) 0; }
 .gm-field-row select { flex: 1; min-width: 0; }
+/* Awareness GM field (docs/design/awareness-ring.md §5): compact number
+   input in a .gm-field-row — the selected player token's awareness radius. */
+#awareness-input { flex: 0 0 auto; width: 72px; }
 #new-entity-name { width: 100%; }
 
 /* Awareness list (wireframes §5.2) */
@@ -381,6 +384,14 @@ input[type="file"] { color: var(--text-muted); }
 .swatch.floor { background: var(--floor); }
 .swatch.wall { background: var(--wall-fill); border: 1px solid var(--wall-border); }
 .swatch.doorway { background: var(--floor); border: 2px solid var(--doorway); }
+/* Awareness ring swatch (legend): matches the canvas awareness ring —
+   a dashed accent-blue square with a faint fill (§4.2). */
+.ring-swatch {
+  width: 10px; height: 10px;
+  display: inline-block;
+  border: 1px dashed #4dabf7;
+  background: rgba(77, 171, 247, 0.10);
+}
 
 #coord-readout {
   position: absolute;

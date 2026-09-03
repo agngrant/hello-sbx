@@ -27,3 +27,5 @@ dist/
 # Runtime server artifacts (launched process)
 server.log
 server.pid
+.ld_server.log
+.ld_server.pid

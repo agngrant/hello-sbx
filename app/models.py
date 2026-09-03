@@ -10,7 +10,7 @@ REST/WS payloads are exactly the shapes the frontend already consumes:
 
 * ``Grid``:      ``{"name", "width", "height", "cells", "image"}``
 * ``Entity``:    ``{"id", "name", "kind", "team", "x", "y", "owner", "color"}``
-* ``Player``:    ``{"id", "name", "role", "entity_id"}``
+* ``Player``:    ``{"id", "name", "role", "entity_id", "awareness_radius"}``
 * ``Session``:   ``{"id", "map", "entities", "players", "fog"}`` — the full
   snapshot broadcast on any mutation (PROJECT.md §9).
 """
@@ -161,6 +161,11 @@ class Player:
     name: str
     role: str  # one of ROLES
     entity_id: str | None = None  # the character this player controls
+    # Chebyshev squares of the APPROXIMATE awareness tier (the no-line-of-
+    # sight range): GM-adjustable via "set_awareness" within 0–20
+    # (app.awareness.AWARENESS_MIN/MAX); the default is the legacy fixed
+    # APPROX_RADIUS (4). docs/design/awareness-ring.md §2.
+    awareness_radius: int = 4
 
     def __post_init__(self) -> None:
         if self.role not in ROLES:
@@ -172,15 +177,29 @@ class Player:
             "name": self.name,
             "role": self.role,
             "entity_id": self.entity_id,
+            "awareness_radius": self.awareness_radius,
         }
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "Player":
+        # awareness_radius (0–20, default 4): out-of-range or invalid
+        # values are silently clamped on read — the live "set_awareness"
+        # setter enforces the same range and errors.
+        radius = data.get("awareness_radius")
+        if radius is None:
+            radius = 4
+        else:
+            try:
+                radius = int(radius)
+            except (TypeError, ValueError):
+                radius = 4
+        radius = max(0, min(20, radius))
         return cls(
             id=data["id"],
             name=data["name"],
             role=data["role"],
             entity_id=data.get("entity_id"),
+            awareness_radius=radius,
         )
 
 

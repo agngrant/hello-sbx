@@ -229,12 +229,16 @@ for each entity E (E != the viewer's own token):
 - **FULL** — direct line of sight to `E`: exact position + color + **name, kind,
   and label** (identical shape to the GM item). Color is the explicit `entity.color`
   override, else the team color.
-- **APPROXIMATE** — **no** line of sight, but `E` within `APPROX_RADIUS = 4`
-  squares (Chebyshev `max(|dx|,|dy|) ≤ 4`): a coarse **2×2-block-quantized**
-  position (`x//2, y//2`) with **no identity at all** (no color/name/kind/team/real
+- **APPROXIMATE** — **no** line of sight, but `E` within the player's
+  **awareness range**: a coarse **2×2-block-quantized** position (`x//2, y//2`) with **no identity at all** (no color/name/kind/team/real
   id). The client renders a muted gray "?" marker.
-- **INVISIBLE** — no line of sight **and** farther than 4 squares: `E` does not
-  appear in the player's awareness list at all.
+- **INVISIBLE** — no line of sight **and** beyond the awareness range: `E`
+  does not appear in the player's awareness list at all.
+
+The APPROXIMATE tier's range is **per-player** (`Player.awareness_radius`,
+int, default `APPROX_RADIUS = 4`); the GM sets it 0–20 per player via the
+`set_awareness` WS message (GM Tools), which the client draws as a dashed
+awareness ring around each player token.
 
 `relation_of` / `overlay_color` (used by the FULL tier and the GM) — judged by the
 **target's** team:
@@ -344,6 +348,9 @@ Endpoint: `ws://host/ws` (upgrade from `GET /ws` with `Upgrade: websocket`).
 - `{type:"create_entity", name, kind, team, x, y}` — GM.
 - `{type:"delete_entity", entity_id}` — GM.
 - `{type:"set_team", entity_id, team}` — GM.
+- `{type:"set_awareness", entity_id, value}` — GM. Set a player token's
+  awareness radius (`value`: integer 0–20; errors: `"not a player token"`,
+  `"awareness must be an integer 0–20"`).
 - `{type:"paint", x, y, cell_type}` — GM edit grid.
 - `{type:"set_fog", on}` — GM toggle fog of war.
 

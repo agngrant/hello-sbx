@@ -18,17 +18,19 @@ pair: *what does this viewer perceive about that entity?*
      position, display color (explicit ``entity.color`` override or team
      color green/white/red), ``name``, ``kind`` and ``label: True`` —
      identical in shape to the GM item.
-  2. **APPROXIMATE** — no line of sight, but ``E`` within
-     :data:`APPROX_RADIUS` squares of ``O`` (Chebyshev distance
-     ``max(|dx|, |dy|) <= APPROX_RADIUS``): only a **coarse, quantized
-     position** is revealed — the origin ``(qx, qy) = (E.x // APPROX_BLOCK,
-     E.y // APPROX_BLOCK)`` of the 2×2 block containing ``E``.  **No
-     identity at all**: no color, no name, no kind, no label, and no
-     entity id — the ``entity_id`` field is a non-revealing surrogate
-     (``"<approx-1>"``, ``"<approx-2>"``, … in deterministic item order).
-  3. **INVISIBLE** — no line of sight AND farther than
-     :data:`APPROX_RADIUS` squares: the entity does **not** appear in the
-     player's awareness list at all.
+  2. **APPROXIMATE** — no line of sight, but ``E`` within the viewer's
+     *awareness radius* ``viewer.awareness_radius`` squares of ``O``
+     (Chebyshev distance ``max(|dx|, |dy|) <= radius``; the default radius
+     is :data:`APPROX_RADIUS`, GM-adjustable 0–20): only a **coarse,
+     quantized position** is revealed — the origin ``(qx, qy) = (E.x //
+     APPROX_BLOCK, E.y // APPROX_BLOCK)`` of the 2×2 block containing
+     ``E``.  **No identity at all**: no color, no name, no kind, no
+     label, and no entity id — the ``entity_id`` field is a non-revealing
+     surrogate (``"<approx-1>"``, ``"<approx-2>"``, … in deterministic item
+     order).
+  3. **INVISIBLE** — no line of sight AND farther than the radius
+     squares: the entity does **not** appear in the player's awareness
+     list at all.
 
   The model is *purely a function of the current positions* — there is no
   memory of previously seen entities (the old fog-of-war "previously seen"
@@ -63,7 +65,15 @@ from app.pathfinding import has_line_of_sight
 
 #: Chebyshev distance (squares) within which a no-LOS entity is still
 #: perceived as an *approximate* contact; farther, it is invisible.
+#: This is the DEFAULT per-player radius; a player's own ``awareness_radius``
+#: (GM-adjustable) takes precedence for the approximate tier.
 APPROX_RADIUS = 4
+
+#: Inclusive bounds for a player's GM-adjustable awareness radius
+#: (``Player.awareness_radius``; the ``set_awareness`` message clamps/rejects
+#: outside this range). docs/design/awareness-ring.md §2.
+AWARENESS_MIN = 0
+AWARENESS_MAX = 20
 
 #: Edge length (squares) of the quantization block used to report an
 #: approximate position: ``qx = x // APPROX_BLOCK``, ``qy = y // APPROX_BLOCK``.
@@ -149,12 +159,15 @@ def build_awareness(
 
       * with ``grid`` — the three-tier model anchored at the viewer's own
         entity ``O``: FULL (line of sight → item identical in shape to the
-        GM item), APPROXIMATE (no LOS, within :data:`APPROX_RADIUS`
-        squares → ``{"entity_id": "<approx-n>", "x": E.x // APPROX_BLOCK,
-        "y": E.y // APPROX_BLOCK, "approximate": True, "label": False}``),
-        INVISIBLE (no LOS, beyond the radius → omitted).  The viewer's own
-        token is always excluded.  A player whose own entity is missing
-        from ``entities`` (deleted) has no anchor: awareness is ``[]``.
+        GM item), APPROXIMATE (no LOS, within the viewer's
+        ``awareness_radius`` squares — the per-player, GM-adjustable
+        radius; a non-int/``None`` value falls back to
+        :data:`APPROX_RADIUS` — → ``{"entity_id": "<approx-n>",
+        "x": E.x // APPROX_BLOCK, "y": E.y // APPROX_BLOCK,
+        "approximate": True, "label": False}``), INVISIBLE (no LOS, beyond
+        the radius → omitted).  The viewer's own token is always excluded.
+        A player whose own entity is missing from ``entities`` (deleted)
+        has no anchor: awareness is ``[]``.
       * without ``grid`` — legacy pass-through-wall radar: every other
         entity as ``{"entity_id", "x", "y", "color", "label": False}``
         (colored dot, no name/kind/label).
@@ -192,13 +205,20 @@ def build_awareness(
         return []
 
     approx_count = 0
+    # The approximate tier's range is the VIEWER's own (per-player, GM-
+    # adjustable) awareness radius; a non-int/None value (old Player
+    # objects) falls back to the default APPROX_RADIUS. The GM branch
+    # (above) and the LOS/FULL tier below are never affected by it.
+    radius = viewer.awareness_radius
+    if isinstance(radius, bool) or not isinstance(radius, int):
+        radius = APPROX_RADIUS
     for entity_id in sorted(entities):
         if entity_id == viewer.entity_id:
             continue
         entity = entities[entity_id]
         if has_line_of_sight(grid, (own.x, own.y), (entity.x, entity.y)):
             items.append(_full_item(entity))
-        elif _chebyshev(own.x, own.y, entity.x, entity.y) <= APPROX_RADIUS:
+        elif _chebyshev(own.x, own.y, entity.x, entity.y) <= radius:
             approx_count += 1
             items.append(
                 {

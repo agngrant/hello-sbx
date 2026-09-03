@@ -853,6 +853,118 @@ class TestPlayerVisibilityTiers(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
+# set_awareness (GM-only): a player's approximate-tier awareness radius
+# (0–20, default 4) — docs/design/awareness-ring.md §3.2.
+# ---------------------------------------------------------------------------
+
+
+class TestSetAwareness(SessionTestCase):
+    AWARENESS_ERROR = "awareness must be an integer 0–20"
+
+    def _gm(self, value):
+        return drive(self.session,
+                     self.gm_s,
+                     {"type": "set_awareness", "entity_id": self.p1_ent,
+                      "value": value})
+
+    def test_gm_sets_player_radius_updates_player_and_broadcasts(self):
+        self.assertEqual(
+            self.session.players[self.p1.id].awareness_radius, 4)  # default
+        reply = self._gm(7)
+        self.assertIsNone(reply)  # no per-client reply (set_team pattern)
+        self.assertEqual(self.session.players[self.p1.id].awareness_radius, 7)
+        # the state broadcast carries the new value in the players[] entry
+        # (and on the PLAYER's own state copy — the client reads it from
+        # there).
+        st = self.session.state_for(self.gm)
+        mine = next(p for p in st["players"] if p["id"] == self.p1.id)
+        self.assertEqual(mine["awareness_radius"], 7)
+        st_p1 = self.session.state_for(self.p1)
+        mine_p1 = next(p for p in st_p1["players"] if p["id"] == self.p1.id)
+        self.assertEqual(mine_p1["awareness_radius"], 7)
+        # and the tier follows the radius: a no-LOS entity behind the
+        # col-5 wall at Chebyshev 5 (npc at (6,1)) is invisible at the
+        # default 4 but APPROXIMATE now that the radius is 7.
+        drive(self.session, self.gm_s,
+              {"type": "create_entity", "name": "Shade", "kind": "enemy",
+               "team": "hostile", "x": 6, "y": 1})
+        shade = next(e for e in self.session.entities.values()
+                     if e.name == "Shade")
+        aw = self.session.state_for(self.p1)["awareness"]
+        self.assertIn(
+            {"entity_id": "<approx-1>", "x": 6 // 2, "y": 1 // 2,
+             "approximate": True, "label": False},
+            aw)
+        # shrinking the radius to 0 hides it again (LOS-only perception).
+        self.assertIsNone(self._gm(0))
+        aw0 = self.session.state_for(self.p1)["awareness"]
+        self.assertNotIn(shade.id, [i["entity_id"] for i in aw0])
+        self.assertFalse(any(i.get("approximate") for i in aw0))
+
+    def test_values_zero_and_max_apply(self):
+        self.assertIsNone(self._gm(0))
+        self.assertEqual(self.session.players[self.p1.id].awareness_radius, 0)
+        self.assertIsNone(self._gm(20))
+        self.assertEqual(self.session.players[self.p1.id].awareness_radius, 20)
+
+    def test_out_of_range_values_rejected(self):
+        for value in (21, -1, 100):
+            with self.subTest(value=value):
+                reply = self._gm(value)
+                self.assertEqual(
+                    reply, {"type": "error", "message": self.AWARENESS_ERROR})
+        # the radius is untouched by the rejected sets.
+        self.assertEqual(self.session.players[self.p1.id].awareness_radius, 4)
+
+    def test_non_int_values_rejected(self):
+        for value in ("abc", True, False, 3.5, None):
+            with self.subTest(value=value):
+                reply = self._gm(value)
+                self.assertEqual(
+                    reply, {"type": "error", "message": self.AWARENESS_ERROR})
+
+    def test_missing_value_rejected(self):
+        reply = drive(self.session, self.gm_s,
+                      {"type": "set_awareness", "entity_id": self.p1_ent})
+        self.assertEqual(
+            reply, {"type": "error", "message": self.AWARENESS_ERROR})
+
+    def test_non_player_token_rejected(self):
+        # A GM-created npc has owner=None → not a player token.
+        reply = drive(self.session, self.gm_s,
+                      {"type": "create_entity", "name": "Grom",
+                       "kind": "npc", "team": "neutral", "x": 6, "y": 5})
+        self.assertIsNone(reply)
+        npc = next(e for e in self.session.entities.values()
+                   if e.name == "Grom")
+        reply = self._gm_by_entity(npc.id, 7)
+        self.assertEqual(reply, {"type": "error", "message": "not a player token"})
+
+    def _gm_by_entity(self, entity_id, value):
+        return drive(self.session, self.gm_s,
+                     {"type": "set_awareness", "entity_id": entity_id,
+                      "value": value})
+
+    def test_nonexistent_entity_rejected(self):
+        reply = self._gm_by_entity("ghost", 5)
+        self.assertEqual(reply, {"type": "error", "message": "no such entity"})
+
+    def test_missing_entity_id_rejected(self):
+        reply = drive(self.session, self.gm_s,
+                      {"type": "set_awareness", "value": 5})
+        self.assertEqual(reply, {"type": "error", "message": "entity_id required"})
+
+    def test_player_cannot_set_awareness(self):
+        reply = drive(self.session,
+                      self.p1_s,
+                      {"type": "set_awareness", "entity_id": self.p1_ent,
+                       "value": 9})
+        self.assertEqual(reply, {"type": "error", "message": "not allowed"})
+        # untouched
+        self.assertEqual(self.session.players[self.p1.id].awareness_radius, 4)
+
+
+# ---------------------------------------------------------------------------
 # Robustness: the frontend drives this directly — missing fields must be
 # errors, never crashes (§9, task "robust").
 # ---------------------------------------------------------------------------
@@ -877,6 +989,8 @@ class TestRobustness(SessionTestCase):
             {"type": "delete_entity"},
             {"type": "set_team", "entity_id": self.p1_ent},
             {"type": "set_team", "entity_id": self.p1_ent, "team": "evil"},
+            {"type": "set_awareness", "entity_id": self.p1_ent},
+            {"type": "set_awareness", "entity_id": self.p1_ent, "value": None},
             {"type": "paint"},
             {"type": "paint", "x": "2", "y": 2, "cell_type": "wall"},
             {"type": "paint", "x": 99, "y": 2, "cell_type": "wall"},
@@ -908,6 +1022,8 @@ class TestRobustness(SessionTestCase):
         # A player sending a totally malformed GM tool still gets "not
         # allowed" (the role gate fires first) — no crash, no mutation.
         reply = drive(self.session, self.p1_s, {"type": "create_entity"})
+        self.assertEqual(reply, {"type": "error", "message": "not allowed"})
+        reply = drive(self.session, self.p1_s, {"type": "set_awareness"})
         self.assertEqual(reply, {"type": "error", "message": "not allowed"})
 
     def test_concurrent_joins_are_consistent(self):

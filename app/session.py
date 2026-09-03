@@ -39,7 +39,7 @@ import logging
 import threading
 from typing import Any
 
-from app.awareness import build_awareness
+from app.awareness import AWARENESS_MAX, AWARENESS_MIN, build_awareness
 from app.models import CELL_TYPES, TEAMS, Entity, Grid, Player
 from app.pathfinding import find_path
 
@@ -467,6 +467,8 @@ class GameSession:
             return self._gm_only(is_gm, lambda: self._on_delete_entity(msg))
         if mtype == "set_team":
             return self._gm_only(is_gm, lambda: self._on_set_team(msg))
+        if mtype == "set_awareness":
+            return self._gm_only(is_gm, lambda: self._on_set_awareness(msg))
         if mtype == "paint":
             return self._gm_only(is_gm, lambda: self._on_paint(msg))
         if mtype == "set_fog":
@@ -652,6 +654,41 @@ class GameSession:
             if entity is None:
                 return {"type": "error", "message": "no such entity"}
             entity.team = team
+            self._run_b(self._broadcast())
+        return None
+
+    def _on_set_awareness(self, msg: dict[str, Any]) -> dict[str, Any] | None:
+        """GM: set a PLAYER's awareness radius (0–20).
+
+        The GM points at a player icon — a token whose ``owner`` is a
+        player id — and sends that token's ``entity_id``; the server
+        resolves ``entity.owner`` → the owning :class:`Player` and updates
+        its ``awareness_radius`` (the no-LOS approximate tier's range,
+        docs/design/awareness-ring.md §3).  Like ``set_team``: no per-
+        client reply on success — the ``state`` broadcast carries the new
+        value.
+        """
+        entity_id = msg.get("entity_id")
+        if not isinstance(entity_id, str):
+            return {"type": "error", "message": "entity_id required"}
+        value = _as_int(msg.get("value"))  # rejects bools and non-ints
+        if value is None or not (AWARENESS_MIN <= value <= AWARENESS_MAX):
+            return {"type": "error",
+                    "message": "awareness must be an integer 0–20"}
+        with self._lock:
+            entity = self.entities.get(entity_id)
+            if entity is None:
+                return {"type": "error", "message": "no such entity"}
+            if entity.owner is None:
+                # An NPC/enemy/GM-controlled token has no owning player to
+                # edit (docs/design/awareness-ring.md §3.2 step 3).
+                return {"type": "error", "message": "not a player token"}
+            player = self.players.get(entity.owner)
+            if player is None:
+                # A connected player's token is protected from deletion, so
+                # this cannot actually happen — guard anyway.
+                return {"type": "error", "message": "no such entity"}
+            player.awareness_radius = value
             self._run_b(self._broadcast())
         return None
 

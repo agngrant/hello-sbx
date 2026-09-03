@@ -6,7 +6,7 @@
      join (lobby) → welcome → live "state" / "path" / "error" frames.
    The server is authoritative; the client only sends intents
    (join / request_state / move / paint / create_entity /
-   delete_entity / set_team / set_fog).
+   delete_entity / set_team / set_awareness / set_fog).
    ════════════════════════════════════════════════════════════════════ */
 
 "use strict";
@@ -65,6 +65,7 @@ const els = {
   awarenessSummary: $("#awareness-summary"),
   selEntityName: $("#sel-entity-name"),
   teamSelect: $("#team-select"),
+  awarenessInput: $("#awareness-input"),
   btnDeleteEntity: $("#btn-delete-entity"),
   newEntityName: $("#new-entity-name"),
   newEntityKind: $("#new-entity-kind"),
@@ -556,11 +557,58 @@ function drawGridOnCanvas(canvas, ctx) {
   if (canvas.id === "map-canvas") drawEntitiesAndDots(ctx, s, ox, oy);
 }
 
+/* ───────────────────────────── Awareness rings (canvas, §4) ─────────────────────────────
+   docs/design/awareness-ring.md: a subtle dashed square around each player
+   token, sized to that player's awareness_radius — the Chebyshev "ball" the
+   server uses for the APPROXIMATE (no-line-of-sight) tier. Drawn UNDER the
+   tokens (inside drawEntitiesAndDots, before the selection ring) so it never
+   covers token art. Render-only: the data is the same players[] / you_entity
+   the server already sends, so the normal renderAll path (every state
+   broadcast) keeps the rings live. #preview-canvas never calls
+   drawEntitiesAndDots (map-canvas only), so the preview stays clean. */
+function drawAwarenessRing(ctx, x, y, radius, s, ox, oy) {
+  const cx = ox + (x + 0.5) * s;
+  const cy = oy + (y + 0.5) * s;
+  const half = (radius + 0.5) * s;
+  const dash = Math.max(3, s * 0.18);
+  ctx.save();
+  ctx.fillStyle = "rgba(77, 171, 247, 0.10)";
+  ctx.fillRect(cx - half, cy - half, half * 2, half * 2);
+  ctx.strokeStyle = T.accent;
+  ctx.lineWidth = 1.5;
+  ctx.setLineDash([dash, dash]);
+  ctx.strokeRect(cx - half, cy - half, half * 2, half * 2);
+  ctx.restore();
+}
+
+function drawAwarenessRings(ctx, s, ox, oy) {
+  const players = state.players || [];
+  if (state.role === "gm") {
+    // GM: a ring around every player-owned token (the GM has no token).
+    for (const e of state.entities) {
+      if (!e.owner) continue;
+      const p = players.find((pl) => pl.entity_id === e.id);
+      const r = p && Number.isFinite(p.awareness_radius)
+        ? p.awareness_radius : 4;
+      drawAwarenessRing(ctx, e.x, e.y, r, s, ox, oy);
+    }
+  } else if (state.youEntity) {
+    // Player: one ring around their own token, at their own radius.
+    const p = players.find((pl) => pl.id === state.you.id);
+    const r = p && Number.isFinite(p.awareness_radius)
+      ? p.awareness_radius : 4;
+    drawAwarenessRing(ctx, state.youEntity.x, state.youEntity.y, r, s, ox, oy);
+  }
+}
+
 /* 4. + 5. Tokens, awareness dots, selection, hover, paint preview */
 function drawEntitiesAndDots(ctx, s, ox, oy) {
   // Players keep their own entity in a local view so it stays renderable
   // even though the server sends players an empty "entities" list.
   const entities = allEntities();
+
+  // Awareness rings (under the tokens; see drawAwarenessRings).
+  drawAwarenessRings(ctx, s, ox, oy);
 
   // Selection ring (under tokens)
   const sel = entities.find((e) => e.id === state.selectedEntityId);
@@ -1037,6 +1085,21 @@ function syncGmTools() {
   els.btnNewEntity.disabled = !gm;
   els.overrideToggle.disabled = !gm;
   if (sel) els.teamSelect.value = sel.team;
+  // Awareness radius (docs/design/awareness-ring.md §5): GM-only, and only
+  // for a selected PLAYER token (owner = the controlling player id). The
+  // value reconciles from every state broadcast (authoritative). Guarded: a
+  // stub DOM without #awareness-input leaves els.awarenessInput null.
+  if (els.awarenessInput) {
+    const owner = sel ? sel.owner : null;
+    if (gm && owner) {
+      const p = state.players.find((pl) => pl.entity_id === sel.id);
+      els.awarenessInput.disabled = false;
+      els.awarenessInput.value = p && Number.isFinite(p.awareness_radius)
+        ? p.awareness_radius : 4;
+    } else {
+      els.awarenessInput.disabled = true;
+    }
+  }
 }
 
 function firstFreeFloor() {
@@ -1147,6 +1210,22 @@ els.teamSelect.addEventListener("change", () => {
   wsSend({ type: "set_team", entity_id: state.selectedEntityId,
            team: els.teamSelect.value });
 });
+
+// GM awareness radius (docs/design/awareness-ring.md §5): commit on change;
+// the server enforces the 0–20 integer range ("awareness must be an
+// integer 0–20" etc.) and server errors surface via the normal toast path.
+// Invalid/empty input is a no-op (never send a non-int). Guarded: a stub
+// DOM without #awareness-input (tests/js/harness.js) leaves it null.
+if (els.awarenessInput) {
+  els.awarenessInput.addEventListener("change", () => {
+    if (state.role !== "gm" || !state.selectedEntityId) return;
+    const sel = state.entities.find((e) => e.id === state.selectedEntityId);
+    if (!sel || !sel.owner) return;  // only player tokens have a radius
+    const n = parseInt(els.awarenessInput.value, 10);
+    if (!Number.isInteger(n) || n < 0 || n > 20) return;
+    wsSend({ type: "set_awareness", entity_id: state.selectedEntityId, value: n });
+  });
+}
 
 els.fogToggle.addEventListener("change", () => toggleFog());
 

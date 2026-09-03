@@ -437,6 +437,102 @@ class TestWebSocketServer(unittest.TestCase):
             alice.close()
             bob.close()
 
+    def test_set_awareness_controls_approximate_tier_over_wire(self):
+        """GM set_awareness (docs/design/awareness-ring.md §3) over the REAL
+        WS: Alice is placed on the floor just LEFT of the col-5 wall and a
+        GM-created npc sits just RIGHT of it, so the npc is within 4
+        squares (Chebyshev 2) but WITHOUT line of sight (the straight line
+        crosses the col-5 wall at (5,1)) — an APPROXIMATE contact by
+        default.  The GM sets Alice's radius to 0 → no approximate tier:
+        Alice's next state shows awareness_radius 0 on her players[]
+        entry and the approx item is GONE; back to 10 → the approx item
+        reappears.  The GM's own view is never filtered (it sees the npc
+        in FULL throughout)."""
+        sid = self.session_id()
+        gm = self.client(sid).connect()
+        alice = self.client(sid).connect()
+        try:
+            gm.join("Gamer", "gm")
+            wa = alice.join("Alice", "player")
+            alice_ent = wa["you"]["entity_id"]
+            self.assertEqual(gm.recv_json()["type"], "state")  # Alice joined
+
+            def alice_radius(m):
+                return next(p for p in m["players"]
+                            if p["id"] == wa["you"]["id"])["awareness_radius"]
+
+            # GM parks Alice at (4,1) (floor, left of the col-5 wall) and
+            # creates a neutral npc at (6,1) (right of it): no LOS, cheb 2.
+            gm.send_json({"type": "place", "entity_id": alice_ent,
+                          "x": 4, "y": 1})
+            gm.send_json({"type": "create_entity", "name": "Grom",
+                          "kind": "npc", "team": "neutral", "x": 6, "y": 1})
+            # the GM's state that already lists Grom (the place state
+            # arrives first — it predates the create).
+            st_gm = gm.frames_until(
+                lambda m: m["type"] == "state"
+                and any(e["name"] == "Grom" for e in m["entities"]))[-1]
+            npc_ent_id = next(e["id"] for e in st_gm["entities"]
+                              if e["name"] == "Grom")
+            # default radius 4: the players[] entry carries it, and the GM
+            # sees the npc in FULL (no distance/LOS filtering ever).
+            self.assertEqual(alice_radius(st_gm), 4)
+            gm_item = next(i for i in st_gm["awareness"]
+                           if i["entity_id"] == npc_ent_id)
+            self.assertTrue(gm_item["label"])
+            self.assertNotIn("approximate", gm_item)
+            # Alice's awareness holds exactly ONE item — the APPROXIMATE
+            # (no-identity) block for the npc, quantized to block (6,1)//2.
+            # (frames_until skips the queued pre-create states: only the
+            # create-state has an approx item at all.)
+            st_al = alice.frames_until(
+                lambda m: m["type"] == "state"
+                and any(i.get("approximate") for i in m["awareness"]))[-1]
+            self.assertEqual(st_al["entities"], [])
+            self.assertEqual(len(st_al["awareness"]), 1)
+            approx = st_al["awareness"][0]
+            self.assertTrue(approx["approximate"])
+            self.assertNotIn("name", approx)
+            self.assertNotIn("color", approx)
+            self.assertEqual((approx["x"], approx["y"]), (6 // 2, 1 // 2))
+            # GM sets Alice's awareness radius to 0 → no approximate tier:
+            # the state broadcast carries awareness_radius 0 on the
+            # players[] entry (both GM's and Alice's copies)…
+            gm.send_json({"type": "set_awareness", "entity_id": alice_ent,
+                          "value": 0})
+            st_gm0 = gm.frames_until(lambda m: m["type"] == "state"
+                                     and alice_radius(m) == 0)[-1]
+            self.assertEqual(alice_radius(st_gm0), 0)
+            st_al0 = alice.frames_until(lambda m: m["type"] == "state"
+                                        and alice_radius(m) == 0)[-1]
+            # …and Alice's state shows the no-LOS contact is now ABSENT
+            # (radius 0 → LOS-only; there is no LOS to the npc here).
+            self.assertEqual(st_al0["awareness"], [])
+            # GM sets it back to 10 → the no-LOS contact is within 10
+            # squares again → the approx item REAPPEARS in Alice's state.
+            gm.send_json({"type": "set_awareness", "entity_id": alice_ent,
+                          "value": 10})
+            st_al10 = alice.frames_until(
+                lambda m: m["type"] == "state" and alice_radius(m) == 10
+                and any(i.get("approximate") for i in m["awareness"]))[-1]
+            self.assertEqual(alice_radius(st_al10), 10)
+            self.assertEqual(len(st_al10["awareness"]), 1)
+            approx2 = st_al10["awareness"][0]
+            self.assertTrue(approx2["approximate"])
+            self.assertEqual((approx2["x"], approx2["y"]), (6 // 2, 1 // 2))
+            # and the GM's latest state is STILL unfiltered: the npc is
+            # listed in FULL despite Alice's radius having been 0 just
+            # before.
+            st_gm_last = gm.frames_until(lambda m: m["type"] == "state"
+                                         and alice_radius(m) == 10)[-1]
+            gm_item2 = next(i for i in st_gm_last["awareness"]
+                            if i["entity_id"] == npc_ent_id)
+            self.assertTrue(gm_item2["label"])
+            self.assertNotIn("approximate", gm_item2)
+        finally:
+            gm.close()
+            alice.close()
+
     # -- transport behaviour -----------------------------------------------------
 
     def test_close_frame_is_handled(self):

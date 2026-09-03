@@ -15,6 +15,8 @@ import unittest
 from app.awareness import (
     APPROX_BLOCK,
     APPROX_RADIUS,
+    AWARENESS_MAX,
+    AWARENESS_MIN,
     build_awareness,
     overlay_color,
     relation_of,
@@ -491,6 +493,177 @@ class TestPlayerTierLosCornerCut(unittest.TestCase):
         self.assertFalse(item.get("approximate"))
         self.assertTrue(item["label"])
         self.assertEqual(item["name"], "hostile-E")
+
+
+# ---------------------------------------------------------------------------
+# Per-player awareness radius (GM-adjustable 0–20; docs/design/
+# awareness-ring.md §2/§3): the approximate tier uses the VIEWER's own
+# radius (default APPROX_RADIUS = 4); LOS (FULL) and the GM view are
+# never affected by it.
+# ---------------------------------------------------------------------------
+
+
+class TestPlayerAwarenessRadius(unittest.TestCase):
+    """The approximate tier's range is ``viewer.awareness_radius``.
+
+    Grid: a solid wall COLUMN x=2 with open floor columns x=1/x=3 —
+    anchor O at (1,1), targets at (3, y) ALWAYS lack line of sight
+    (every O→E line crosses the wall column) while the Chebyshev
+    distance is controlled purely by y.
+    """
+
+    def setUp(self):
+        rows = [["wall"] * 4 for _ in range(9)]
+        for y in range(1, 8):
+            rows[y] = ["wall", "floor", "wall", "floor"]
+        self.grid = make_grid(rows)
+
+    def _player(self, radius=None):
+        if radius is None:
+            return Player(id="p1", name="A", role="player", entity_id="A")
+        return Player(id="p1", name="A", role="player", entity_id="A",
+                      awareness_radius=radius)
+
+    def _entities(self, y):
+        return {"A": ent("A", "party", x=1, y=1),
+                "E": ent("E", "neutral", kind="npc", x=3, y=y)}
+
+    def test_default_radius_behavior_unchanged(self):
+        # No field given → the default 4: no-LOS at chebyshev EXACTLY 4 is
+        # still approximate (as before this feature); at chebyshev 5 it is
+        # still invisible.
+        viewer = self._player()
+        self.assertEqual(viewer.awareness_radius, APPROX_RADIUS)
+        (item,) = build_awareness(viewer, self._entities(1 + APPROX_RADIUS),
+                                  self.grid)
+        self.assertTrue(item["approximate"])
+        self.assertEqual(
+            build_awareness(viewer, self._entities(1 + APPROX_RADIUS + 1),
+                            self.grid),
+            [])
+
+    def test_radius_zero_has_no_approximate_tier_but_los_stays_full(self):
+        viewer = self._player(0)
+        # A no-LOS neighbor at chebyshev 1 is INVISIBLE now (radius 0 =
+        # LOS-only perception)…
+        self.assertEqual(
+            build_awareness(viewer, self._entities(2), self.grid), [])
+        # …while a clear-line-of-sight contact stays FULL — the radius
+        # never gates sight.
+        open_grid = make_grid([["floor"] * 4 for _ in range(4)])
+        (full,) = build_awareness(
+            viewer,
+            {"A": ent("A", "party", x=1, y=1),
+             "F": ent("F", "hostile", kind="enemy", x=2, y=1)},
+            open_grid)
+        self.assertEqual(full["entity_id"], "F")
+        self.assertTrue(full["label"])
+        self.assertIn("name", full)
+        self.assertNotIn("approximate", full)
+
+    def test_radius_twenty_reaches_entity_at_chebyshev_twenty(self):
+        # Bigger grid (floors y=1..22): E at (3,21) is chebyshev 20 from
+        # O(1,1) with no LOS — approximate at radius 20, absent at 19.
+        rows = [["wall"] * 4 for _ in range(24)]
+        for y in range(1, 23):
+            rows[y] = ["wall", "floor", "wall", "floor"]
+        big = make_grid(rows)
+        entities = {"A": ent("A", "party", x=1, y=1),
+                    "E": ent("E", "neutral", kind="npc", x=3, y=21)}
+        (item,) = build_awareness(self._player(20), entities, big)
+        self.assertTrue(item["approximate"])
+        self.assertEqual(build_awareness(self._player(19), entities, big), [])
+
+    def test_boundary_radius_seven_exactly_seven_approx_eight_invisible(self):
+        # Floors y=1..9: E at (3,8) is chebyshev 7, E at (3,9) chebyshev 8
+        # (both no LOS). With radius 7: the 7-entity is approximate, the
+        # 8-entity is invisible.
+        rows = [["wall"] * 4 for _ in range(11)]
+        for y in range(1, 10):
+            rows[y] = ["wall", "floor", "wall", "floor"]
+        big = make_grid(rows)
+        viewer = self._player(7)
+        (item,) = build_awareness(
+            viewer,
+            {"A": ent("A", "party", x=1, y=1),
+             "E": ent("E", "neutral", kind="npc", x=3, y=8)},
+            big)
+        self.assertTrue(item["approximate"])
+        self.assertEqual(
+            build_awareness(
+                viewer,
+                {"A": ent("A", "party", x=1, y=1),
+                 "E": ent("E", "neutral", kind="npc", x=3, y=9)},
+                big),
+            [])
+
+    def test_gm_ignores_the_radius(self):
+        # The GM branch is unchanged: a GM with radius 0 (the most
+        # filtering value a player can have) still sees a far no-LOS
+        # entity in FULL — never approximate, never filtered.
+        gm = Player(id="gm1", name="G", role="gm", entity_id=None,
+                    awareness_radius=0)
+        items = build_awareness(
+            gm,
+            {"A": ent("A", "party", x=1, y=1),
+             "FAR": ent("FAR", "hostile", kind="enemy", x=3, y=8)},
+            self.grid)
+        by_id = items_by_id(items)
+        self.assertEqual(set(by_id), {"A", "FAR"})  # far entity NOT filtered
+        self.assertTrue(by_id["FAR"]["label"])
+        self.assertEqual(by_id["FAR"]["name"], "hostile-FAR")
+        self.assertNotIn("approximate", by_id["FAR"])
+
+    def test_non_int_radius_falls_back_to_default(self):
+        # Defensive: a non-int/None radius (e.g. a corrupted Player) is
+        # treated as the default APPROX_RADIUS — chebyshev 4 still approx.
+        viewer = self._player()
+        viewer.awareness_radius = None  # type: ignore[assignment]
+        (item,) = build_awareness(viewer, self._entities(1 + APPROX_RADIUS),
+                                  self.grid)
+        self.assertTrue(item["approximate"])
+
+
+class TestPlayerAwarenessRadiusModel(unittest.TestCase):
+    """``Player.awareness_radius`` data model: default, to_dict, and the
+    from_dict clamp to [0, 20] (missing/invalid → default 4)."""
+
+    def test_constants(self):
+        self.assertEqual(AWARENESS_MIN, 0)
+        self.assertEqual(AWARENESS_MAX, 20)
+        self.assertEqual(APPROX_RADIUS, 4)
+
+    def test_default_and_to_dict(self):
+        p = Player(id="p1", name="A", role="player", entity_id="e1")
+        self.assertEqual(p.awareness_radius, 4)
+        self.assertEqual(p.to_dict()["awareness_radius"], 4)
+        p.awareness_radius = 7
+        self.assertEqual(p.to_dict()["awareness_radius"], 7)
+
+    def test_from_dict_missing_and_none_default_to_four(self):
+        d = {"id": "p1", "name": "A", "role": "player"}
+        self.assertEqual(Player.from_dict(d).awareness_radius, 4)
+        self.assertEqual(
+            Player.from_dict({**d, "awareness_radius": None}).awareness_radius,
+            4)
+
+    def test_from_dict_roundtrip_and_clamp(self):
+        d = {"id": "p1", "name": "A", "role": "player"}
+        for value in (0, 4, 7, 20):
+            with self.subTest(value=value):
+                p = Player.from_dict({**d, "awareness_radius": value})
+                self.assertEqual(p.awareness_radius, value)
+        # Out of range is silently CLAMPED on read…
+        self.assertEqual(
+            Player.from_dict({**d, "awareness_radius": 99}).awareness_radius,
+            AWARENESS_MAX)
+        self.assertEqual(
+            Player.from_dict({**d, "awareness_radius": -3}).awareness_radius,
+            AWARENESS_MIN)
+        # …and non-numeric garbage falls back to the default.
+        self.assertEqual(
+            Player.from_dict({**d, "awareness_radius": "abc"}).awareness_radius,
+            4)
 
 
 if __name__ == "__main__":
