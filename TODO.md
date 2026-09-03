@@ -6,49 +6,44 @@ _Kept current by the orchestrator. Branch: `feat/explored-map`._
 
 | Item | Value |
 |---|---|
-| Branch / HEAD | `feat/explored-map` @ `b1ff47e` |
-| Baseline tag | **`working sight`** → `b1ff47e` (local, unpushed) |
+| Branch / HEAD | `feat/explored-map` @ `b1ff47e` (tag **`working sight`**) |
 | `main` | `5ad236f` (= `origin/main`; branch is 6 commits ahead, **NOT merged to main**) |
-| `origin/feat/explored-map` | `94a7a9b` (branch 1 commit ahead of remote, 0 behind) |
-| Working tree | clean |
+| `origin/feat/explored-map` | `94a7a9b` (branch ahead of remote, 0 behind) |
 
-**Features enabled on this branch:** core v3.0 (upload → detection, A* movement, GM
-powers, three-tier awareness), awareness ring + per-player radius (0–20, default 4),
-GM-generated X×Y BSP dungeon maps, **explored map** (per-player S/E/H fog with
-memory — branch-only, not on `main`) + BUG-EXPLORED-01 fix (QA signed off).
+**Features enabled on this branch:** core v3.0, awareness ring + per-player radius,
+GM-generated BSP maps, **explored map** (S/E/H fog with memory), and now
+**Openable/Closable Doors** (shipped this session, QA PASS).
 
 ## Completed
 
 - [x] Team familiarisation — branch, history, enabled features (orchestrator)
-- [x] Tag `working sight` on `b1ff47e` — created + verified (backend_engineer)
-- [x] **Feature request + build-ready spec: Openable/Closable Doors** —
-  `docs/design/door-features.md` (designer; 18 sections, AC1–AC16, A1–A10
-  assumptions, file-by-file impact table)
-- [x] Spec + session log committed (see git log)
+- [x] Tag `working sight` on `b1ff47e` (backend_engineer)
+- [x] **Doors feature request spec** — `docs/design/door-features.md` (designer; AC1–AC16)
+- [x] **Doors — backend build** (backend_engineer): `Grid.doors` (L/U/O, absent ⇒ all
+      locked), door-aware movement + LOS (closed = wall, incl. corner-cut), visibility
+      D5 face branch, WS `{type:"door",x,y,action}` state machine, REST additive
+      `doors` field, paint sync, A1 test updates, ~100 new tests
+- [x] **Doors — frontend build** (frontend_engineer): 3-state palette + glyphs
+      (red padlock / amber bar / amber arch, + explored greys), GM Door tool,
+      player tap-to-open/close, legend, +35 harness tests
+- [x] **Doors — QA** (qa): pytest **472** / unittest **472** / e2e **105 ✓** /
+      live `qa_doors.py` **74 ✓**; AC1–AC16 all PASS; sign-off
+      `docs/qa/qa-signoff-doors.md` → **PASS**
+- [x] BUG-DOORS-002 (P3, player-lock error order) — **FIXED** `69e87a2` + regression test
+- [x] BUG-DOORS-001 (P2, shared sample-grid across sessions) — **DOCUMENTED** as
+      accepted limitation (README + `docs/qa/BUG-DOORS-001.md`); no behaviour change
+- [x] Contract docs: PROJECT.md §4/§5/§6/§8/§9 + README Doors section (additive)
 
-## In progress / next — Openable/Closable Doors
+## In progress
 
-Workflow: spec ✅ → build → test → evaluate. Spec: `docs/design/door-features.md`.
-
-- [ ] **Backend** (backend_engineer): `Grid.doors` model + sync helper; door-aware
-      `walkable`/`is_valid_step`/`has_line_of_sight`; `visible_cells` closed-door
-      face branch (D5); WS `{type:"door",x,y,action}` + `_on_door` (GM-only
-      unlock/lock; players open/close while unlocked; occupancy guard);
-      REST additive `doors` field; tests (pathfinding/visibility/session/ws);
-      e2e_proof step; `scripts/qa_doors.py`. **A1:** update the enumerated
-      existing tests that assume open doorways (requirement wins).
-- [ ] **Frontend** (frontend_engineer): three-state door palette (red locked /
-      amber-unlocked / amber open; explored-grey variants), GM Door tool +
-      sub-buttons, player tap-to-open/close, legend chips, Node harness tests.
-- [ ] **QA** (qa): pytest + unittest green, e2e_proof all ✓, live `qa_doors.py`,
-      bug docs, sign-off.
-- [ ] **Docs** (with QA pass): PROJECT.md §4/§5/§6/§9 + README doors section.
+- [ ] Nothing in flight. Next owner decision: **merge** `feat/explored-map` → `main`
+      (now 8+ commits ahead, 2 commits unpushed) and/or **push** the branch.
 
 ## Open items (backlog, no change)
 
-- [ ] Merge `feat/explored-map` → `main` (owner's call; fast-forward is safe)
+- [ ] Merge `feat/explored-map` → `main` (owner's call; fast-forward safe)
 - [ ] `docs/design/explored-map.md` §3.2 W4 literal erratum (superseded by
       corrected test fixture — spec-only fix)
-- [ ] README limitations list is stale on fog-of-war wording (predates the
-      explored map)
+- [ ] BUG-DOORS-001 structural option: per-session grid copy for unregistered
+      session ids (only if cross-session door isolation is ever needed)
 - [ ] Optional: room-density / loop-probability params for generated maps

@@ -2,7 +2,8 @@
 
 Saved: this file records the full context and prompts from the multi-agent
 orchestration session conducted in the repo at `/Users/agrant3/agentteam`.
-Last refreshed: Prompt 18 — full state survey + handoff update (see §3).
+Last refreshed: Prompt 24 — team familiarisation + `working sight` tag +
+Openable/Closable Doors feature-request spec (see §2, prompt 24).
 
 ---
 
@@ -463,17 +464,73 @@ this time — owner said commit to branch only.
 
 ---
 
-## 3. Current State Summary (refreshed — Prompt 18)
+### Prompt 25
+> familiarise the team with the current branch of the repository and the
+> features that are enabled. tag the current branch commit as "working sight"
+> Then respond and build a new feature request for the doorways to be
+> openable and closable - this would be like a wall that can be opened, by
+> default all the doors should be closed and locked, the gm is the only
+> player who can unlock a door. doors can be opened and closable, and will
+> block line of sight, awareness will still work, but anything behind a
+> closed door to an area should not be seen if it has not been explored and
+> if it has, it should be greyed out like an area out of line of sight. The
+> doors should be a different colour to the floors and walls.
+
+**Action:** Orchestrator surveyed the repo (tree, docs, git internals, key
+sources: `app/models.py`, `pathfinding.py`, `visibility.py`, `awareness.py`,
+`session.py`, `grid.py`, `static/app.js` tokens) and refreshed the shared
+plan `openable-doors` + created `TODO.md`. Tag + spec delegated in parallel.
+**Outcome:**
+- **Tag:** `working sight` (lightweight, local) → `b1ff47e`, verified.
+  Branch state: `feat/explored-map` @ `b1ff47e` = 1 ahead / 0 behind
+  `origin/feat/explored-map` (`94a7a9b`); 6 ahead of `main`/`origin/main`
+  (`5ad236f`); NOT merged to main; clean tree. Enabled features on branch:
+  core v3.0, awareness ring + per-player radius, generated BSP maps,
+  **explored map** (S/E/H fog with memory) + BUG-EXPLORED-01 fix.
+- **Feature request:** **Openable / Closable Doors** — build-ready spec
+  `docs/design/door-features.md` (designer; house style of
+  `explored-map.md`; 18 sections). Core: every `doorway` cell is a door with
+  states `locked`/`unlocked`/`open`, default **closed+locked**; GM-only
+  unlock/lock; players may open/close while unlocked; a closed door blocks
+  movement AND line of sight exactly like a wall (incl. no-corner-cut); an
+  open door is transparent + walkable (today's doorway). Awareness (three
+  tier) and the explored map (S/E/H) are **unchanged in code** — they inherit
+  door-awareness via the door-aware `has_line_of_sight` (pinned, AC6/AC7).
+  State lives on `Grid.doors` (additive optional dict `"<x>,<y>" →
+  "L"/"U"/"O"`; absent ⇒ all locked). WS: `{type:"door",x,y,action}` (D6);
+  no new broadcast type — state rides in `map.doors`. Painting a doorway
+  creates it locked; painting floor/wall deletes its state. Movement
+  override (GM teleport) bypasses closed doors. Palette: locked red
+  `#e03131` + padlock glyph / unlocked amber `#f59f00` + bar / open amber
+  `#d97706` + arch (all ≠ floor `#efe9dc`, ≠ wall `#3b4252`), with
+  explored-grey variants. AC1–AC16 incl. ≤500 ms snapshot at 6 players ×
+  60×60. **Key assumption A1:** "all doors closed+locked by default" is a
+  deliberate behaviour change — the spec enumerates every existing
+test/e2e that assumed open doorways and how it must be updated (requirement
+wins, AC13 auditable).
+- **Next:** backend build → frontend build → QA. Shared plan: `openable-doors`
+  (status in-progress). `TODO.md` created at repo root.
+
+### State after Prompt 25
+Server **STOPPED** (nothing started this session); branch
+`feat/explored-map` @ `b1ff47e` + local tag `working sight`; clean tree
+except the new spec `docs/design/door-features.md` (uncommitted — commit
+with the implementation or the next checkpoint); doors implementation not
+yet started.
+
+---
+
+## 3. Current State Summary (refreshed — Prompt 25)
 
 | Item | Value |
 |---|---|
 | Server | **Stopped** — no listener on 8000; no `.ld_server.log`/`.ld_server.pid` present (gitignored when created) |
 | Git — remote | `origin` → `https://github.com/agngrant/hello-sbx.git`; `origin/main` = `5ad236f` |
-| Git — `main` | `5ad236f` (in sync with `origin/main` at last check) |
-| Git — **current checkout** | **`feat/explored-map` = `origin/feat/explored-map` = `94a7a9b`** — 4 commits ahead of `main` (`5ad236f`); upstream configured; **pushed at Prompt 22** |
-| Working tree | **Clean** (verified post-push); server **stopped**, `.ld_server.*` deleted |
-| Docs vs code | PROJECT.md §5/§9 + README "explored map" section already updated for the feature |
-| Open items | see resume checklist below |
+| Git — `main` | `5ad236f` (in sync with `origin/main`) |
+| Git — **current checkout** | **`feat/explored-map` = `b1ff47e`** — 1 ahead / 0 behind `origin/feat/explored-map` (`94a7a9b`); 6 ahead of `main` (`5ad236f`); **NOT merged to `main`**; local tag **`working sight`** → `b1ff47e` (unpushed) |
+| Working tree | Clean **except** new untracked `docs/design/door-features.md` (doors spec) + this log; commit with implementation or next checkpoint |
+| Docs vs code | Doors feature = **spec only** (`docs/design/door-features.md`); no code yet. PROJECT.md §5/§9 + README explored-map section current for the branch |
+| Open items | see resume checklist below + `TODO.md` (repo root) |
 
 ### Shipped feature inventory (all on `main`, pushed)
 1. Core LittleDungeons v3.0 (FastAPI/uvicorn/websockets/Pillow): upload →
