@@ -81,11 +81,14 @@ function makeCtx(el) {
     _texts: [],     // fillText strings in draw order
     _fills: [],     // {x,y,w,h,style} fillRect calls in draw order
     _strokes: [],   // {style, path:[...]} per stroke() call, in draw order
+    _rects: [],     // {x,y,w,h,style} strokeRect calls in draw order (door border)
     fillStyle: "", strokeStyle: "", lineWidth: 1, globalAlpha: 1,
     font: "", textAlign: "", textBaseline: "",
     fillRect(x, y, w, h) { this._fills.push({ x: x, y: y, w: w, h: h,
                                                style: this.fillStyle }); },
-    strokeRect: noop, clearRect: noop, beginPath() { path.length = 0; m = null; },
+    strokeRect(x, y, w, h) { this._rects.push({ x: x, y: y, w: w, h: h,
+                                                style: this.strokeStyle }); },
+    clearRect: noop, beginPath() { path.length = 0; m = null; },
     moveTo(x, y) { m = [x, y]; },
     lineTo(x, y) {
       if (m) { path.push({ m: m.slice(), l: [x, y] }); m = null; }
@@ -226,15 +229,16 @@ function buildApi() {
   const src = fs.readFileSync(APPJS_PATH, "utf8");
   // Re-export the app's top-level functions/state for the Python tests.
   const EXPORTS =
-    ";global.__TAPI__ = { state, els, document," +
+    ";global.__TAPI__ = { state, els, document, T," +
     "allEntities, onPath, stopAnim, findEntity, isAnimating," +
     "applyState, onWelcome, onState, onServerMessage, onError," +
     "entityAtCell, drawSidebar, renderAll, drawDot, drawUnknownDot," +
     "drawGridOnCanvas, layoutCanvas, validateVisibilityMatrix," +
-    "openUploadedMap, sendMove, selectEntity," +
+    "openUploadedMap, sendMove, selectEntity, paintCell," +
     "createEntity, toggleFog, canvasHint, showGmFirstRunHint, dismissGmFirstRunHint, updateControlHint," +
     "join, connectWs, setConn, scheduleReconnect, showView, wsSend, wsUrl," +
     "uploadMap, generateMap, showUploadPreview, resetUploadForm, setSourceTab, syncTabStyles, syncGenerateButton, setGenerateBusy, setUploadBusy, syncUploadButton," +
+    "doorStateAt, validateDoors, doorColor, drawDoorGlyph, sendDoor, setTool, setDoorAction," +
     "_timer: timer, _send: __SEND, _fetch: __FETCH }";
   // eslint-disable-next-line no-eval
   eval(src + EXPORTS);

@@ -1758,6 +1758,747 @@ class TestExploredMapRender(FrontendBase):
         self.assertFalse(out["grey"],
                          "null path must NOT grey any cell: %s" % out)
 
+# ══════════════════════════════════════════════════════════════════════
+# Door feature (docs/design/door-features.md §7/§8/§9 — AC10/AC11 frontend)
+# ══════════════════════════════════════════════════════════════════════
+# Every `doorway` cell is a door in a state: "L" closed+locked (the default),
+# "U" closed-unlocked, "O" open. The client renders map.doors (a "<x>,<y>"
+# -> state object, additive — absent/malformed ⇒ {} ⇒ all locked) with a
+# state-driven border + glyph (arch / bar / padlock) in BOTH the full tier
+# (S / GM / preview) and the explored grey tier (E). The GM gets a Door tool
+# with Unlock/Lock/Open/Close sub-buttons; a player taps a doorway cell to
+# open/close it (L -> "open" → server "door is locked" toast; U -> "open";
+# O -> "close"). Client -> server is the single {type:"door", x, y, action}
+# frame; success reconciles from the state broadcast (map.doors).
+
+class TestDoorStatic(FrontendBase):
+    """AC10d (static half): the real index.html / style.css carry the GM
+    Door tool + 4 action sub-buttons and the three legend chips (visible to
+    BOTH roles — no body.is-gm gate), with the palette tokens mirroring T."""
+
+    def setUp(self):
+        with open(INDEX, encoding="utf-8") as fh:
+            self.html = fh.read()
+        css_path = os.path.join(os.path.dirname(INDEX), "style.css")
+        with open(css_path, encoding="utf-8") as fh:
+            self.css = fh.read()
+
+    def test_paint_group_has_door_tool_and_four_sub_buttons(self):
+        self.assertIn('<button class="tool-btn" data-tool="door" aria-pressed="false">',
+                      self.html)
+        for action in ("unlock", "lock", "open", "close"):
+            self.assertIn(f'data-door-action="{action}"', self.html,
+                          f"missing door-action {action}")
+        self.assertIn('id="door-action-row"', self.html)
+        # the existing tools are unchanged (regression guard)
+        for tool in ('data-tool="select"', 'data-tool="floor"',
+                     'data-tool="wall"', 'data-tool="doorway"'):
+            self.assertIn(tool, self.html)
+
+    def test_three_door_legend_chips_present_and_ungated(self):
+        self.assertIn('<i class="swatch door-open"></i>open door', self.html)
+        self.assertIn('<i class="swatch door-unlocked"></i>closed (unlocked)',
+                      self.html)
+        self.assertIn('<i class="swatch door-locked"></i>locked', self.html)
+        self.assertEqual(self.html.count("legend-chip legend-doors"), 3)
+        # the pre-existing chips are unchanged
+        for chip in (
+            '<i class="swatch floor"></i>floor',
+            '<i class="swatch wall"></i>wall',
+            '<i class="swatch doorway"></i>doorway',
+            '<i class="swatch explored"></i>explored',
+        ):
+            self.assertIn(chip, self.html)
+
+    def test_legend_doors_chips_are_not_gm_gated(self):
+        # The door chips must be visible to BOTH GM and players. The CSS
+        # gates the PLAYER-only explored chips with
+        # `body.is-gm .legend-explored { display:none }`; the door chips
+        # (`.legend-doors`) must have NO such rule — they are not mentioned
+        # under body.is-gm at all, so the GM sees them too.
+        self.assertIn("body.is-gm .legend-explored { display: none; }", self.css)
+        # no rule may hide the door chips from the GM
+        self.assertNotIn(".legend-doors", self.css)
+        # the explored (player-only) chips, by contrast, ARE gated
+        self.assertIn(".legend-explored", self.css)
+
+    def test_css_door_tokens_and_swatch_styles(self):
+        for token in ("--door-open: #d97706", "--door-unlocked: #f59f00",
+                      "--door-locked: #e03131"):
+            self.assertIn(token, self.css)
+        for cls in (".swatch.door-open", ".swatch.door-unlocked",
+                    ".swatch.door-locked"):
+            self.assertIn(cls, self.css)
+        # the door cursor class is wired for the door tool mode
+        self.assertIn("mode-paint-door", self.css)
+        # and the pre-existing doorway token is kept
+        self.assertIn("--doorway: #d97706", self.css)
+
+
+class TestDoorPaletteTokens(FrontendBase):
+    """AC10c — the T palette carries the §7.1 colors: three full-tier door
+    colors, ALL distinct from floor #efe9dc and wall #3b4252, plus the
+    explored-tier grey variants (value-distinct from each other and from
+    the explored floor #6b7280)."""
+
+    def test_full_and_explored_door_colors(self):
+        out = js(
+            "(()=>({open:api.T.doorOpen, unlocked:api.T.doorUnlocked,"
+            "locked:api.T.doorLocked, eOpen:api.T.exploredDoorOpen,"
+            "eUnlocked:api.T.exploredDoorUnlocked, eLocked:api.T.exploredDoorLocked,"
+            "floor:api.T.floor, wall:api.T.wallFill,"
+            "eFloor:api.T.exploredFloor, doorway:api.T.doorway}))()"
+        )
+        d = json.loads(out)
+        full = [d["open"], d["unlocked"], d["locked"]]
+        explored = [d["eOpen"], d["eUnlocked"], d["eLocked"]]
+        for c in full + explored:
+            self.assertNotEqual(c.lower(), d["floor"].lower())
+            self.assertNotEqual(c.lower(), d["wall"].lower())
+        # the three full-tier states are mutually distinguishable (hue AND
+        # glyph on canvas; color alone here)
+        self.assertEqual(len(set(c.lower() for c in full)), 3)
+        self.assertEqual(len(set(c.lower() for c in explored)), 3)
+        # explored variants stay value-distinct from the explored floor
+        for c in explored:
+            self.assertNotEqual(c.lower(), d["eFloor"].lower())
+        # spec-pinned full-tier hexes
+        self.assertEqual(d["open"], "#d97706")
+        self.assertEqual(d["unlocked"], "#f59f00")
+        self.assertEqual(d["locked"], "#e03131")
+        # the open door reuses today's doorway amber (regression-identical
+        # art for an open door)
+        self.assertEqual(d["open"], d["doorway"].lower())
+
+
+class TestDoorStateModel(FrontendBase):
+    """AC11b — state.doors is set from msg.map.doors in applyState ({} when
+    absent), and MALFORMED doors (wrong type / bad keys / bad state chars)
+    are treated as {} (all locked) — never crash, following the
+    validateVisibilityMatrix defensive pattern."""
+
+    _MAP = ({"name": "m", "width": 5, "height": 4,
+             "cells": [["floor"] * 5 for _ in range(4)]})
+
+    def _welcome_doors(self, doors_js: str) -> str:
+        # map.doors is the wire location (spec §8.1): the field rides
+        # inside the "map" object of the welcome/state payload.
+        return (
+            "(()=>{const map=" + json.dumps(self._MAP) + ";"
+            "map.doors=" + doors_js + ";"
+            "api.onWelcome({type:'welcome',"
+            "you:{id:'p2',name:'Alice',role:'player',entity_id:'e2'},"
+            "map,entities:[],"
+            "you_entity:{id:'e2',name:'Alice',kind:'player',team:'party',"
+            "x:1,y:1},players:[],awareness:[],fog:false});"
+            "return api.state.doors;})()"
+        )
+
+    def test_absent_doors_defaults_to_empty_object(self):
+        # No "doors" key at all => {} (all doors render locked, safe default).
+        out = js(self._welcome_doors("undefined"))
+        self.assertEqual(json.loads(out), {})
+
+    def test_null_doors_defaults_to_empty_object(self):
+        self.assertEqual(json.loads(js(self._welcome_doors("null"))), {})
+
+    def test_valid_doors_object_stored(self):
+        out = js(self._welcome_doors("{'1,2':'U','3,0':'O','0,3':'L'}"))
+        self.assertEqual(json.loads(out), {"1,2": "U", "3,0": "O", "0,3": "L"})
+
+    def test_malformed_doors_treated_as_empty(self):
+        # every shape of "wrong" payload => {} (all locked), no crash
+        for bad in ("[]", "'L'", "5", "{'1x':'L'}", "{'1,2':'X'}", "true"):
+            with self.subTest(bad=bad):
+                self.assertEqual(json.loads(js(self._welcome_doors(bad))),
+                                 {}, bad)
+
+    def test_state_broadcast_replaces_doors(self):
+        # a door painted away (key deleted server-side) must not linger in a
+        # stale client copy — applyState replaces the object wholesale.
+        out = js(
+            "(()=>{const map=" + json.dumps(self._MAP) + ";"
+            "api.onWelcome({type:'welcome',"
+            "you:{id:'p2',name:'Alice',role:'player',entity_id:'e2'},"
+            "map,entities:[],"
+            "you_entity:{id:'e2',name:'Alice',kind:'player',team:'party',"
+            "x:1,y:1},players:[],awareness:[],fog:false});"
+            "map.doors={'1,1':'O'};"
+            "api.onState({type:'state',map,entities:[],"
+            "you_entity:{id:'e2',name:'Alice',kind:'player',team:'party',"
+            "x:1,y:1},players:[],awareness:[],fog:false});"
+            "api.state.grid.cells[1][1]='doorway';"
+            "const hadOpen=api.doorStateAt(1,1);"
+            "const m2=Object.assign({},map);m2.doors={};"
+            "api.onState({type:'state',map:m2,entities:[],"
+            "you_entity:{id:'e2',name:'Alice',kind:'player',team:'party',"
+            "x:1,y:1},players:[],awareness:[],fog:false});"
+            "return {hadOpen, now:api.doorStateAt(1,1),"
+            "all:api.state.doors};})()"
+        )
+        d = json.loads(out)
+        self.assertEqual(d["hadOpen"], "O")
+        self.assertEqual(d["now"], "L")     # key gone => default locked
+        self.assertEqual(d["all"], {})
+
+
+class TestDoorStateAt(FrontendBase):
+    """AC11b — doorStateAt(x, y) returns the recorded state for a doorway
+    cell, DEFAULTS to "L" when the key is absent, and returns null for a
+    non-doorway cell (no door there)."""
+
+    def _setup(self):
+        # a bare statement sequence (the caller wraps it in one IIFE)
+        return (
+            "api.state.grid={width:4,height:3,cells:["
+            "['floor','doorway','floor','floor'],"
+            "['wall','doorway','wall','floor'],"
+            "['floor','floor','doorway','floor']]};"
+        )
+
+    def test_default_is_locked_on_unrecorded_doorway(self):
+        out = js("(()=>{" + self._setup() +
+                 "api.state.doors={};"
+                 "return {a:api.doorStateAt(1,0), b:api.doorStateAt(1,1)};})()"
+        )
+        d = json.loads(out)
+        self.assertEqual(d["a"], "L")
+        self.assertEqual(d["b"], "L")
+
+    def test_recorded_states_win(self):
+        out = js("(()=>{" + self._setup() +
+                 ';api.state.doors={"1,0":"O","2,2":"U"};'
+                 'return {o:api.doorStateAt(1,0), u:api.doorStateAt(2,2),'
+                 'l:api.doorStateAt(1,1)};})()'
+        )
+        d = json.loads(out)
+        self.assertEqual(d["o"], "O")
+        self.assertEqual(d["u"], "U")
+        self.assertEqual(d["l"], "L")
+
+    def test_non_doorway_cell_has_no_door(self):
+        out = js("(()=>{" + self._setup() +
+                 ';api.state.doors={"0,0":"O"};'
+                 'return {f:api.doorStateAt(0,0), w:api.doorStateAt(0,1),'
+                 'oob:api.doorStateAt(9,9)};})()'
+        )
+        d = json.loads(out)
+        self.assertIsNone(d["f"])    # floor cell — even with a stale key
+        self.assertIsNone(d["w"])    # wall cell
+        self.assertIsNone(d["oob"])  # out of bounds
+
+
+class TestDoorRender(FrontendBase):
+    """AC11a — drawGridOnCanvas renders the three door states with the
+    state-driven border + glyph in BOTH tiers: full colors (S / GM / no-
+    matrix) and the desaturated greys (E). A door cell keeps its floor base
+    + grid line and NO wall hatch; H cells stay undrawn."""
+
+    # 5x5: wall ring, a doorway column at x=2 (y=1..3), floors elsewhere.
+    _GRID = [
+        ["wall", "wall", "wall", "wall", "wall"],
+        ["wall", "floor", "doorway", "floor", "wall"],
+        ["wall", "floor", "doorway", "floor", "wall"],
+        ["wall", "floor", "doorway", "floor", "wall"],
+        ["wall", "wall", "wall", "wall", "wall"],
+    ]
+    _MAP_JS = json.dumps({"name": "m", "width": 5, "height": 5, "cells": _GRID})
+
+    def _door_border_styles(self, doors_js: str, vis_js="null"):
+        """The door BORDER strokeRect colors, tagged by the door's recorded
+        state (absent key => "L")."""
+        expr = (
+            "(()=>{const map=" + self._MAP_JS + ";"
+            "api.state.role='gm';api.state.grid=map;"
+            "api.state.doors=" + doors_js + ";"
+            "api.els.canvas.width=800;api.els.canvas.height=600;"
+            "const c=api.els.canvas.getContext('2d');"
+            "c._rects.length=0;c._strokes.length=0;"
+            "api.drawGridOnCanvas(api.els.canvas,c," + vis_js + ");"
+            "const doors={O:[],U:[],L:[]};"
+            "for(const r of c._rects){if(r.w!==117)continue;"
+            "const yCell=Math.round((r.y-1.5)/120);"
+            "const st=api.state.doors['2,'+String(yCell)]||'L';"
+            "doors[st].push(r.style);}"
+            "return doors;})()"
+        )
+        return json.loads(js(expr))
+
+    def _glyph_colors(self, doors_js: str, vis_js="null"):
+        """The distinct door GLYPH stroke colors (arch/bar/padlock). Wall
+        hatch/border and grid-line styles are filtered out."""
+        expr = (
+            "(()=>{const map=" + self._MAP_JS + ";"
+            "api.state.role='gm';api.state.grid=map;"
+            "api.state.doors=" + doors_js + ";"
+            "api.els.canvas.width=800;api.els.canvas.height=600;"
+            "const c=api.els.canvas.getContext('2d');"
+            "c._rects.length=0;c._strokes.length=0;"
+            "api.drawGridOnCanvas(api.els.canvas,c," + vis_js + ");"
+            "const colors=new Set();"
+            "for(const s of c._strokes){"
+            "if(s.path.some(seg=>seg.r))continue;"
+            "colors.add(s.style)}"
+            "return [...colors];})()"
+        )
+        return json.loads(js(expr))
+
+    def test_full_tier_three_states_three_colors(self):
+        # GM pass (no matrix): each state's door border + glyph is drawn in
+        # its full-tier color — open=amber, unlocked=lighter amber,
+        # locked=red. All distinct.
+        borders = self._door_border_styles(
+            '{"2,1":"O","2,2":"U","2,3":"L"}')
+        self.assertEqual(borders["O"], ["#d97706"])
+        self.assertEqual(borders["U"], ["#f59f00"])
+        self.assertEqual(borders["L"], ["#e03131"])
+        glyphs = self._glyph_colors(
+            '{"2,1":"O","2,2":"U","2,3":"L"}')
+        for c in ("#d97706", "#f59f00", "#e03131"):
+            self.assertIn(c, glyphs)
+
+    def test_default_locked_door_renders_red(self):
+        # No map.doors at all (the common case): every door renders in the
+        # locked state (red border + padlock) — the safe default.
+        borders = self._door_border_styles("{}")
+        self.assertEqual(borders["L"], ["#e03131", "#e03131", "#e03131"])
+        self.assertEqual(borders["O"], [])
+        self.assertEqual(borders["U"], [])
+
+    def test_explored_tier_renders_greys(self):
+        # A player matrix tiering all doors "E": the borders use the
+        # desaturated grey variants (the default L door -> grey padlock
+        # #a06b6b; O/U get their own greys) and NO full-tier color appears.
+        vis = "['EEEEE','EEEEE','EEEEE','EEEEE','EEEEE']"
+        borders = self._door_border_styles('{"2,1":"O","2,2":"U"}', vis)
+        self.assertEqual(borders["O"], ["#8b94a3"])
+        self.assertEqual(borders["U"], ["#9a8f7a"])
+        self.assertEqual(borders["L"], ["#a06b6b"])
+        glyphs = self._glyph_colors('{"2,1":"O","2,2":"U"}', vis)
+        for full in ("#d97706", "#f59f00", "#e03131"):
+            self.assertNotIn(full, glyphs)
+
+    def test_s_e_tier_mixed(self):
+        # In-sight doors (the y=1 S row) render full colors; explored doors
+        # (y=2..3 in the E rows) render greys — the tier of the CELL
+        # decides, not the state.
+        vis = json.dumps(["SSSSS", "SSSSS", "EEEEE", "EEEEE", "EEEEE"])
+        borders = self._door_border_styles(
+            '{"2,1":"O","2,2":"U","2,3":"L"}', vis)
+        self.assertEqual(borders["O"], ["#d97706"])   # O at (2,1) — S tier
+        self.assertEqual(borders["U"], ["#9a8f7a"])   # U at (2,2) — E tier
+        self.assertEqual(borders["L"], ["#a06b6b"])   # L at (2,3) — E tier
+
+    def test_hidden_door_not_drawn(self):
+        # An all-H matrix: the door cell contributes no border, no glyph,
+        # no fill — nothing is drawn at all (consistent with the explored
+        # map's hidden tier).
+        vis = json.dumps(["HHHHH", "HHHHH", "HHHHH", "HHHHH", "HHHHH"])
+        expr = (
+            "(()=>{const map=" + self._MAP_JS + ";"
+            "api.state.role='player';api.state.grid=map;"
+            'api.state.doors={"2,1":"O"};'
+            "api.els.canvas.width=800;api.els.canvas.height=600;"
+            "const c=api.els.canvas.getContext('2d');"
+            "c._rects.length=0;c._strokes.length=0;c._fills.length=0;"
+            "api.drawGridOnCanvas(api.els.canvas,c," + vis + ");"
+            "return {doorRects:c._rects.length, strokes:c._strokes.length,"
+            "fills:c._fills.length};})()"
+        )
+        d = json.loads(js(expr))
+        self.assertEqual(d["doorRects"], 0)
+        self.assertEqual(d["strokes"], 0)
+        self.assertEqual(d["fills"], 0)   # all-H matrix: nothing drawn
+
+    def test_door_cell_keeps_floor_base_and_no_wall_hatch(self):
+        # The door cell (2,1) must be FLOOR-based: the whole-grid floor base
+        # fill covers it (the no-tier pass), and NO wall hatch segment
+        # (a diagonal inside a wall rect) falls on the door cell.
+        expr = (
+            "(()=>{const map=" + self._MAP_JS + ";"
+            "api.state.role='gm';api.state.grid=map;"
+            'api.state.doors={"2,1":"O"};'
+            "api.els.canvas.width=800;api.els.canvas.height=600;"
+            "const c=api.els.canvas.getContext('2d');"
+            "c._rects.length=0;c._strokes.length=0;"
+            "api.drawGridOnCanvas(api.els.canvas,c,null);"
+            "const inDoor=(p)=>p&&p[0]>=340&&p[0]<=460&&p[1]>=120&&p[1]<=240;"
+            "const hatch=c._strokes.some(s=>s.path.some(seg=>{"
+            "if(!seg.m||!seg.l)return false;"
+            "const dx=Math.abs(seg.m[0]-seg.l[0]);"
+            "const dy=Math.abs(seg.m[1]-seg.l[1]);"
+            "return dx>0&&dy>0&&(inDoor(seg.m)||inDoor(seg.l));}));"
+            "const floorBase=c._fills.find(f=>f.style==='#efe9dc'&&"
+            "f.w===600&&f.h===600);"
+            "return {hatch, floorBase:!!floorBase};})()"
+        )
+        d = json.loads(js(expr))
+        self.assertTrue(d["floorBase"], "door cell sits on the floor base")
+        self.assertFalse(d["hatch"], "a door cell must not get a wall hatch")
+
+
+class TestDoorGmTool(FrontendBase):
+    """AC11c — GM Door tool, driven through the REAL #paint-group click
+    listener (per the generate-button incident: never call setTool /
+    setDoorAction directly): selecting the tool + an action, then clicking
+    a door cell, sends {type:"door", x, y, action}. Clicking a non-door
+    cell sends nothing (the server would say "not a doorway"). The
+    action sub-row is only visible while the tool is armed; the control
+    hint follows the armed action."""
+
+    _GRID = [
+        ["wall", "wall", "wall", "wall", "wall"],
+        ["wall", "floor", "doorway", "floor", "wall"],
+        ["wall", "floor", "doorway", "floor", "wall"],
+        ["wall", "floor", "doorway", "floor", "wall"],
+        ["wall", "wall", "wall", "wall", "wall"],
+    ]
+    _MAP_JS = json.dumps({"name": "m", "width": 5, "height": 5, "cells": _GRID})
+
+    def _gm_ctx(self):
+        return (
+            "(()=>{const map=" + self._MAP_JS + ";"
+            "api.onWelcome({type:'welcome',"
+            "you:{id:'p1',name:'Gamer',role:'gm',entity_id:null},"
+            "map,entities:[],players:[],awareness:[],fog:false});"
+            "api.els.canvas.width=800;api.els.canvas.height=600;"
+            "api.state.cell=120;api.state.offsetX=100;api.state.offsetY=0;"
+        )
+
+    def test_door_tool_select_action_and_dispatch(self):
+        for action in ("unlock", "lock", "open", "close"):
+            with self.subTest(action=action):
+                expr = (
+                    self._gm_ctx() +
+                    "const pg=api.document.querySelector('#paint-group');"
+                    "pg.dispatchEvent({type:'click',target:{closest:(s)=>"
+                    "s==='.tool-btn'?{dataset:{tool:'door'}}:null}});"
+                    "pg.dispatchEvent({type:'click',target:{closest:(s)=>"
+                    "s==='.door-action'?{dataset:{doorAction:'"
+                    + action + "'}}:null}});"
+                    "const tool=api.state.tool, act=api.state.doorAction,"
+                    "hint=api.els.controlHint.textContent,"
+                    "rowHidden=api.els.doorActionRow.hidden;"
+                    "api._send.reset();"
+                    "api.els.canvas.dispatchEvent({type:'click',"
+                    "clientX:400,clientY:180});"           # door (2,1)
+                    "const sent=api._send.sent.slice();"
+                    "api._send.reset();"
+                    "api.els.canvas.dispatchEvent({type:'click',"
+                    "clientX:220,clientY:180});"           # floor (1,1)
+                    "const sentFloor=api._send.sent;"
+                    "return {tool,act,hint,rowHidden,sent,"
+                    "sentFloor};})()"
+                )
+                d = json.loads(js(expr))
+                self.assertEqual(d["tool"], "door")
+                self.assertEqual(d["act"], action)
+                self.assertEqual(d["hint"], f"Click a door to {action}")
+                self.assertFalse(d["rowHidden"],
+                                 "action sub-row must be visible while armed")
+                self.assertEqual(d["sent"],
+                                 [{"type": "door", "x": 2, "y": 1,
+                                   "action": action}])
+                self.assertEqual(d["sentFloor"], [],
+                                 "a non-door cell click sends nothing")
+
+    def test_sub_row_hidden_when_not_on_door_tool(self):
+        # Switching away from the Door tool hides the action sub-row and the
+        # hint reverts (regression guard on the existing tool flow).
+        expr = (
+            self._gm_ctx() +
+            "const pg=api.document.querySelector('#paint-group');"
+            "pg.dispatchEvent({type:'click',target:{closest:(s)=>"
+            "s==='.tool-btn'?{dataset:{tool:'door'}}:null}});"
+            "const on=api.els.doorActionRow.hidden;"
+            "pg.dispatchEvent({type:'click',target:{closest:(s)=>"
+            "s==='.tool-btn'?{dataset:{tool:'wall'}}:null}});"
+            "const off=api.els.doorActionRow.hidden;"
+            "const hint=api.els.controlHint.textContent;"
+            "return {on,off,hint};})()"
+        )
+        d = json.loads(js(expr))
+        self.assertFalse(d["on"])
+        self.assertTrue(d["off"])
+        self.assertEqual(d["hint"], "Drag on the map to paint wall")
+
+    def test_default_action_is_unlock(self):
+        # Arming the tool without touching a sub-button keeps the default
+        # action (unlock) armed and hinted.
+        expr = (
+            self._gm_ctx() +
+            "const pg=api.document.querySelector('#paint-group');"
+            "pg.dispatchEvent({type:'click',target:{closest:(s)=>"
+            "s==='.tool-btn'?{dataset:{tool:'door'}}:null}});"
+            "return {act:api.state.doorAction,"
+            "hint:api.els.controlHint.textContent};})()"
+        )
+        d = json.loads(js(expr))
+        self.assertEqual(d["act"], "unlock")
+        self.assertEqual(d["hint"], "Click a door to unlock")
+
+    def test_player_has_no_door_tool(self):
+        # The player's bottom bar is GM-only (CSS), and the click handler
+        # never sends a door frame for a player even if the tool were forced
+        # on: a player with tool="door" clicking a door cell sends nothing.
+        expr = (
+            "(()=>{const map=" + self._MAP_JS + ";"
+            "api.onWelcome({type:'welcome',"
+            "you:{id:'p2',name:'Alice',role:'player',entity_id:'e2'},"
+            "map,entities:[],"
+            "you_entity:{id:'e2',name:'Alice',kind:'player',team:'party',"
+            "x:1,y:1},players:[],awareness:[],fog:false});"
+            "api.els.canvas.width=800;api.els.canvas.height=600;"
+            "api.state.cell=120;api.state.offsetX=100;api.state.offsetY=0;"
+            "api.state.tool='door';"                      # forced (no UI)
+            "api._send.reset();"
+            "api.els.canvas.dispatchEvent({type:'click',"
+            "clientX:400,clientY:180});"
+            "return {sent:api._send.sent};})()"
+        )
+        d = json.loads(js(expr))
+        self.assertEqual(d["sent"], [],
+                         "a player must never send a door frame via the "
+                         "door tool")
+
+
+class TestPlayerDoorTap(FrontendBase):
+    """AC11d — a player (select tool) taps a doorway cell and the client
+    sends the inverse action: L -> open (server answers "door is locked",
+    which surfaces via the existing {type:'error'} toast path — verified
+    here end-to-end), U -> open (a closed, unlocked door opens), O -> close.
+    A tap on a cell with an entity is NOT a door action (selection/movement
+    keeps priority), and tapping a FLOOR cell still moves the character."""
+
+    _GRID = [
+        ["wall", "wall", "wall", "wall", "wall"],
+        ["wall", "floor", "doorway", "floor", "wall"],
+        ["wall", "floor", "doorway", "floor", "wall"],
+        ["wall", "floor", "doorway", "floor", "wall"],
+        ["wall", "wall", "wall", "wall", "wall"],
+    ]
+    _MAP_JS = json.dumps({"name": "m", "width": 5, "height": 5, "cells": _GRID})
+
+    def _player_ctx(self):
+        return (
+            "(()=>{const map=" + self._MAP_JS + ";"
+            "api.onWelcome({type:'welcome',"
+            "you:{id:'p2',name:'Alice',role:'player',entity_id:'e2'},"
+            "map,entities:[],"
+            "you_entity:{id:'e2',name:'Alice',kind:'player',team:'party',"
+            "x:1,y:2},players:[],awareness:[],fog:false});"
+            "api.els.canvas.width=800;api.els.canvas.height=600;"
+            "api.state.cell=120;api.state.offsetX=100;api.state.offsetY=0;"
+        )
+
+    def _tap_door(self, state: str):
+        return (
+            self._player_ctx() +
+            "api.state.doors={'2,2':'" + state + "'};"
+            "api._send.reset();"
+            "api.els.canvas.dispatchEvent({type:'click',"
+            "clientX:400,clientY:300});"           # door (2,2) center
+            "return {sent:api._send.sent};})()"
+        )
+
+    def test_tap_locked_door_sends_open(self):
+        d = json.loads(js(self._tap_door("L")))
+        self.assertEqual(d["sent"],
+                         [{"type": "door", "x": 2, "y": 2, "action": "open"}])
+
+    def test_tap_closed_unlocked_door_sends_open(self):
+        # closed, unlocked -> the inverse action is OPEN (the door opens).
+        d = json.loads(js(self._tap_door("U")))
+        self.assertEqual(d["sent"],
+                         [{"type": "door", "x": 2, "y": 2, "action": "open"}])
+
+    def test_tap_open_door_sends_close(self):
+        d = json.loads(js(self._tap_door("O")))
+        self.assertEqual(d["sent"],
+                         [{"type": "door", "x": 2, "y": 2, "action": "close"}])
+
+    def test_tap_default_locked_door(self):
+        # No doors object at all: the door is locked by default -> open is
+        # sent (and the server will reject it with "door is locked").
+        expr = (
+            self._player_ctx() +
+            "api.state.doors={};"
+            "api._send.reset();"
+            "api.els.canvas.dispatchEvent({type:'click',"
+            "clientX:400,clientY:300});"
+            "return {sent:api._send.sent};})()"
+        )
+        d = json.loads(js(expr))
+        self.assertEqual(d["sent"],
+                         [{"type": "door", "x": 2, "y": 2, "action": "open"}])
+
+    def test_locked_door_error_toast_path(self):
+        # The player cannot unlock: the server's "door is locked" error
+        # surfaces through the EXISTING error toast path (onError ->
+        # toast(m, 'error')), which appends a .toast-error with the message.
+        expr = (
+            self._player_ctx() +
+            "api._send.reset();"
+            "api.els.canvas.dispatchEvent({type:'click',"
+            "clientX:400,clientY:300});"
+            "const spans=[];"
+            "const doc=api.document;const realCreate=doc.createElement;"
+            "doc.createElement=(t)=>{const el=realCreate(t);"
+            "if(t==='span')spans.push(()=>el.textContent);"
+            "if(t==='div')spans.push(()=>el.className);return el};"
+            "api.onError({type:'error',message:'door is locked'});"
+            "doc.createElement=realCreate;"
+            "return {sent:api._send.sent, toasts:spans.map(f=>f())};})()"
+        )
+        d = json.loads(js(expr))
+        self.assertEqual(d["sent"],
+                         [{"type": "door", "x": 2, "y": 2, "action": "open"}])
+        self.assertIn("toast-error", d["toasts"])
+        self.assertIn("door is locked", d["toasts"])
+
+    def test_tap_own_token_cell_does_not_act_on_door(self):
+        # Entity priority: the player's own token standing on the (open)
+        # door cell gets the "re-assert selection" treatment, NOT a door
+        # frame (and no move).
+        expr = (
+            self._player_ctx() +
+            'api.state.doors={"2,2":"O"};'
+            "api.state.youEntity.x=2;api.state.youEntity.y=2;"
+            "api._send.reset();"
+            "api.els.canvas.dispatchEvent({type:'click',"
+            "clientX:400,clientY:300});"
+            "return {sent:api._send.sent,"
+            "sel:api.state.selectedEntityId};})()"
+        )
+        d = json.loads(js(expr))
+        self.assertEqual(d["sent"], [])
+        self.assertEqual(d["sel"], "e2")   # selection re-asserted, not moved
+
+    def test_tap_floor_cell_still_moves(self):
+        # Regression guard: a tap on a FLOOR cell (not a doorway) is still a
+        # move, not a door action.
+        expr = (
+            self._player_ctx() +
+            'api.state.doors={"2,2":"O"};'
+            "api._send.reset();"
+            "api.els.canvas.dispatchEvent({type:'click',"
+            "clientX:520,clientY:300});"           # floor (3,2) center
+            "return {sent:api._send.sent.map(m=>m.type)};})()"
+        )
+        d = json.loads(js(expr))
+        self.assertEqual(d["sent"], ["move"])
+
+
+class TestDoorPaintInteraction(FrontendBase):
+    """§9 — painting a doorway cell continues to send a paint (doorway) and
+    optimistically re-types the cell (the door state itself comes from the
+    broadcast); painting floor/wall over a door removes the door art via the
+    broadcast (state.doors key gone / cell re-typed). The DOOR tool is the
+    one paint-mode tool that must NOT emit paint frames."""
+
+    _MAP_JS = json.dumps({"name": "m", "width": 4, "height": 3,
+                          "cells": [["floor"] * 4 for _ in range(3)]})
+
+    def _gm_ctx(self):
+        return (
+            "(()=>{const map=" + self._MAP_JS + ";"
+            "api.onWelcome({type:'welcome',"
+            "you:{id:'p1',name:'Gamer',role:'gm',entity_id:null},"
+            "map,entities:[],players:[],awareness:[],fog:false});"
+        )
+
+    def test_paint_doorway_still_sends_paint(self):
+        expr = (
+            self._gm_ctx() +
+            "const pg=api.document.querySelector('#paint-group');"
+            "pg.dispatchEvent({type:'click',target:{closest:(s)=>"
+            "s==='.tool-btn'?{dataset:{tool:'doorway'}}:null}});"
+            "api._send.reset();"
+            "api.paintCell(1,1);"
+            "const sent=api._send.sent;"
+            "const cell=api.state.grid.cells[1][1];"
+            "api.paintCell(1,1);"                   # deduped
+            "const dup=api._send.sent.length;"
+            "return {sent,cell,dup};})()"
+        )
+        d = json.loads(js(expr))
+        self.assertEqual(d["sent"],
+                         [{"type": "paint", "x": 1, "y": 1,
+                           "cell_type": "doorway"}])
+        self.assertEqual(d["cell"], "doorway")
+        self.assertEqual(d["dup"], 1, "re-paint of the same cell is deduped")
+
+    def test_door_tool_does_not_emit_paint_frames(self):
+        # The Door tool is a paint-MODE tool, but a door is a state edit,
+        # not a cell-type edit: paintCell under tool="door" must be a no-op
+        # (the door state is only ever changed by {type:'door'} frames or
+        # the broadcast).
+        expr = (
+            self._gm_ctx() +
+            "const pg=api.document.querySelector('#paint-group');"
+            "pg.dispatchEvent({type:'click',target:{closest:(s)=>"
+            "s==='.tool-btn'?{dataset:{tool:'door'}}:null}});"
+            "api.state.grid.cells[1][1]='doorway';"
+            "api.state.doors={'1,1':'O'};"
+            "api._send.reset();"
+            "api.paintCell(1,1);"
+            "return {sent:api._send.sent,"
+            "cell:api.state.grid.cells[1][1],"
+            "state:api.doorStateAt(1,1)};})()"
+        )
+        d = json.loads(js(expr))
+        self.assertEqual(d["sent"], [])
+        self.assertEqual(d["cell"], "doorway")     # untouched
+        self.assertEqual(d["state"], "O")          # untouched
+
+    def test_floor_paint_over_door_removes_door_art(self):
+        # After the GM paints a floor over a door and the server's state
+        # broadcast arrives (cell=floor, key removed from map.doors), the
+        # door art is gone: doorStateAt reports no door for that cell.
+        expr = (
+            self._gm_ctx() +
+            "api.state.grid.cells[1][1]='doorway';"
+            "api.state.doors={'1,1':'O'};"
+            "const had=api.doorStateAt(1,1);"
+            "api.onState({type:'state',map:" + self._MAP_JS + "});"
+            "api.state.grid.cells[1][1]='floor';"
+            "return {had, door:api.doorStateAt(1,1),"
+            "doors:api.state.doors};})()"
+        )
+        d = json.loads(js(expr))
+        self.assertEqual(d["had"], "O")
+        self.assertIsNone(d["door"])
+        self.assertEqual(d["doors"], {})
+
+
+class TestDoorHints(FrontendBase):
+    """§7.7 — the control-hint copy: the GM with the Door tool armed sees
+    "Click a door to <action>"; the player hint mentions tapping a door to
+    open/close it (and the existing move copy is kept)."""
+
+    def test_gm_door_tool_hint(self):
+        out = js(
+            "(()=>{api.state.joined=true;api.state.role='gm';"
+            "api.state.you={id:'p1',name:'G',role:'gm',entity_id:null};"
+            "api.state.selectedEntityId=null;api.state.entities=[];"
+            "api.state.tool='door';api.state.doorAction='lock';"
+            "api.updateControlHint();"
+            "return api.els.controlHint.textContent;})()"
+        )
+        self.assertIn("Click a door to lock", out)
+
+    def test_player_hint_mentions_doors(self):
+        out = js(
+            "(()=>{api.state.joined=true;api.state.role='player';"
+            "api.state.you={id:'p2',name:'Alice',role:'player',"
+            "entity_id:'e2'};api.state.tool='select';"
+            "api.updateControlHint();"
+            "return api.els.controlHint.textContent;})()"
+        )
+        self.assertIn("tap a door", out)
+        self.assertIn("open/close", out)
+        self.assertIn("Tap a tile to move", out)
+
 
 if __name__ == "__main__":
     unittest.main()

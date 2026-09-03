@@ -570,6 +570,173 @@ class TestWebSocketServer(unittest.TestCase):
                 c.close()
 
 
+class TestDoorWire(unittest.TestCase):
+    """Door message over a REAL WS (door-features spec §8/§14/AC14): the
+    ``{type:"door", x, y, action}`` client→server frame, per-client error
+    replies, and the success → ``state`` broadcast carrying the new
+    ``map.doors``. Server on an ephemeral port; unique session id per test.
+
+    DOOR-STATE RESET (why setUp exists): ``app.main.get_session`` hands a
+    session id with no registry map the SHARED ``maps_registry["sample-
+    dungeon"]["grid"]`` object, and ``app/server.py`` routes the WS handler
+    through ``get_session``. So every ``door-ws-N`` session in this class
+    plays on the SAME ``Grid`` — a test that opens a door (e.g. GM open of
+    (5,5)) leaks that state into the next test and breaks it. ``setUp``
+    therefore re-locks all three sample doorways (5,5 / 10,4 / 9,7) via a GM
+    ``lock`` on a throwaway session: ``lock`` is the GM-only state reset and
+    is the no-op error "door is already locked" when the door is already
+    locked, so it converges every door to the all-locked default regardless
+    of what the previous test left behind. This is test-only: it restores the
+    shared grid to its documented default without touching server behaviour
+    (the shared-grid-identity itself is a known issue, recorded for QA)."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.httpd = ThreadingHTTPServer(("127.0.0.1", 0), None)
+        cls.httpd.daemon_threads = True
+        cls.httpd.handle_error = lambda *a, **k: None
+        cls.host, cls.port = cls.httpd.server_address[:2]
+        cls.thread = threading.Thread(target=cls.httpd.serve_forever,
+                                      daemon=True, name="littedungeons-door-ws")
+        cls.thread.start()
+        cls._n = 0
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.httpd.shutdown()
+        cls.httpd.server_close()
+        cls.thread.join(timeout=5)
+
+    def setUp(self):
+        """Re-lock the three sample doorways on the SHARED sample grid.
+
+        The WS test server (``app.server``) serves ``?session=door-ws-N`` via
+        ``app.main.get_session``, which — for an unregistered id — shares
+        ``maps_registry["sample-dungeon"]["grid"]`` with every other
+        non-registered session. So a test that leaves a door open leaks that
+        state. Drive a GM ``lock`` at each doorway on a throwaway session:
+        from ``O`` it force-closes to ``L``, from ``U`` it locks to ``L``,
+        and from ``L`` it is the no-op "door is already locked" reply (which
+        we drain). After this every door is the all-locked default.
+        """
+        gm = self._client(self._sid()).connect()
+        gm.join("Reset-GM", "gm")
+        for (x, y) in ((5, 5), (10, 4), (9, 7)):
+            gm.send_json({"type": "door", "x": x, "y": y, "action": "lock"})
+            # Drain the single per-client reply: an error ("door is already
+            # locked") when already locked, a state broadcast on success.
+            self.assertTrue(
+                gm.recv_json()["type"] in ("error", "state"),
+                f"unexpected frame resetting door ({x},{y})",
+            )
+        gm.close()
+
+    def _sid(self):
+        TestDoorWire._n += 1
+        return f"door-ws-{TestDoorWire._n}"
+
+    def _client(self, session):
+        return WSClient(self.host, self.port,
+                        path=f"/ws?session={session}", timeout=10)
+
+    def _join_gm_player(self):
+        sid = self._sid()
+        gm = self._client(sid).connect()
+        pl = self._client(sid).connect()
+        gm.join("Gamer", "gm")
+        pl.join("Alice", "player")
+        # GM's join broadcast (Alice joined).
+        self.assertEqual(gm.recv_json()["type"], "state")
+        return gm, pl
+
+    def _wait_state_with_doors(self, client, state):
+        """Next state frame whose map.doors[5,5] == state."""
+        for _ in range(40):
+            m = client.recv_json()
+            if m["type"] == "state" and \
+                    m["map"].get("doors", {}).get("5,5") == state:
+                return m
+        raise AssertionError(f"no state with doors[5,5]={state}")
+
+    def test_welcome_carries_full_doors_all_locked(self):
+        with self._client(self._sid()) as c:
+            w = c.join("Gamer", "gm")
+            self.assertEqual(
+                w["map"]["doors"],
+                {"5,5": "L", "10,4": "L", "9,7": "L"},
+            )
+
+    def test_gm_unlock_then_open_broadcasts_map_doors(self):
+        gm, pl = self._join_gm_player()
+        try:
+            # GM unlock (5,5) → the state broadcast carries "U".
+            gm.send_json({"type": "door", "x": 5, "y": 5, "action": "unlock"})
+            st = self._wait_state_with_doors(gm, "U")
+            self.assertEqual(st["map"]["doors"]["5,5"], "U")
+            # The player's broadcast copy carries the same state.
+            self._wait_state_with_doors(pl, "U")
+            # GM open (5,5) → "O".
+            gm.send_json({"type": "door", "x": 5, "y": 5, "action": "open"})
+            st = self._wait_state_with_doors(gm, "O")
+            self.assertEqual(st["map"]["doors"]["5,5"], "O")
+            self._wait_state_with_doors(pl, "O")
+        finally:
+            gm.close()
+            pl.close()
+
+    def test_player_unlock_rejected_not_allowed(self):
+        gm, pl = self._join_gm_player()
+        try:
+            pl.send_json({"type": "door", "x": 5, "y": 5, "action": "unlock"})
+            err = pl.recv_json()
+            self.assertEqual(err,
+                             {"type": "error", "message": "not allowed"})
+        finally:
+            gm.close()
+            pl.close()
+
+    def test_player_open_locked_rejected_door_locked(self):
+        gm, pl = self._join_gm_player()
+        try:
+            pl.send_json({"type": "door", "x": 5, "y": 5, "action": "open"})
+            err = pl.recv_json()
+            self.assertEqual(err,
+                             {"type": "error", "message": "door is locked"})
+        finally:
+            gm.close()
+            pl.close()
+
+    def test_player_open_unlocked_succeeds(self):
+        gm, pl = self._join_gm_player()
+        try:
+            gm.send_json({"type": "door", "x": 5, "y": 5, "action": "unlock"})
+            self._wait_state_with_doors(gm, "U")
+            # Now the player (not the GM) opens the unlocked door.
+            pl.send_json({"type": "door", "x": 5, "y": 5, "action": "open"})
+            self._wait_state_with_doors(gm, "O")
+            self._wait_state_with_doors(pl, "O")
+        finally:
+            gm.close()
+            pl.close()
+
+    def test_non_doorway_and_oob_and_bad_action_errors(self):
+        gm, pl = self._join_gm_player()
+        try:
+            gm.send_json({"type": "door", "x": 1, "y": 1, "action": "unlock"})
+            self.assertEqual(gm.recv_json(),
+                             {"type": "error", "message": "not a doorway"})
+            gm.send_json({"type": "door", "x": 99, "y": 1, "action": "unlock"})
+            self.assertEqual(gm.recv_json(),
+                             {"type": "error", "message": "destination out of bounds"})
+            gm.send_json({"type": "door", "x": 5, "y": 5, "action": "explode"})
+            self.assertEqual(gm.recv_json(),
+                             {"type": "error",
+                              "message": "action must be one of unlock/lock/open/close"})
+        finally:
+            gm.close()
+            pl.close()
+
+
 class TestWsClientErrors(unittest.TestCase):
     def test_bad_path_rejected(self):
         """A non-upgrade GET must NOT be treated as a WebSocket."""

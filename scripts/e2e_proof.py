@@ -38,10 +38,12 @@ scenario and prints a check per behaviour:
   8. GENERATED MAP (generated-maps spec C11): GM POSTs /api/maps/generate
      (24x16, seed 42) -> the GM + a player open it in a FRESH session via
      use_map; the player spawns walkable, is re-parked onto the new grid,
-     and is moved by the GM to the BFS-farthest walkable cell (a corner-to-
-     corner route through the generated doorways — legal A* steps, no
-     corner cuts). The GM then paints a wall on the generated map and the
-     state broadcast carries it (editor of record works on generated maps).
+     and is moved by the GM to the BFS-farthest cell reachable without
+     passing through a closed door (the generated doors are locked by
+     default, so the route stays inside the reachable region — legal A*
+     steps, no corner cuts). The GM then paints a wall on the generated map
+     and the state broadcast carries it (editor of record works on generated
+     maps).
   9. EXPLORED MAP (spec AC13): GM + 1 player on a FRESH session. The player's
      welcome carries a well-formed visibility whose S-set equals an INDEPENDENT
      re-derivation (walkable LOS + 4-adjacent wall-face, no app.visibility
@@ -49,6 +51,14 @@ scenario and prints a check per behaviour:
      doorways; each player state's S-set re-derives while E accumulates
      (monotonic — nothing ever goes S/E -> H), the old room is greyed (E, not
      H), and awareness still renders the three-tier model.
+ 10. DOORS (door-features spec AC14): GM + 1 player on a FRESH session on the
+     sample dungeon. Every door is L in the welcome map.doors (closed+locked
+     by default, AC2/CR1); a move through the CLOSED (5,5) door fails with
+     "no route — wall in the way"; the GM unlock+opens the door -> the state
+     broadcast carries doors[5,5]="O" and the player now WALKS (1,1)->(5,5)
+     ->(7,2) through it (every path step a legal A* step, independent A*
+     re-derivation); closing the door again blocks the return route;
+     map.doors is present + full in every state (I5).
 
 Run:  .venv/bin/python scripts/e2e_proof.py   (starts its own server)
 """
@@ -63,7 +73,7 @@ os.environ.setdefault("LITTLEDUNGEONS_QUIET_LOGS", "1")
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from app.models import Grid
-from app.pathfinding import has_line_of_sight, is_valid_step
+from app.pathfinding import _closed_doors, has_line_of_sight, is_valid_step
 from app.server import ThreadingHTTPServer
 from tests.wsclient import WSClient
 
@@ -77,23 +87,32 @@ failures = []
 # set from the welcome/state map.cells + the you_entity position using the
 # SAME rules the spec states (S1 walkable LOS, S2 wall-face 4-adjacency),
 # so the wire is checked against the spec, not against the server's own code.
+# Doors (door-features spec A1/AC13): the re-derivation is DOOR-AWARE — a
+# closed door blocks LOS exactly like a wall (the shared frozen
+# has_line_of_sight reference handles both), so the sample-dungeon doors
+# must be OPEN before a walk (the GM opens them in the step).
 
-def derive_visible(cells, w, h, pos):
+def derive_visible(cells, w, h, pos, doors=None):
     """Re-derive the set of (x, y) cells in line of sight from ``pos``.
 
     (S1) a walkable cell is visible iff it has line of sight from pos;
     (S2) a wall cell is visible iff any of its 4 orthogonal in-bounds
     neighbours is walkable and has line of sight from pos.  The anchor
-    itself always counts.  Uses app.pathfinding.has_line_of_sight only.
+    itself always counts.  Uses app.pathfinding.has_line_of_sight only
+    (door-aware: a CLOSED door blocks, an OPEN door is transparent).
+    ``doors`` is the wire map.doors object (None ⇒ every doorway closed,
+    matching the all-locked default the server applies to a bare grid).
     """
-    g = Grid.from_dict({"width": w, "height": h, "cells": cells})
+    g = Grid.from_dict({"width": w, "height": h, "cells": cells,
+                        "doors": dict(doors or {})})
+    closed = _closed_doors(g)
     pos = (pos[0], pos[1])
     seen = {pos}
     for y in range(h):
         for x in range(w):
-            if cells[y][x] == "wall":
+            if cells[y][x] == "wall" or (x, y) in closed:
                 for nx, ny in ((x + 1, y), (x - 1, y), (x, y + 1), (x, y - 1)):
-                    if 0 <= nx < w and 0 <= ny < h \
+                    if 0 <= nx < w and 0 <= ny < h and (nx, ny) not in closed \
                             and cells[ny][nx] in ("floor", "doorway") \
                             and has_line_of_sight(g, pos, (nx, ny)):
                         seen.add((x, y))
@@ -196,7 +215,34 @@ def main():
               state_until(alice)["type"] == "state")
 
         # 2. Alice moves herself through the doorway -----------------------
+        # Door-features A1: the (5,5) door is CLOSED+LOCKED by default, so
+        # first re-lock it (idempotent — a previous run may have left it
+        # open), prove the move is blocked, then GM unlock+open it and walk.
         print("\n[2] Alice moves (1,1) -> (5,5)  [via the doorway (5,5)]")
+        gm.send_json({"type": "door", "x": 5, "y": 5, "action": "lock"})
+        gm.recv_json()                    # state (locked) or no-op error
+        alice.send_json({"type": "move", "entity_id": al_ent, "x": 5, "y": 5})
+        blocked = alice.recv_json()
+        check("CLOSED door blocks the move first: 'no route — wall in the "
+              "way' (door-features A1)",
+              blocked == {"type": "error",
+                          "message": "no route \u2014 wall in the way"},
+              json.dumps(blocked))
+        # GM unlock + open the (5,5) door (door-features: GM-controlled).
+        gm.send_json({"type": "door", "x": 5, "y": 5, "action": "unlock"})
+        gm_un = state_until(gm)
+        check("GM unlock: state broadcast carries doors[5,5]='U'",
+              gm_un["map"].get("doors", {}).get("5,5") == "U",
+              json.dumps(gm_un["map"].get("doors")))
+        alice.recv_json()                  # Alice's unlock state
+        bob.recv_json()                    # Bob's unlock state
+        gm.send_json({"type": "door", "x": 5, "y": 5, "action": "open"})
+        gm_op = state_until(gm)
+        check("GM open: state broadcast carries doors[5,5]='O'",
+              gm_op["map"].get("doors", {}).get("5,5") == "O",
+              json.dumps(gm_op["map"].get("doors")))
+        alice.recv_json()                  # Alice's open state
+        bob.recv_json()                    # Bob's open state
         alice.send_json({"type": "move", "entity_id": al_ent, "x": 5, "y": 5})
         reply = alice.recv_json()                       # her path (broadcast)
         check("Alice got a path reply",
@@ -455,9 +501,10 @@ def main():
         p7.close()
 
         # 8. GENERATED MAP (generated-maps spec C11): generate -> open ->
-        # pathfind corner to corner. Over a FRESH session so the default
-        # session's sample-dungeon layout is untouched. A* finds the route
-        # because C5 guarantees every generated room is reachable.
+        # pathfind to the farthest door-reachable cell. Over a FRESH session
+        # so the default session's sample-dungeon layout is untouched. The
+        # generated doors are closed+locked (door-features A1), so the target
+        # is chosen among cells reachable without crossing a closed door.
         print("\n[8] generate 24x16 seed 42 + open in a fresh session + pathfind")
         conn = http.client.HTTPConnection(host, port, timeout=5)
         conn.request("POST", "/api/maps/generate", body=json.dumps({
@@ -513,11 +560,18 @@ def main():
             check("player re-parked onto a walkable cell",
                   pl_state["map"]["cells"][spawn[1]][spawn[0]] in ("floor", "doorway"))
 
-            # Target = BFS-farthest walkable cell from spawn (a corner-to-
-            # corner room, computed over the generated grid).
+            # Target = BFS-farthest cell from spawn that is reachable WITHOUT
+            # passing through any CLOSED door.  Door-features A1/AC1: the
+            # generated doors are closed+locked by default (map.doors), so the
+            # server's A* treats them as walls and the proof BFS must too —
+            # otherwise the target sits in a door-severed room and the move
+            # legitimately fails with "no route".  (C5 room-reachability holds
+            # with the doors open; this step proves pathfinding with them in
+            # their default state.)
             from collections import deque
-            def bfs_farthest(cells, w, h, start):
-                WALK = ("floor", "doorway")
+            closed_gen = _closed_doors(get_session("e2e-gen-42").grid)
+
+            def bfs_farthest(cells, w, h, start, closed=frozenset()):
                 dist = {start: 0}
                 q = deque([start])
                 while q:
@@ -525,11 +579,12 @@ def main():
                     for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1)):
                         nx, ny = cx + dx, cy + dy
                         if (0 <= nx < w and 0 <= ny < h and (nx, ny) not in dist
-                                and cells[ny][nx] in WALK):
+                                and (nx, ny) not in closed
+                                and cells[ny][nx] in ("floor", "doorway")):
                             dist[(nx, ny)] = dist[(cx, cy)] + 1
                             q.append((nx, ny))
                 return min(dist, key=lambda c: (-dist[c], c[0], c[1]))
-            target = bfs_farthest(gen_cells, 24, 16, spawn)
+            target = bfs_farthest(gen_cells, 24, 16, spawn, closed_gen)
 
             g2.send_json({"type": "move", "entity_id": pl_ent,
                           "x": target[0], "y": target[1]})
@@ -541,7 +596,7 @@ def main():
                   path[0] == {"x": spawn[0], "y": spawn[1]}
                   and path[-1] == {"x": target[0], "y": target[1]}
                   and len(path) >= 2, json.dumps(path))
-            proof_grid = Grid.from_dict({"width": 24, "height": 16, "cells": gen_cells})
+            proof_grid = get_session("e2e-gen-42").grid
             check("every path step is a legal A* step (no corner cuts)",
                   all(is_valid_step(proof_grid, (path[i]["x"], path[i]["y"]),
                                      (path[i + 1]["x"], path[i + 1]["y"]))
@@ -602,7 +657,11 @@ def main():
                         if mask[y][x] == char}
 
             # (a) welcome S-set == independent re-derivation at the spawn.
-            seen_spawn = derive_visible(pc, pw, ph, spawn)
+            # Door-aware (door-features A1/AC13): re-derive with the ACTUAL
+            # door states the welcome carries (the sample grid is shared
+            # across sessions, so a previous step may have left a door open —
+            # the S-set must match the live state, not the all-locked default).
+            seen_spawn = derive_visible(pc, pw, ph, spawn, wpl9["map"]["doors"])
             s_now = cells_of(wmask, "S")
             check("welcome S-set == re-derived LOS set at spawn",
                   s_now == seen_spawn,
@@ -621,6 +680,35 @@ def main():
             check("npc created in the right room (13,3)",
                   npc_ent is not None and len(gmcs["entities"]) == 2)
 
+            # Door-features A1/AC13: the doorway walk below (5,5)->(9,7)->
+            # (12,5) requires the doors to be OPEN — a CLOSED door blocks
+            # movement exactly like a wall. The sample grid is shared, so the
+            # door states may already be mixed (step [2] opened (5,5)); read
+            # the LIVE state from the last player state and open whatever is
+            # not O yet (unlock then open; a door a previous step left O
+            # needs no action). Each action broadcasts state to the GM and
+            # the player (drained below). (12,5) is reached from (9,7) over
+            # the bottom room's open floor, so (10,4) stays locked — it is a
+            # door the walk never crosses. The walk therefore proves
+            # door-aware movement/LOS in the explored-map context (open
+            # doors transparent, closed ones walled).
+            door_want = ((5, 5), (9, 7))
+            door_live = pls_c["map"].get("doors") or {}
+            for (dx, dy) in door_want:
+                if door_live.get(f"{dx},{dy}") == "O":
+                    continue
+                gm9.send_json({"type": "door", "x": dx, "y": dy, "action": "unlock"})
+                gm9.recv_json()           # unlock broadcast (state)
+                pl9.recv_json()
+                gm9.send_json({"type": "door", "x": dx, "y": dy, "action": "open"})
+                st = state_until(gm9)     # open broadcast (state)
+                check("GM opened door (%d,%d): doors[%d,%d]='O'" % (dx, dy, dx, dy),
+                      st["map"].get("doors", {}).get(f"{dx},{dy}") == "O",
+                      json.dumps(st["map"].get("doors")))
+                pl9.recv_json()
+            proof_g = Grid.from_dict({"width": pw, "height": ph, "cells": pc,
+                                      "doors": {f"{x},{y}": "O" for x, y in door_want}})
+
             # Trackers for monotonicity + the explored-so-far invariant.
             ever_s = set(s_now)          # union of every S-set observed
             ever_SE = set(s_now)         # union of every S/E cell observed
@@ -634,7 +722,6 @@ def main():
                 check("GM got a path to (%d,%d)" % (tx, ty),
                       gmpath["type"] == "path" and gmpath["entity_id"] == pl_ent,
                       json.dumps(gmpath))
-                proof_g = Grid.from_dict({"width": pw, "height": ph, "cells": pc})
                 steps = gmpath["path"]
                 check("every step (%s -> (%d,%d)) is a legal A* step" % (cur, tx, ty),
                       all(is_valid_step(proof_g, (steps[i]["x"], steps[i]["y"]),
@@ -645,7 +732,8 @@ def main():
                 pl9.recv_json()             # player's path
                 pst = pl9.recv_json()       # player's state
                 np_ = (pst["you_entity"]["x"], pst["you_entity"]["y"])
-                seen_now = derive_visible(pst["map"]["cells"], pw, ph, np_)
+                seen_now = derive_visible(pst["map"]["cells"], pw, ph, np_,
+                                          pst["map"]["doors"])
                 pmask = pst["visibility"]
                 check("state after (%d,%d): visibility well-formed" % (tx, ty),
                       mask_wellformed(pmask, pw, ph))

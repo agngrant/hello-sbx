@@ -39,6 +39,7 @@ from app.session import (
 )
 from tests.test_visibility import (
     W4_MASK,
+    W4_MASK_ALL_OPEN,
     assert_well_formed,
     cell as mask_cell,
     mask_counts,
@@ -442,9 +443,22 @@ class TestMovement(SessionTestCase):
 
     def test_move_to_doorway_is_walkable(self):
         # Alice (1,1) → doorway (5,5): path must exist through the gap.
-        reply = drive(self.session, 
-            self.p1_s, {"type": "move", "entity_id": self.p1_ent, "x": 5, "y": 5}
-        )
+        # A1 (door-features): the (5,5) door is closed+locked by default, so
+        # the GM must open it first (GM unlock + open) — then the walk works
+        # exactly as before the feature (an open door is a walkable doorway).
+        reply = drive(self.session, self.p1_s, {"type": "move",
+                                                "entity_id": self.p1_ent,
+                                                "x": 5, "y": 5})
+        self.assertEqual(reply, {"type": "error", "message": "no route — wall in the way"})
+        self.assertIsNone(drive(self.session, self.gm_s, {"type": "door",
+                                                          "x": 5, "y": 5,
+                                                          "action": "unlock"}))
+        self.assertIsNone(drive(self.session, self.gm_s, {"type": "door",
+                                                          "x": 5, "y": 5,
+                                                          "action": "open"}))
+        reply = drive(self.session, self.p1_s, {"type": "move",
+                                                "entity_id": self.p1_ent,
+                                                "x": 5, "y": 5})
         self.assertIsNone(reply)
         self.assertTrue(self.p1_s.sent("path"))
         self.assertEqual(self.session.entities[self.p1_ent].x, 5)
@@ -1391,10 +1405,11 @@ class TestExploredMapInitialMask(unittest.TestCase):
         self.assertEqual(vis, W4_MASK,
                          f"\ngot:\n{mask_rows(vis)}\nwant:\n{mask_rows(W4_MASK)}")
         s_count, e_count, h_count = mask_counts(vis)
-        # 70 S / 0 E / 122 H — see W4_MASK note in tests/test_visibility.py
-        # (the spec literal's (6,7)=H is corrected by the spec's own S2 rule;
-        # the oracle re-derivation defines correctness).
-        self.assertEqual((s_count, e_count, h_count), (70, 0, 122))
+        # 68 S / 0 E / 124 H — doors are closed+locked by default (A1);
+        # see the W4_MASK note in tests/test_visibility.py (the door-aware
+        # oracle re-derivation defines correctness). The legacy 70 S / 122 H
+        # is reproduced with all doors open.
+        self.assertEqual((s_count, e_count, h_count), (68, 0, 124))
         self.assertEqual(mask_cell(vis, 1, 1), "S")  # the token cell
         self.assertEqual(s_cells(vis), oracle_visible(s.grid, (1, 1)))
 
@@ -1407,6 +1422,13 @@ class TestExploredMapMoveMemory(unittest.TestCase):
 
     def setUp(self) -> None:
         self.session = GameSession("t", build_sample_map())
+        # A1 (door-features): this test reproduces the PRE-feature walkthrough
+        # (tiers flip as Alice crosses the rooms), so open ALL three doors
+        # first — an open door is a walkable/transparent doorway, exactly the
+        # old behaviour. (The welcome/baseline W4 mask stays closed-default.
+        #) The open-door state rides with the grid and is carried by every
+        # post-move mask, so the S-set re-derivation below holds unchanged.
+        self.session.grid.doors = {"5,5": "O", "10,4": "O", "9,7": "O"}
         self.gm_s, self.p1_s = FakeConn(), FakeConn()
         self.gm, _ = self.session.join(self.gm_s, "Gamer", "gm")
         self.p1, _ = self.session.join(self.p1_s, "Alice", "player")
@@ -1438,7 +1460,7 @@ class TestExploredMapMoveMemory(unittest.TestCase):
     def test_move_tiers_flip_and_memory_is_monotonic(self):
         seen: set[tuple[int, int]] = set()
         self._track(self.welcome["visibility"], seen)
-        self.assertEqual(self.welcome["visibility"], W4_MASK)  # AC2 baseline
+        self.assertEqual(self.welcome["visibility"], W4_MASK_ALL_OPEN)  # doors open in setUp
 
         # GM moves the player (1,1) -> (7,2) (one A* move through the
         # (5,5) doorway).
@@ -1587,6 +1609,10 @@ class TestExploredMapReconnect(unittest.TestCase):
 
     def setUp(self) -> None:
         self.session = GameSession("t", build_sample_map())
+        # A1 (door-features): the reconnection test walks Alice to (7,2)
+        # THROUGH the (5,5) door, so open all doors first to preserve the
+        # pre-feature route + explored memory.
+        self.session.grid.doors = {"5,5": "O", "10,4": "O", "9,7": "O"}
         self.gm_s = FakeConn()
         self.gm, _ = self.session.join(self.gm_s, "Gamer", "gm")
         self.sock1 = FakeConn()
@@ -1637,7 +1663,11 @@ class TestExploredMapGmPayload(unittest.TestCase):
         # payload had before this feature, with their values.
         expected = {
             "type": "state",
-            "map": s.grid.to_dict(),
+            # Additive `map.doors` (door-features spec §8.1/I3/AC10): the GM
+            # payload carries the FULL door object for the sample dungeon
+            # (all 3 doorways, L by default) alongside the unchanged keys.
+            "map": {**s.grid.to_dict(),
+                    "doors": {"5,5": "L", "10,4": "L", "9,7": "L"}},
             "players": [
                 {"id": "p1", "name": "Gamer", "role": "gm",
                  "entity_id": None, "awareness_radius": 4},

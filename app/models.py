@@ -46,6 +46,18 @@ TEAM_COLORS: dict[str, str] = {
     "hostile": "red",    # enemy
 }
 
+# ---------------------------------------------------------------------------
+# Door states (docs/design/door-features.md §3) — an additive feature on
+# top of the frozen cell vocabulary: a door is a ``doorway`` CELL plus one
+# of these state chars (there is no fourth cell type).
+# ---------------------------------------------------------------------------
+
+#: The three door states, as single-letter wire chars (spec §3.1):
+#: ``"L"`` = closed + locked (the DEFAULT: absent/None ⇒ every door is L),
+#: ``"U"`` = closed, unlocked, ``"O"`` = open. A door is CLOSED iff its
+#: state is not ``"O"``; LOCKED iff it is ``"L"``.
+DOOR_STATES = ("L", "U", "O")
+
 
 # ---------------------------------------------------------------------------
 # Grid
@@ -54,13 +66,21 @@ TEAM_COLORS: dict[str, str] = {
 
 @dataclass
 class Grid:
-    """A grid map. ``cells[y][x]`` is one of :data:`CELL_TYPES`."""
+    """A grid map. ``cells[y][x]`` is one of :data:`CELL_TYPES`.
+
+    ``doors`` (additive, docs/design/door-features.md §3) is a sparse
+    ``{"<x>,<y>": "L"|"U"|"O"}`` map of door state over the grid's
+    ``doorway`` cells. ``None`` means "no door state recorded" — every door
+    is then ``"L"`` (closed + locked, the default). A missing key for a
+    doorway cell is likewise ``"L"``.
+    """
 
     name: str = "Untitled map"
     width: int = 0
     height: int = 0
     cells: list[list[str]] = field(default_factory=list)  # cells[y][x]
     image: str | None = None  # filename of uploaded source image (optional)
+    doors: dict[str, str] | None = None  # NEW (D1): door state per doorway
 
     def __post_init__(self) -> None:
         if len(self.cells) != self.height:
@@ -75,27 +95,142 @@ class Grid:
             for cell in row:
                 if cell not in CELL_TYPES:
                     raise ValueError(f"invalid cell type {cell!r} (row {y})")
+        # Door state (spec §3.3): ``None`` stays ``None`` (all doors locked);
+        # otherwise every key must be a well-formed in-bounds ``"<x>,<y>``
+        # over a ``doorway`` cell with a valid state char.
+        if self.doors is None:
+            return
+        clean: dict[str, str] = {}
+        for key, st in self.doors.items():
+            if not isinstance(key, str) or "," not in key:
+                raise ValueError(f"invalid door key {key!r}")
+            xs, ys = key.split(",")
+            try:
+                x, y = int(xs), int(ys)
+            except ValueError:
+                raise ValueError(f"invalid door key {key!r}") from None
+            if st not in DOOR_STATES:
+                raise ValueError(f"invalid door state {st!r} at {key!r}")
+            if not (0 <= x < self.width and 0 <= y < self.height):
+                raise ValueError(f"door key {key!r} out of bounds")
+            if self.cells[y][x] != "doorway":
+                raise ValueError(f"door at {key!r} is not on a doorway cell")
+            clean[key] = st
+        self.doors = clean
 
     def to_dict(self) -> dict[str, Any]:
-        """Plain-dict form: ``{"name","width","height","cells","image"}``."""
-        return {
+        """Plain-dict form: ``{"name","width","height","cells","image"}``
+        plus the additive ``"doors"`` object (spec §8.1: emitted whenever any
+        door state is recorded — i.e. whenever the grid has a door; omitted
+        entirely for an all-default/locked grid so legacy payloads parse
+        unchanged and round-trip to ``doors=None``)."""
+        d = {
             "name": self.name,
             "width": self.width,
             "height": self.height,
             "cells": [list(row) for row in self.cells],
             "image": self.image,
         }
+        if self.doors:
+            d["doors"] = dict(self.doors)
+        return d
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "Grid":
-        """Rebuild a :class:`Grid` from its dict form (validated)."""
+        """Rebuild a :class:`Grid` from its dict form (validated).
+
+        The ``doors`` key is optional: absent/``None`` ⇒ every door locked
+        (spec §3.4, A2 — the safe backward-compat default).
+        """
         return cls(
             name=data.get("name", "Untitled map"),
             width=int(data["width"]),
             height=int(data["height"]),
             cells=[list(row) for row in data["cells"]],
             image=data.get("image"),
+            doors=data.get("doors"),
         )
+
+    # -- door state accessors (spec §3.5) ---------------------------------
+
+    def door_state_at(self, x: int, y: int) -> str | None:
+        """The door state char at ``(x, y)``.
+
+        ``None`` when the cell is not a ``doorway``; ``"L"`` for a doorway
+        with no recorded state (the closed + locked default); the recorded
+        ``"L"|"U"|"O"`` otherwise.
+        """
+        if self.cells[y][x] != "doorway":
+            return None
+        if self.doors is None:
+            return "L"
+        return self.doors.get(f"{x},{y}", "L")
+
+    def is_door_closed(self, x: int, y: int) -> bool:
+        """True iff ``(x, y)`` is a doorway whose state is not open (``L``
+        or ``U``). A closed door is a wall for LOS + movement."""
+        st = self.door_state_at(x, y)
+        return st is not None and st != "O"
+
+    def set_door(self, x: int, y: int, state: str) -> None:
+        """Set ``(x, y)``'s door to ``state``; materializes ``self.doors``.
+
+        Raises ``ValueError`` if ``(x, y)`` is not a doorway or ``state`` is
+        not in :data:`DOOR_STATES` (the WS handler validates first).
+        """
+        if self.cells[y][x] != "doorway":
+            raise ValueError(f"no door at ({x},{y})")
+        if state not in DOOR_STATES:
+            raise ValueError(f"invalid door state {state!r}")
+        self.doors = dict(self.doors or {})
+        self.doors[f"{x},{y}"] = state
+
+    def sync_doors_after_cell_set(self, x: int, y: int) -> None:
+        """D4: keep ``doors`` consistent after a cell is (re)typed by paint.
+
+        Painted to ``doorway`` → the door exists in the DEFAULT ``L`` state
+        (only added if not already recorded, so a repainted door keeps its
+        current state — painting is a no-op for door state on an existing
+        doorway). Painted to ``floor``/``wall`` → the door state is DELETED
+        (a cell that is no longer a doorway has no door).
+
+        This is the single paint-sync point (spec §9): the WS ``paint``
+        handler and the REST paint route both call it right after setting
+        ``grid.cells[y][x]``, so door state can never desync from the cell
+        type at runtime (``__post_init__`` only runs at construction).
+        """
+        if self.doors is None:
+            if self.cells[y][x] == "doorway":
+                self.doors = {}  # materialize; the door is L by default
+            return
+        key = f"{x},{y}"
+        if self.cells[y][x] != "doorway":
+            self.doors.pop(key, None)
+        # if still a doorway: leave the entry (or its absence) untouched.
+
+    def doors_for_wire(self) -> dict[str, str] | None:
+        """The full door object for the WIRE/REST (spec §8.1/§8.2, A9, I5).
+
+        Whenever the grid has >= 1 doorway cell, return an object holding
+        EVERY door's current state (unrecorded doorways default to ``"L"``),
+        so the wire is unambiguous ("is this door open?") — the client
+        otherwise cannot tell an open door from an unrecorded one. A grid
+        with NO doorway cells returns ``None`` (the key is omitted; the
+        client ⇒ all locked). This is the wire/REST policy and differs from
+        :meth:`to_dict`, which only emits ``doors`` when recorded state
+        exists (AC1 round-trip). The state machine (spec §4.3/§15 AC10) pins
+        this: every welcome/state/REST map object carries it.
+        """
+        full: dict[str, str] = {}
+        recorded = self.doors or {}
+        found = False
+        for y in range(self.height):
+            for x in range(self.width):
+                if self.cells[y][x] != "doorway":
+                    continue
+                found = True
+                full[f"{x},{y}"] = recorded.get(f"{x},{y}", "L")
+        return full if found else None
 
 
 # ---------------------------------------------------------------------------

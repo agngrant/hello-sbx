@@ -341,10 +341,13 @@ class TestPlayerTierInvisible(unittest.TestCase):
         self.assertEqual(items, [])
 
     def test_doorway_passes_line_of_sight(self):
-        # Walled grid except a doorway on the O→D line: D is FULL.
+        # Walled grid with a doorway strictly BETWEEN the viewer O (1,1) and
+        # the target D (3,1). A1 (door-features): a CLOSED door on the O→D
+        # line blocks LOS (D is APPROXIMATE, within 4 squares), so OPEN the
+        # (2,1) door first to preserve the original "D is FULL on LOS" pin.
         g = make_grid([
             ["wall", "floor", "floor", "floor", "wall"],
-            ["wall", "floor", "floor", "doorway", "wall"],
+            ["wall", "floor", "doorway", "floor", "wall"],
             ["wall", "wall", "wall", "wall", "wall"],
         ])
         viewer = Player(id="p1", name="A", role="player", entity_id="A")
@@ -352,6 +355,14 @@ class TestPlayerTierInvisible(unittest.TestCase):
             "A": ent("A", "party", x=1, y=1),
             "D": ent("D", "hostile", kind="enemy", x=3, y=1),
         }
+        # Closed (default) door: LOS blocked → D is APPROXIMATE (within the
+        # default radius), no identity — the door blocks sight; awareness is
+        # unchanged in code (it inherits the door-aware LOS).
+        (closed_item,) = build_awareness(viewer, entities, g)
+        self.assertTrue(closed_item["approximate"])
+        self.assertNotIn("name", closed_item)
+        # Open the door: clear LOS → D is FULL (named, labeled, red).
+        g.doors = {"2,1": "O"}
         (item,) = build_awareness(viewer, entities, g)
         self.assertEqual(item["entity_id"], "D")
         self.assertTrue(item["label"])

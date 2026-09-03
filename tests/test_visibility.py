@@ -33,7 +33,7 @@ import copy
 import unittest
 
 from app.models import Grid
-from app.pathfinding import has_line_of_sight
+from app.pathfinding import _closed_doors, has_line_of_sight
 from app.visibility import build_visibility_mask, visible_cells
 
 
@@ -70,30 +70,49 @@ def _walkable(g: Grid, x: int, y: int) -> bool:
     return 0 <= x < g.width and 0 <= y < g.height and g.cells[y][x] in ("floor", "doorway")
 
 
+def oracle_walkable(g: Grid, x: int, y: int, closed) -> bool:
+    """Door-aware walkable: in-bounds, floor/doorway, and NOT a closed door."""
+    if not (0 <= x < g.width and 0 <= y < g.height):
+        return False
+    if g.cells[y][x] not in ("floor", "doorway"):
+        return False
+    return (x, y) not in closed
+
+
 def oracle_visible(g: Grid, pos: tuple[int, int]) -> set[tuple[int, int]]:
     """Re-derive the S-set straight from the spec's rules + real LOS.
 
-    (S1) every walkable cell c with ``has_line_of_sight(g, pos, c)`` — plus
-    the anchor itself, unconditionally (S-B: the walkability predicate is
-    waived for the anchor, even when its cell is a wall — edge case E6);
-    (S2) every wall cell w that has a walkable 4-orthogonal neighbour in the
-    (S1) set.
+    (S1) every WALKABLE cell c (floor or OPEN doorway — a CLOSED door is not
+    walkable) with ``has_line_of_sight(g, pos, c)`` — plus the anchor itself,
+    unconditionally (S-B: the walkability predicate is waived for the anchor,
+    even when its cell is a wall — edge case E6);
+    (S2) every WALL cell w AND every CLOSED door (D5: a closed door's face is
+    revealed exactly like a wall) that has a walkable 4-orthogonal neighbour
+    in the (S1) set.
 
-    Deliberately independent of :func:`app.visibility.visible_cells`.
+    Door-aware: LOS is the real :func:`has_line_of_sight` with the grid's
+    closed-door set, so a closed door blocks exactly like a wall (incl.
+    corner-cut) and an open door is transparent. Deliberately independent of
+    :func:`app.visibility.visible_cells` (re-implements the same rules).
     """
+    closed = _closed_doors(g)
     seen: set[tuple[int, int]] = {pos}
+    # (S1) walkable (floor / open-doorway) cells in sight.
     for y in range(g.height):
         for x in range(g.width):
             c = g.cells[y][x]
-            if c != "wall":
-                if (x, y) == pos or has_line_of_sight(g, pos, (x, y)):
-                    seen.add((x, y))
+            if c == "wall" or (x, y) in closed:
+                continue
+            if (x, y) == pos or has_line_of_sight(g, pos, (x, y), closed):
+                seen.add((x, y))
+    # (S2) wall cells and closed doors (D5) revealed via a walkable 4-neighbour.
     for y in range(g.height):
         for x in range(g.width):
-            if g.cells[y][x] != "wall":
+            c = g.cells[y][x]
+            if c != "wall" and (x, y) not in closed:
                 continue
             for nx, ny in ((x + 1, y), (x - 1, y), (x, y + 1), (x, y - 1)):
-                if _walkable(g, nx, ny) and (nx, ny) in seen:
+                if oracle_walkable(g, nx, ny, closed) and (nx, ny) in seen:
                     seen.add((x, y))
                     break
     return seen
@@ -262,13 +281,18 @@ class TestWorkedExampleW1(unittest.TestCase):
 
 # W4 — token at (1,1) on the 16x12 sample dungeon.
 #
-# NOTE (spec §12 AC2 doctrine — the re-derivation is the oracle): the
-# spec's §3.2 12-row literal lists (6,7) as H and counts 69 S / 123 H. The
-# (S1)/(S2) algorithm applied to the actual sample grid makes (6,7) — a
-# WALL of the row-7 section — S, because its north neighbour (6,6) (the
-# single middle-room floor, counted S by the spec itself) has line of sight
-# through the doorway (5,5): S2 is unambiguous, so the literal is corrected
-# to 70 S / 122 H. Everything else in the spec's literal is preserved.
+# NOTE (door-features spec A1/AC7 + the AC2 "oracle wins" doctrine): the
+# explored-map literal was pinned when EVERY doorway was an open, transparent
+# gap (70 S / 122 H). Doors are now CLOSED + LOCKED by default (D1/A2), so a
+# closed door blocks sight exactly like a wall: from (1,1) the (5,5) doorway
+# no longer transmits sight, the single middle-room floor (6,6) is no longer
+# S, and the (5,4)/(5,6) wall faces lose their only seen neighbour. The
+# literal is REGENERATED for the closed-default doors — 68 S / 124 H — as the
+# door-aware (S1)+(S2) algorithm + the real has_line_of_sight produce (the
+# oracle re-derivation below is the source of truth). Every other spot cell
+# the spec's AC2 battery listed as S is unchanged; the cells that flip are
+# exactly the ones behind the now-closed door. With ALL three doors open the
+# mask returns to the legacy 70 S / 122 H (see TestWorkedExampleW4AllOpen).
 W4_GRID_ROWS = [
     "WWWWWWWWWWWWWWWW",
     "W....W....W....W",
@@ -285,6 +309,23 @@ W4_GRID_ROWS = [
 ]
 W4_POS = (1, 1)
 W4_MASK = [
+    "HSSSSHHHHHHHHHHH",
+    "SSSSSSHHHHHHHHHH",
+    "SSSSSSHHHHHHHHHH",
+    "SSSSSSHHHHHHHHHH",
+    "SSSSSSHHHHHHHHHH",
+    "SSSSSSHHHHHHHHHH",
+    "SSSSSSHHHHHHHHHH",
+    "SSSSSSHHHHHHHHHH",
+    "SSSSSSHHHHHHHHHH",
+    "SSSSSSHHHHHHHHHH",
+    "SSSSSSHHHHHHHHHH",
+    "HSSSSHHHHHHHHHHH",
+]
+# Legacy all-doorways-OPEN mask (pre-door-features behaviour, 70 S / 122 H) —
+# the regression pin for "opening all doors reproduces the old mask exactly"
+# (door-features spec AC7(d)).
+W4_MASK_ALL_OPEN = [
     "HSSSSHHHHHHHHHHH",
     "SSSSSSHHHHHHHHHH",
     "SSSSSSHHHHHHHHHH",
@@ -309,7 +350,7 @@ class TestWorkedExampleW4(unittest.TestCase):
         self.assertEqual(mask, W4_MASK,
                          f"\ngot:\n{mask_rows(mask)}\nwant:\n{mask_rows(W4_MASK)}")
         s, e, h = mask_counts(mask)
-        self.assertEqual((s, e, h), (70, 0, 122))
+        self.assertEqual((s, e, h), (68, 0, 124))
         self.assertEqual(mask, oracle_mask(g, set(), W4_POS))
 
     def test_spot_cells_and_independent_rederivation(self):
@@ -317,32 +358,57 @@ class TestWorkedExampleW4(unittest.TestCase):
 
         g = build_sample_map()
         mask = build_visibility_mask(g, set(), W4_POS)
-        # Spec AC2 spot battery — every cell the spec lists as S is S.
-        for x, y in [(1, 1), (4, 10), (5, 5), (6, 6), (5, 4), (5, 6),
+        # Doors are CLOSED + LOCKED by default: from (1,1) the (5,5) doorway
+        # blocks sight, so the middle room beyond it is hidden.
+        for x, y in [(1, 1), (4, 10), (5, 5), (5, 4), (5, 6),
                      (0, 1), (4, 0), (0, 10)]:
-            self.assertEqual(cell(mask, x, y), "S", f"spec spot S {(x, y)}")
-        # The diagonal through the door: exactly one middle-room floor is S.
-        self.assertEqual(cell(mask, 6, 6), "S")
+            self.assertEqual(cell(mask, x, y), "S", f"spot S {(x, y)}")
+        # (5,5): the CLOSED door's face is revealed by the D5 wall-face rule
+        # (it is a doorway cell, but S2 — not the S1 walkable rule — reveals it).
+        self.assertEqual(g.cells[5][5], "doorway")
+        self.assertEqual(cell(mask, 5, 5), "S")
+        # (6,6): the single middle-room floor is H now — behind the closed
+        # (5,5) door the whole middle room is hidden (AC7: closed-door far
+        # side is H when never explored).
+        self.assertEqual(cell(mask, 6, 6), "H")
         for x in range(6, 10):
             for y in range(1, 7):
-                if (x, y) != (6, 6) and g.cells[y][x] == "floor":
+                if g.cells[y][x] == "floor":
                     self.assertNotEqual(cell(mask, x, y), "S",
                                         f"middle-room floor {(x, y)} must be H")
-        # (6,7) — spec literal said H; the spec's own S2 rule (and the
-        # real Bresenham oracle) make it S: the wall faces the seen floor
-        # (6,6). Corrected per the AC2 "oracle wins" doctrine.
-        self.assertEqual(cell(mask, 6, 7), "S")
-        # Spec AC2 spot battery — every other cell the spec lists as H is H
-        # ((6,5): the same-row trap past the door; the blocked lines; the
-        # doorways; the right room and bottom band; the far border corners).
+        # (6,7): a wall whose only seen-neighbour (6,6) is now hidden -> H.
+        self.assertEqual(cell(mask, 6, 7), "H")
+        # Every cell beyond the closed door (and the far room / border)
+        # stays hidden.
         for x, y in [(6, 5), (7, 7), (7, 5), (9, 5), (9, 7), (10, 4),
-                     (12, 5), (12, 9), (14, 8), (6, 0), (0, 0)]:
-            self.assertEqual(cell(mask, x, y), "H", f"spec spot H {(x, y)}")
-        # Independent re-derivation (the oracle) equals the mask's S-set:
+                     (12, 5), (12, 9), (14, 8), (6, 0), (0, 0),
+                     (6, 6), (6, 7)]:
+            self.assertEqual(cell(mask, x, y), "H", f"spot H {(x, y)}")
+        # Independent door-aware re-derivation (the oracle) equals the mask's S-set.
         s_set = {(x, y) for y, row in enumerate(mask) for x, ch in enumerate(row)
                  if ch == "S"}
         self.assertEqual(s_set, oracle_visible(g, W4_POS))
         self.assertEqual(s_set, visible_cells(g, W4_POS))
+
+
+class TestWorkedExampleW4AllOpen(unittest.TestCase):
+    """AC7(d) regression pin: with ALL three doors OPEN, the mask equals the
+    pre-door-features literal (70 S / 122 H) exactly — opening the doors
+    reproduces today's open-doorway behaviour byte-for-byte."""
+
+    def test_all_open_reproduces_legacy_mask(self):
+        from app.grid import build_sample_map
+
+        g = build_sample_map()
+        g.doors = {"5,5": "O", "10,4": "O", "9,7": "O"}
+        mask = build_visibility_mask(g, set(), W4_POS)
+        self.assertEqual(mask, W4_MASK_ALL_OPEN,
+                         f"\ngot:\n{mask_rows(mask)}\nwant:\n{mask_rows(W4_MASK_ALL_OPEN)}")
+        self.assertEqual(mask_counts(mask), (70, 0, 122))
+        # (6,6) is S again (sight through the open door) and (5,5) is S via
+        # S1 (an open door is walkable + in sight, like today's doorway).
+        self.assertEqual(cell(mask, 6, 6), "S")
+        self.assertEqual(cell(mask, 5, 5), "S")
 
 
 # ---------------------------------------------------------------------------
@@ -475,12 +541,13 @@ class TestInvariants(unittest.TestCase):
                          ["HHH", "HSH", "HHH"])
 
     def test_sc_symmetry(self):
-        # a in vis(b) iff b in vis(a) for walkable a, b (Bresenham + the
-        # blocker test are symmetric; the anchor is walkable in every case).
+        # a in vis(b) iff b in vis(a) for WALKABLE a, b (Bresenham + the
+        # blocker test are symmetric; the anchor must be walkable — a closed
+        # door is NOT walkable, so its anchor is the D5 face rule, not S1).
         for g in (self.sample, self.small):
             cells = self._walkable_cells(g)
-            for a in ((1, 1), (4, 10), (5, 5), (12, 9)):
-                if (g is self.small and a not in cells):
+            for a in ((1, 1), (4, 10), (12, 9)):
+                if a not in cells:
                     continue
                 for b in ((4, 1), (1, 10), (12, 5), (13, 1), (0, 0), (3, 2)):
                     if a == b or b not in cells:
@@ -508,9 +575,11 @@ class TestInvariants(unittest.TestCase):
             vis = visible_cells(g, pos)
             self.assertLessEqual(len(vis), g.width * g.height)
             self.assertGreater(len(vis), 0)
-        # The sample spawn sees the left region + one diagonal cell, far less
-        # than the full 192 cells (bounded by LOS, not connectivity):
-        self.assertEqual(len(visible_cells(self.sample, (1, 1))), 70)
+        # The sample spawn sees the left region + its wall/door faces, far
+        # less than the full 192 cells (bounded by LOS + the closed (5,5)
+        # door, not connectivity). Closed-by-default: 68 S (was 70 when the
+        # doorway was an open, transparent gap).
+        self.assertEqual(len(visible_cells(self.sample, (1, 1))), 68)
 
     def test_sf_grid_reads_only(self):
         for g, pos in ((self.sample, (1, 1)), (self.small, W2_BASE_POS)):

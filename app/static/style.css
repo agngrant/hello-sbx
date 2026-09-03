@@ -23,6 +23,13 @@
   --wall-border: #20242f;
   --doorway: #d97706;
 
+  /* Door states (door-features spec §7.1): a door is a `doorway` cell + a
+     state, drawn floor-based with a state-colored border + glyph. All
+     three full-tier colors are distinct from floor and wall. */
+  --door-open: #d97706;      /* open (O): amber + arch */
+  --door-unlocked: #f59f00;  /* closed, unlocked (U): lighter amber + bar */
+  --door-locked: #e03131;    /* closed, locked (L): red + padlock glyph */
+
   /* Explored map — greyed ("E") tiers (explored-map spec §6.4). Mirrors the
      JS `T` tokens; the hidden tier reuses the canvas background. */
   --explored-floor: #6b7280;
@@ -255,7 +262,7 @@ input[type="file"] { color: var(--text-muted); }
   overflow: hidden;
 }
 #canvas-wrap.mode-paint-floor, #canvas-wrap.mode-paint-wall,
-#canvas-wrap.mode-paint-doorway { cursor: crosshair; }
+#canvas-wrap.mode-paint-doorway, #canvas-wrap.mode-paint-door { cursor: crosshair; }
 #canvas-wrap.has-selection { cursor: pointer; }
 #map-canvas { display: block; }
 
@@ -390,6 +397,12 @@ input[type="file"] { color: var(--text-muted); }
 .swatch.floor { background: var(--floor); }
 .swatch.wall { background: var(--wall-fill); border: 1px solid var(--wall-border); }
 .swatch.doorway { background: var(--floor); border: 2px solid var(--doorway); }
+/* Door state swatches (door-features spec §7.4): floor base + the state's
+   border color, mirroring the canvas door art (border + glyph over floor).
+   Visible to BOTH GM and players (no body.is-gm gate). */
+.swatch.door-open { background: var(--floor); border: 2px solid var(--door-open); }
+.swatch.door-unlocked { background: var(--floor); border: 2px solid var(--door-unlocked); }
+.swatch.door-locked { background: var(--floor); border: 2px solid var(--door-locked); }
 /* Explored map tiers (explored-map spec §7): "explored" = greyed floor with a
    grey wall border; "hidden" = the canvas background (nothing drawn). */
 .swatch.explored { background: var(--explored-floor); border: 1px solid var(--explored-wall); }
@@ -482,6 +495,26 @@ input[type="file"] { color: var(--text-muted); }
   border-top: 1px solid #2a3145;
 }
 #paint-group { display: flex; gap: var(--s1); }
+/* Door tool action sub-row (door-features spec §7.5): compact action
+   buttons revealed only while the Door tool is armed. */
+.door-action-row { display: inline-flex; gap: 2px; align-items: center; }
+.door-action {
+  font: inherit;
+  font-size: 12px;
+  color: var(--text-muted);
+  background: transparent;
+  border: none;
+  border-radius: var(--r-control);
+  padding: var(--s1) var(--s2);
+  min-height: 32px;
+  cursor: pointer;
+  border-bottom: 2px solid transparent;
+}
+.door-action:hover:not(:disabled) { color: var(--text); background: rgba(77, 171, 247, 0.12); }
+.door-action[aria-pressed="true"] {
+  color: var(--text);
+  border-bottom-color: var(--warn);
+}
 #override-wrap {
   display: inline-flex;
   align-items: center;

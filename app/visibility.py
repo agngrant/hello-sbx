@@ -13,13 +13,22 @@ are unit-testable without a session and the session layer stays a thin
 orchestrator (compute the seen set, fold it into the player's explored set,
 build the mask).
 
+Doors (docs/design/door-features.md §6.2): a CLOSED door's far side is H/E
+(exactly like out-of-line-of-sight) and an OPEN door is transparent — this
+falls out of the door-aware :func:`app.pathfinding.has_line_of_sight` with
+NO new S/E/H logic. The only addition here is the **D5 closed-door face
+branch**: a closed door's own cell is revealed by the SAME S2 wall-face rule
+wall cells use (so a closed door renders in the current tier when facing a
+seen floor), instead of the S1 walkable rule.
+
 Two entry points:
 
 * :func:`visible_cells` — the set of cells a token at ``pos`` can see now
   (spec §3.2, rules S1/S2). Line of sight is
   :func:`app.pathfinding.has_line_of_sight`, reused **verbatim** — map
   sight and entity awareness sight agree by construction (the same
-  Bresenham digitization, the same no-corner-cut rule).
+  Bresenham digitization, the same no-corner-cut rule, the same door-
+  awareness).
 * :func:`build_visibility_mask` — the wire encoding: a list of ``height``
   row-strings of exactly ``width`` chars over the alphabet ``"S"`` (in
   sight now) / ``"E"`` (explored — previously seen, not in sight now) /
@@ -30,7 +39,7 @@ Two entry points:
 from __future__ import annotations
 
 from app.models import Grid
-from app.pathfinding import has_line_of_sight
+from app.pathfinding import _closed_doors, has_line_of_sight
 
 #: Walkable cell types — the (S1) sight predicate (same set as movement).
 WALKABLE = ("floor", "doorway")
@@ -62,10 +71,17 @@ def visible_cells(grid: Grid, pos: tuple[int, int]) -> set[tuple[int, int]]:
     The sight relation is exactly the entity-awareness LOS: a walkable cell
     is S iff the token could see an entity standing on it.
 
+    Doors (door-features spec §6.2b, D5): a CLOSED door's own cell is
+    revealed by the (S2) wall-face rule (a closed door's face is visible
+    when facing a seen floor), exactly like a wall; an OPEN door is walkable
+    and revealed by (S1) like today's doorway. The S/E/H mask logic is
+    otherwise unchanged.
+
     Invariants (all AC-tested): deterministic (S-A); the token cell is
     always in the result (S-B); symmetric for walkable cells (S-C); only
-    walkable cells via (S1) / walls via (S2) (S-D); ``O(w*h*L)`` with
-    ``L = max(w, h)`` (S-E); the grid is only read, never mutated (S-F).
+    walkable cells via (S1) / walls (and closed doors, D5) via (S2) (S-D);
+    ``O(w*h*L)`` with ``L = max(w, h)`` (S-E); the grid is only read, never
+    mutated (S-F).
     """
     # (S-B): the token cell is ALWAYS in sight — the walkability predicate
     # is waived for the anchor itself, even when it is a wall (a GM may
@@ -73,19 +89,27 @@ def visible_cells(grid: Grid, pos: tuple[int, int]) -> set[tuple[int, int]]:
     # an isolated token still sees exactly its own square).
     seen: set[tuple[int, int]] = {pos}
     w, h = grid.width, grid.height
+    # D5: closed doors use the wall-face rule; the set is derived once.
+    closed_doors = _closed_doors(grid)
+    # The closed set is derived ONCE and passed to every LOS call so a large
+    # grid does not rebuild it per cell (the door-aware LOS adds only a
+    # constant-factor lookup per Bresenham step — spec §9/AC15 budget).
     for y in range(h):
         for x in range(w):
             cell = grid.cells[y][x]
-            if cell == "wall":
-                # (S2): wall visible iff a walkable 4-orthogonal neighbour
-                # itself has line of sight from the token.
+            if cell == "wall" or (x, y) in closed_doors:
+                # (S2): wall (or closed door, D5) visible iff a WALKABLE
+                # (floor / open doorway — a CLOSED door is not walkable)
+                # 4-orthogonal neighbour itself has line of sight from the
+                # token.
                 for nx, ny in _four_neighbours(x, y, w, h):
-                    if grid.cells[ny][nx] in WALKABLE and \
-                       has_line_of_sight(grid, pos, (nx, ny)):
+                    if grid.cells[ny][nx] in WALKABLE \
+                       and (nx, ny) not in closed_doors \
+                       and has_line_of_sight(grid, pos, (nx, ny), closed_doors):
                         seen.add((x, y))
                         break
             else:
-                if (x, y) == pos or has_line_of_sight(grid, pos, (x, y)):
+                if (x, y) == pos or has_line_of_sight(grid, pos, (x, y), closed_doors):
                     seen.add((x, y))
     return seen
 

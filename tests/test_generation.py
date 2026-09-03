@@ -317,6 +317,14 @@ class TestC7Detour(unittest.TestCase):
         # and assert the real A* route detours through >= 3 rooms.
         cols, rows, seed = 24, 16, 42
         grid = gen(cols, rows, seed)
+        # A1 (door-features): carved doorways are now closed+locked by
+        # default, so OPEN every door first ("O") to reproduce the original
+        # connectivity the detour test was written against (an open doorway
+        # is exactly today's walkable gap).
+        grid.doors = {
+            f"{x},{y}": "O" for y in range(rows) for x in range(cols)
+            if grid.cells[y][x] == "doorway"
+        }
         cells, w, h = grid.cells, cols, rows
         rooms = room_components(cells, w, h)
         doorless = wall_adjacent_pairs(cells, w, h) - doorway_pairs(cells, w, h)

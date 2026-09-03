@@ -15,6 +15,15 @@ Core movement rules (hard requirements #3/#4, §6):
 
 Also provides :func:`has_line_of_sight` (Bresenham digitization, blocked by
 ``wall``) which powers the optional fog-of-war toggle (§5).
+
+Doors (docs/design/door-features.md §5): a **closed** door (a ``doorway``
+cell whose state is not ``"O"``) blocks walkability, steps, and line of
+sight **exactly like a wall** — including the diagonal no-corner-cut rule —
+while an **open** door is sight- and movement-transparent (today's
+doorway). The predicates take an OPTIONAL ``doors`` parameter: a set/frozenset
+of ``(x, y)`` of CLOSED door cells. When omitted (``None``) the set is
+derived from ``grid.doors``, so existing two/three-argument call sites keep
+working and a bare ``Grid`` (``doors=None``) behaves all-locked (spec D1/A2).
 """
 
 from __future__ import annotations
@@ -53,24 +62,61 @@ def _in_bounds(grid: Grid, x: int, y: int) -> bool:
     return 0 <= x < grid.width and 0 <= y < grid.height
 
 
-def walkable(grid: Grid, x: int, y: int) -> bool:
+def _closed_doors(grid: Grid) -> frozenset[tuple[int, int]]:
+    """The set of ``(x, y)`` of CLOSED doors (state ``!= 'O'``). Pure.
+
+    A ``doorway`` cell is CLOSED unless ``grid.doors`` records it as ``"O"``
+    (open). A doorway with no entry (or ``grid.doors is None``) is therefore
+    CLOSED (locked) — the default. Floors/walls are never in the set (they
+    are not doors).
+    """
+    doors = grid.doors or {}
+    closed: set[tuple[int, int]] = set()
+    for y in range(grid.height):
+        for x in range(grid.width):
+            if grid.cells[y][x] == "doorway" and doors.get(f"{x},{y}") != "O":
+                closed.add((x, y))
+    return frozenset(closed)
+
+
+def _closed_set(grid: Grid, doors: frozenset[tuple[int, int]] | None) -> frozenset[tuple[int, int]]:
+    """Resolve the optional ``doors`` parameter: use the caller's set when
+    given, else derive it from ``grid.doors`` (all-locked for a bare grid)."""
+    return doors if doors is not None else _closed_doors(grid)
+
+
+def walkable(
+    grid: Grid, x: int, y: int, doors: frozenset[tuple[int, int]] | None = None
+) -> bool:
     """True if ``(x, y)`` is in-bounds AND ``cells[y][x]`` is ``"floor"``
-    or ``"doorway"``.  Walls and out-of-bounds are blocked."""
+    or an OPEN ``doorway`` (a closed door is not walkable — spec §5.1).  Walls,
+    out-of-bounds, and closed doors are blocked."""
     if not _in_bounds(grid, x, y):
         return False
-    return grid.cells[y][x] in WALKABLE_CELLS
+    if grid.cells[y][x] not in WALKABLE_CELLS:
+        return False
+    if (x, y) in _closed_set(grid, doors):
+        return False  # a CLOSED door is not walkable
+    return True
 
 
-def is_valid_step(grid: Grid, a: tuple[int, int], b: tuple[int, int]) -> bool:
+def is_valid_step(
+    grid: Grid,
+    a: tuple[int, int],
+    b: tuple[int, int],
+    doors: frozenset[tuple[int, int]] | None = None,
+) -> bool:
     """True if moving from ``a`` to ``b`` is a legal one-step move.
 
-    Rules (PROJECT.md §6 — the anti-cheat rule):
+    Rules (PROJECT.md §6 — the anti-cheat rule, door-aware per §5.1):
       * ``a`` and ``b`` are distinct (x, y) pairs.
       * King-move adjacency: ``max(|dx|, |dy|) == 1``.
-      * ``b`` is walkable (floor/doorway, in-bounds).
+      * ``b`` is walkable (floor/open doorway, in-bounds; a closed door is
+        NOT walkable).
       * If the move is DIAGONAL (both dx and dy nonzero), BOTH orthogonal
         elbow cells — ``(a.x + dx, a.y)`` and ``(a.x, a.y + dy)`` — must be
-        walkable.  Diagonally squeezing around a wall corner is forbidden.
+        walkable.  Diagonally squeezing around a wall corner (or between two
+        closed doors) is forbidden.
     """
     a = _as_cell(a)
     b = _as_cell(b)
@@ -80,12 +126,13 @@ def is_valid_step(grid: Grid, a: tuple[int, int], b: tuple[int, int]) -> bool:
     dy = b[1] - a[1]
     if max(abs(dx), abs(dy)) != 1:
         return False
-    if not walkable(grid, b[0], b[1]):
+    closed = _closed_set(grid, doors)
+    if not walkable(grid, b[0], b[1], closed):
         return False
     if dx != 0 and dy != 0:  # diagonal: forbid corner cutting
-        if not walkable(grid, a[0] + dx, a[1]):
+        if not walkable(grid, a[0] + dx, a[1], closed):
             return False
-        if not walkable(grid, a[0], a[1] + dy):
+        if not walkable(grid, a[0], a[1] + dy, closed):
             return False
     return True
 
@@ -103,14 +150,23 @@ def _heuristic(a: tuple[int, int], b: tuple[int, int]) -> int:
 
 
 def find_path(
-    grid: Grid, start: tuple[int, int], goal: tuple[int, int]
+    grid: Grid,
+    start: tuple[int, int],
+    goal: tuple[int, int],
+    doors: frozenset[tuple[int, int]] | None = None,
 ) -> list[tuple[int, int]] | None:
     """A* over the 8 directions, using :func:`is_valid_step` for expansion.
+
+    ``doors`` is the optional closed-door set (see :func:`walkable`); when
+    omitted it is derived from ``grid.doors`` ONCE (not per step), so A*
+    routes around closed doors and through open ones with only a constant
+    factor of extra cost (spec §5.2 / AC15).
 
     Returns the list of (x, y) cells from ``start`` to ``goal`` inclusive,
     or ``None`` if no path exists.  Semantics:
 
-    * start or goal not walkable (wall / out of bounds) → ``None``.
+    * start or goal not walkable (wall / closed door / out of bounds) →
+      ``None``.
     * ``start == goal`` (on a walkable cell) → ``[start]``.
     * A diagonal step only expands when the corner-cut rule allows it, so a
       returned path never squeezes around a wall corner and never visits a
@@ -120,7 +176,8 @@ def find_path(
     """
     start = _as_cell(start)
     goal = _as_cell(goal)
-    if not walkable(grid, *start) or not walkable(grid, *goal):
+    closed_doors = _closed_set(grid, doors)
+    if not walkable(grid, *start, closed_doors) or not walkable(grid, *goal, closed_doors):
         return None
     if start == goal:
         return [start]
@@ -149,7 +206,7 @@ def find_path(
         g_current = g_score[current]
         for dx, dy in _EIGHT_DIRS:
             nxt = (cx + dx, cy + dy)
-            if nxt in closed or not is_valid_step(grid, current, nxt):
+            if nxt in closed or not is_valid_step(grid, current, nxt, closed_doors):
                 continue
             step_cost = DIAGONAL_COST if (dx != 0 and dy != 0) else ORTHOGONAL_COST
             tentative = g_current + step_cost
@@ -192,36 +249,45 @@ def _bresenham(
             y += sy
 
 
-def _cell_is_wall(grid: Grid, cell: tuple[int, int]) -> bool:
-    """True if ``cell`` is an in-bounds ``wall`` cell (out-of-bounds → False).
+def _blocks_sight(grid: Grid, cell: tuple[int, int],
+                  closed: frozenset[tuple[int, int]]) -> bool:
+    """True if ``cell`` blocks line of sight: an in-bounds ``wall`` cell OR a
+    CLOSED door cell (a closed door is a wall to sight — spec §5.1).
 
-    Used by :func:`has_line_of_sight` for the corner-cut elbow test.  For an
-    in-bounds sight line the elbows are always in-bounds, so the OOB guard is
-    belt-and-braces.
+    Used by :func:`has_line_of_sight` for both the on-line cell test and the
+    corner-cut elbow test.  For an in-bounds sight line the elbows are always
+    in-bounds, so the OOB guard is belt-and-braces.
     """
     x, y = _as_cell(cell)
-    return _in_bounds(grid, x, y) and grid.cells[y][x] == "wall"
+    if not _in_bounds(grid, x, y):
+        return False
+    return grid.cells[y][x] == "wall" or (x, y) in closed
 
 
 def has_line_of_sight(
-    grid: Grid, a: tuple[int, int], b: tuple[int, int]
+    grid: Grid,
+    a: tuple[int, int],
+    b: tuple[int, int],
+    doors: frozenset[tuple[int, int]] | None = None,
 ) -> bool:
-    """True if a straight line from ``a`` to ``b`` is not blocked by a wall.
+    """True if a straight line from ``a`` to ``b`` is not blocked.
 
     The line is digitized with Bresenham; it is blocked (→ False) when
     EITHER:
 
-    * ANY cell strictly between ``a`` and ``b`` is a ``wall`` cell, OR
-    * a DIAGONAL step of the line squeezes between two wall corners — i.e.
-      BOTH orthogonal "elbow" cells the diagonal touches are walls.  This
-      mirrors the movement no-corner-cut rule (``is_valid_step``): a sight
-      line may not "cut" through the zero-width gap between two walls.  A
-      diagonal that merely grazes a single wall corner (one elbow open)
-      still passes — the wall is adjacent to the line, not on it.
+    * ANY cell strictly between ``a`` and ``b`` is a ``wall`` cell OR a
+      CLOSED door cell, OR
+    * a DIAGONAL step of the line squeezes between two wall/closed-door
+      corners — i.e. BOTH orthogonal "elbow" cells the diagonal touch are
+      walls or closed doors.  This mirrors the movement no-corner-cut rule
+      (``is_valid_step``): a sight line may not "cut" through the zero-width
+      gap between two blockers.  A diagonal that merely grazes a single
+      blocker corner (one elbow open — floor/open door) still passes.
 
-    ``a == b`` → True.  The endpoints themselves never block (entities can
-    stand on the cells they occupy).  Used by the awareness three-tier
-    model and the optional fog-of-war toggle.
+    An OPEN door is sight-transparent (exactly today's ``doorway``).  ``a ==
+    b`` → True.  The endpoints themselves never block (entities can stand on
+    the cells they occupy).  Used by the awareness three-tier model, the
+    explored-map ``visible_cells``, and the optional fog-of-war toggle.
     """
     a = _as_cell(a)
     b = _as_cell(b)
@@ -229,16 +295,18 @@ def has_line_of_sight(
         return True
     if not (_in_bounds(grid, *a) and _in_bounds(grid, *b)):
         return False
+    closed = _closed_set(grid, doors)
     prev: tuple[int, int] | None = None
     for x, y in _bresenham(a[0], a[1], b[0], b[1]):
         if prev is not None:
             px, py = prev
             if x != px and y != py:  # diagonal step: check corner cutting
-                if _cell_is_wall(grid, (x, py)) and _cell_is_wall(grid, (px, y)):
-                    return False  # squeezed between two wall corners
+                if _blocks_sight(grid, (x, py), closed) \
+                        and _blocks_sight(grid, (px, y), closed):
+                    return False  # squeezed between two wall/door corners
         if (x, y) == b:
             break  # endpoint never blocks; cells after are not "between"
-        if (x, y) != a and grid.cells[y][x] == "wall":
-            return False  # a wall lies directly on the sight line
+        if (x, y) != a and _blocks_sight(grid, (x, y), closed):
+            return False  # a wall or closed door lies on the sight line
         prev = (x, y)
     return True

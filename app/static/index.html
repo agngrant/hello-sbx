@@ -158,6 +158,13 @@
           <span class="legend-chip"><i class="swatch floor"></i>floor</span>
           <span class="legend-chip"><i class="swatch wall"></i>wall</span>
           <span class="legend-chip"><i class="swatch doorway"></i>doorway</span>
+          <!-- Door states (door-features spec §7.4): visible to BOTH GM and
+               players (the GM edits doors, players open/close them) —
+               intentionally NOT gated by body.is-gm. -->
+          <span class="legend-sep legend-doors">|</span>
+          <span class="legend-chip legend-doors"><i class="swatch door-open"></i>open door</span>
+          <span class="legend-chip legend-doors"><i class="swatch door-unlocked"></i>closed (unlocked)</span>
+          <span class="legend-chip legend-doors"><i class="swatch door-locked"></i>locked</span>
           <span class="legend-sep">|</span>
           <span class="legend-chip"><i class="dot dot-tri team-party"></i>friend</span>
           <span class="legend-chip"><i class="dot dot-circle team-neutral"></i>neutral</span>
@@ -235,7 +242,17 @@
         <button class="tool-btn" data-tool="select" aria-pressed="true">◉ Select</button>
         <button class="tool-btn" data-tool="floor" aria-pressed="false">▢ Floor</button>
         <button class="tool-btn" data-tool="wall" aria-pressed="false">▨ Wall</button>
-        <button class="tool-btn" data-tool="doorway" aria-pressed="false">▣ Door</button>
+        <button class="tool-btn" data-tool="doorway" aria-pressed="false">▣ Doorway</button>
+        <!-- Door tool (door-features spec §7.5): GM-only. Pick an action,
+             then click a door cell to apply it. The sub-row is revealed
+             only while the Door tool is armed. -->
+        <button class="tool-btn" data-tool="door" aria-pressed="false">🚪 Door</button>
+        <span id="door-action-row" class="door-action-row" hidden>
+          <button class="door-action" data-door-action="unlock" aria-pressed="true">Unlock</button>
+          <button class="door-action" data-door-action="lock" aria-pressed="false">Lock</button>
+          <button class="door-action" data-door-action="open" aria-pressed="false">Open</button>
+          <button class="door-action" data-door-action="close" aria-pressed="false">Close</button>
+        </span>
       </div>
       <label id="override-wrap" class="gm-only" for="override-toggle">
         <input id="override-toggle" type="checkbox" disabled

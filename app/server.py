@@ -274,6 +274,28 @@ def build_app() -> FastAPI:
     return app
 
 
+def _map_doors(grid: Grid) -> dict[str, str] | None:
+    """The additive ``doors`` object for a REST map response (spec §8.2).
+
+    Emitted as the FULL materialized object (per A9/I5/AC10, every doorway's
+    current state, unrecorded doorways defaulting to "L") whenever the grid
+    has a doorway cell; ``None`` (the key is omitted) for a grid with NO
+    doorway cells. Uses ``grid.doors_for_wire()`` — the wire policy (differs
+    from ``Grid.to_dict``, which emits the key only when recorded state
+    exists). Absent/None on the wire => the client treats every door as
+    locked (the safe default, A2).
+    """
+    return grid.doors_for_wire()
+
+
+def _with_doors(payload: dict[str, Any], grid: Grid) -> dict[str, Any]:
+    """Return ``payload`` with the additive ``doors`` key added (if any)."""
+    doors = _map_doors(grid)
+    if doors is not None:
+        payload["doors"] = doors
+    return payload
+
+
 def _make_maps_detail_route() -> Any:
     """GET /api/maps/{id} with EXACT old classification.
 
@@ -298,17 +320,18 @@ def _make_maps_detail_route() -> Any:
         if entry is None:
             raise HTTPException(status_code=404)
         grid: Grid = entry["grid"]
+        body: dict[str, Any] = {
+            "id": map_id,
+            "name": grid.name,
+            "width": grid.width,
+            "height": grid.height,
+            "image": grid.image,
+            "cells": grid.cells,
+            "entities": list(entry["entities"].values()),
+            "players": list(entry["players"].values()),
+        }
         return JSONResponse(
-            {
-                "id": map_id,
-                "name": grid.name,
-                "width": grid.width,
-                "height": grid.height,
-                "image": grid.image,
-                "cells": grid.cells,
-                "entities": list(entry["entities"].values()),
-                "players": list(entry["players"].values()),
-            },
+            _with_doors(body, grid),
             headers={"Cache-Control": "no-store"},
         )
 
@@ -428,14 +451,17 @@ async def _handle_upload(request: Any) -> JSONResponse:
     _register_map(map_id, grid)
 
     return JSONResponse(
-        {
-            "id": map_id,
-            "name": grid.name,
-            "width": grid.width,
-            "height": grid.height,
-            "cells": grid.cells,
-            "thumbnail": grid_to_thumbnail_png(grid),
-        },
+        _with_doors(
+            {
+                "id": map_id,
+                "name": grid.name,
+                "width": grid.width,
+                "height": grid.height,
+                "cells": grid.cells,
+                "thumbnail": grid_to_thumbnail_png(grid),
+            },
+            grid,
+        ),
         headers={"Cache-Control": "no-store"},
     )
 
@@ -494,14 +520,17 @@ async def _handle_generate(request: Any) -> JSONResponse:
     _register_map(map_id, grid)
 
     return JSONResponse(
-        {
-            "id": map_id,
-            "name": grid.name,
-            "width": grid.width,
-            "height": grid.height,
-            "cells": grid.cells,
-            "thumbnail": grid_to_thumbnail_png(grid),
-        },
+        _with_doors(
+            {
+                "id": map_id,
+                "name": grid.name,
+                "width": grid.width,
+                "height": grid.height,
+                "cells": grid.cells,
+                "thumbnail": grid_to_thumbnail_png(grid),
+            },
+            grid,
+        ),
         headers={"Cache-Control": "no-store"},
     )
 
@@ -545,6 +574,12 @@ async def _handle_paint(map_id: str, request: Any) -> JSONResponse:
         )
 
     grid.cells[y][x] = cell_type
+    # D4 (door-features spec §9): the REST paint route shares the SAME single
+    # sync point as the WS paint handler, so door state can never desync from
+    # the cell type on either surface (paint a doorway → door created locked;
+    # paint floor/wall over a door → state deleted). The response shape is
+    # unchanged (frozen) — a subsequent GET reflects the door state.
+    grid.sync_doors_after_cell_set(x, y)
     return JSONResponse(
         {"ok": True, "x": x, "y": y, "cell_type": cell_type},
         headers={"Cache-Control": "no-store"},

@@ -89,6 +89,7 @@ const els = {
   // map: control bar
   overrideToggle: $("#override-toggle"),
   controlHint: $("#control-hint"),
+  doorActionRow: $("#door-action-row"),
   scrim: $("#scrim"),
 };
 
@@ -113,7 +114,11 @@ const state = {
   fog: false,
   selectedEntityId: null,
   expectCreatedToken: false, // GM "Add" armed: the next state auto-selects the new token
-  tool: "select",       // "select" | "floor" | "wall" | "doorway"
+  tool: "select",       // "select" | "floor" | "wall" | "doorway" | "door"
+  doors: {},            // door feature §7.3: client copy of map.doors,
+                        //   "<x>,<y>" -> "L"|"U"|"O" ({} when absent ⇒ all
+                        //   doors render locked, the safe default)
+  doorAction: "unlock", // armed GM door action (door tool sub-button)
   painting: false,
   lastHovered: null,    // last hovered cell (GM entity spawn target)
   uploadSource: "upload", // "upload" | "generate" — client-side only (spec §6)
@@ -262,6 +267,13 @@ function applyState(msg) {
   // "visibility" key at all, and a malformed matrix (wrong lengths/charset)
   // is treated as absent. The render branch (layoutCanvas) additionally
   // gates on state.role === "player" before drawing with it.
+  // state.doors is set in applyState (door-features spec §7.3).
+  // Doors: wire the door states (door-features spec §7.3). The payload
+  // field is additive: absent (or malformed — wrong type, bad keys,
+  // bad state chars) ⇒ {} ⇒ every doorway renders locked. A validated
+  // object replaces what we had wholesale, so a door painted away (its
+  // key deleted server-side) can never linger in a stale client copy.
+  state.doors = validateDoors(msg.map ? msg.map.doors : undefined);
   state.visibility = validateVisibilityMatrix(msg.visibility, state.grid);
   const fogChanged = state.fog !== msg.fog;
   state.fog = !!msg.fog;
@@ -457,7 +469,19 @@ const T = {
   exploredWall: "#4b5563",
   exploredWallHatch: "#3f4753",
   exploredWallBorder: "#3f4753",
-  exploredDoor: "#8b94a3",
+  exploredDoor: "#8b94a3",   // deprecated alias: === exploredDoorOpen
+  // Door states (door-features spec §7.1). A door is a `doorway` cell +
+  // a state, rendered floor-based with a state-colored border + glyph
+  // (arch = open, bar = closed-unlocked, padlock = closed-locked). All
+  // three full-tier colors are distinct from floor (#efe9dc) and wall
+  // (#3b4252); the explored variants are the same art desaturated into
+  // the grey family (value-distinct from the explored floor #6b7280).
+  doorOpen: "#d97706",         // open (O): today's doorway amber + arch
+  doorUnlocked: "#f59f00",     // closed, unlocked (U): lighter amber + bar
+  doorLocked: "#e03131",       // closed, locked (L): red + padlock glyph
+  exploredDoorOpen: "#8b94a3",      // E tier: the explored-door grey
+  exploredDoorUnlocked: "#9a8f7a",  // E tier: desaturated amber
+  exploredDoorLocked: "#a06b6b",    // E tier: desaturated red
   gridLineDim: "rgba(217, 209, 189, 0.3)",
   accent: "#4dabf7",
   danger: "#e03131",
@@ -494,6 +518,91 @@ function validateVisibilityMatrix(vis, grid) {
     }
   }
   return vis;
+}
+
+/* ───────────────────── Doors: state object + per-cell lookup ─────────────
+   docs/design/door-features.md §7.3. `map.doors` is an additive wire field:
+   an object "<x>,<y>" -> "L" (closed+locked) | "U" (closed, unlocked) |
+   "O" (open). A missing key — on a doorway cell — means the door is in the
+   DEFAULT state, which is locked ("L"). A malformed payload (wrong type,
+   bad keys, bad state chars) is treated as {} (all locked) — defensive,
+   never crashes the render (cf. validateVisibilityMatrix). */
+const DOOR_STATES = ["L", "U", "O"];
+function validateDoors(doors) {
+  if (doors == null) return {};
+  if (typeof doors !== "object" || Array.isArray(doors)) return {};
+  const clean = {};
+  for (const key of Object.keys(doors)) {
+    const m = /^(\d+),(\d+)$/.exec(key);
+    if (!m) return {};
+    if (DOOR_STATES.indexOf(doors[key]) === -1) return {};
+    clean[key] = doors[key];
+  }
+  return clean;
+}
+
+/* The door state at (x,y): "L"|"U"|"O" for a `doorway` cell (default "L"),
+   null for a non-doorway cell (no door to render/act on). Mirrors the
+   server's Grid.door_state_at on the client. */
+function doorStateAt(x, y) {
+  const g = state.grid;
+  if (!g || !g.cells) return null;
+  const row = g.cells[y];
+  if (!row || row[x] !== "doorway") return null;
+  return state.doors ? state.doors[`${x},${y}`] || "L" : "L";
+}
+
+/* The border/glyph color for a door state at visibility tier t (§7.1): the
+   full-detail amber/red family for "S" (GM + preview + in-sight), the
+   desaturated grey family for "E" (explored memory). */
+function doorColor(state, t) {
+  if (t === "E") {
+    if (state === "O") return T.exploredDoorOpen;
+    if (state === "U") return T.exploredDoorUnlocked;
+    return T.exploredDoorLocked;
+  }
+  if (state === "O") return T.doorOpen;
+  if (state === "U") return T.doorUnlocked;
+  return T.doorLocked;
+}
+
+/* The door glyph over the floor base (§7.2): the open door keeps today's
+   arch (byte-identical art); a closed-unlocked door draws a centered
+   horizontal "bar"; a closed-locked door draws a padlock (bar + a small
+   lock notch above it). `s` = cell size in px, (px,py) = cell origin. */
+function drawDoorGlyph(ctx, state, px, py, s) {
+  const r = s * 0.28;
+  const cx = px + s / 2;
+  const cy = py + s / 2;
+  if (state === "O") {
+    // Arch — identical geometry to the pre-feature doorway glyph.
+    ctx.beginPath();
+    ctx.moveTo(cx - r, cy + r * 0.8);
+    ctx.lineTo(cx - r, cy - r * 0.4);
+    ctx.lineTo(cx + r, cy - r * 0.4);
+    ctx.lineTo(cx + r, cy + r * 0.8);
+    ctx.stroke();
+    return;
+  }
+  // Bar — the closed door's center beam.
+  const by = cy + r * 0.8;
+  ctx.beginPath();
+  ctx.moveTo(cx - r, by);
+  ctx.lineTo(cx + r, by);
+  ctx.stroke();
+  if (state === "L") {
+    // Padlock notch — a small hook above the bar (distinct from the plain
+    // "U" bar, and distinct from the "O" arch, at the 8px min cell size).
+    const top = cy - r * 0.6;
+    const h = Math.max(2, s * 0.13);
+    ctx.beginPath();
+    ctx.moveTo(cx, by);
+    ctx.lineTo(cx, top + h);
+    ctx.moveTo(cx - h, top + h);
+    ctx.arc(cx, top + h, h, Math.PI, 0, true);
+    ctx.lineTo(cx + h, top);
+    ctx.stroke();
+  }
 }
 
 /* ───────────────────────────── Canvas: layout + shared cell renderer ── */
@@ -565,10 +674,10 @@ function drawGridOnCanvas(canvas, ctx, visibility = null) {
   const palette = (t) => (t === "E")
     ? { floor: T.exploredFloor, wallFill: T.exploredWall,
         hatch: T.exploredWallHatch, border: T.exploredWallBorder,
-        door: T.exploredDoor, line: T.gridLineDim }
+        door: T.exploredDoorOpen, line: T.gridLineDim }
     : { floor: T.floor, wallFill: T.wallFill,
         hatch: T.wallHatch, border: T.wallBorder,
-        door: T.doorway, line: T.gridLine };
+        door: T.doorOpen, line: T.gridLine };
 
   // ── 1. Floor / floor-tinted base + grid lines ──
   if (!vis) {
@@ -716,27 +825,28 @@ function drawGridOnCanvas(canvas, ctx, visibility = null) {
     ctx.stroke();
   }
 
-  // Doorways: border + arch glyph, per tier (full amber or desaturated grey).
+  // Doors (door-features spec §7.2): every `doorway` cell is a door in a
+  // state ("L" locked / "U" unlocked / "O" open, §7.3 — absent entry ⇒
+  // locked). A door cell is floor-based: it gets its tier's floor base +
+  // grid line and NO wall hatch; the state decides the border/glyph color
+  // and the glyph (arch = open, bar = closed-unlocked, padlock =
+  // closed-locked). Both tiers are state-driven; the "H" tier is still
+  // skipped (a hidden door is not drawn), so GM/preview (no matrix) and a
+  // player's S cells render full detail while the player's E cells render
+  // the desaturated grey variants.
   for (let y = 0; y < g.height; y++) {
     for (let x = 0; x < g.width; x++) {
       if (g.cells[y][x] !== "doorway") continue;
       const t = tier(x, y);
       if (t === "H") continue;
+      const st = doorStateAt(x, y) || "L";
       const px = ox + x * s;
       const py = oy + y * s;
-      ctx.strokeStyle = palette(t).door;
+      ctx.strokeStyle = doorColor(st, t);
       ctx.lineWidth = Math.max(2, Math.min(3, s / 8));
       ctx.strokeRect(px + 1.5, py + 1.5, s - 3, s - 3);
-      const r = s * 0.28;
-      const cx = px + s / 2;
-      const cy = py + s / 2;
       ctx.lineWidth = Math.max(1.5, s / 24);
-      ctx.beginPath();
-      ctx.moveTo(cx - r, cy + r * 0.8);
-      ctx.lineTo(cx - r, cy - r * 0.4);
-      ctx.lineTo(cx + r, cy - r * 0.4);
-      ctx.lineTo(cx + r, cy + r * 0.8);
-      ctx.stroke();
+      drawDoorGlyph(ctx, st, px, py, s);
     }
   }
 
@@ -859,7 +969,9 @@ function drawEntitiesAndDots(ctx, s, ox, oy) {
     const hy = oy + hoverCell.y * s;
     if (state.tool !== "select") {
       const fill = state.tool === "wall" ? T.wallFill
-                 : state.tool === "doorway" ? T.doorway : T.floor;
+                 : state.tool === "doorway" ? T.doorway
+                 : state.tool === "door" ? doorColor(state.doorAction, "S")
+                 : T.floor;
       ctx.globalAlpha = 0.5;
       ctx.fillStyle = fill;
       ctx.fillRect(hx, hy, s, s);
@@ -1216,11 +1328,44 @@ els.canvas.addEventListener("click", (ev) => {
   if (!c || !state.joined || !state.grid) return;
   const t = state.grid.cells[c.y][c.x];
 
-  // Paint mode (GM): handled on pointerdown; clicks don't move.
-  if (state.tool !== "select") return;
-
   const gm = state.role === "gm";
   const hit = entityAtCell(c.x, c.y);
+
+  // Paint mode (GM): floor/wall/doorway apply on pointerdown; the DOOR
+  // tool applies the armed action on click (doors never optimistic-mutate —
+  // the server is authoritative, the state broadcast reconciles).
+  if (state.tool !== "select") {
+    if (state.tool === "door") {
+      if (!gm) return;                          // players have no door tool
+      if (t !== "doorway") return;              // no client gating: a bad
+                                                 // cell gets the server's
+                                                 // "not a doorway" toast
+      sendDoor(c.x, c.y, state.doorAction);
+    }
+    return;
+  }
+
+  // Player tapping a doorway cell acts on the DOOR, not movement (a door
+  // is a doorway, never a floor, so there is no ambiguity — door-features
+  // spec §7.6): the client sends the action, the server decides (errors
+  // like "door is locked" surface as toasts via the normal error path).
+  //   L (locked)   -> "open": the server replies "door is locked" — the
+  //                    player cannot unlock, the toast is the feedback
+  //   U (closed,   -> "open": the inverse action for a closed door
+  //       unlocked)   (an unlocked door opens on tap)
+  //   O (open)     -> "close": the inverse action for an open door
+  // (A deviation from the §7.6 body's "U → close, O → open" letters is
+  // noted in the build report: that mapping would make the player's tap
+  // unable to EVER open a door — always "already closed" — contradicting
+  // the requirement "doors can be opened and closed" and the task's
+  // explicit "send the inverse action (open if closed, close if open)").
+  // A tap on a cell occupied by an entity is NOT a door action (entity
+  // selection/movement keeps priority).
+  if (!gm && t === "doorway" && !hit) {
+    const st = doorStateAt(c.x, c.y) || "L";
+    sendDoor(c.x, c.y, st === "O" ? "close" : "open");
+    return;
+  }
 
   // GM: clicking an entity selects it (first tap).
   if (gm && hit) { selectEntity(hit.id); return; }
@@ -1252,12 +1397,22 @@ els.canvas.addEventListener("click", (ev) => {
 /* GM paint (deduped: one message per cell per change). */
 let lastPainted = null;
 function paintCell(x, y) {
+  if (!state.grid || state.tool === "select" || state.tool === "door") return;
   const key = `${x},${y},${state.tool}`;
   if (lastPainted === key) return;
   lastPainted = key;
   wsSend({ type: "paint", x, y, cell_type: state.tool });
   // optimistic local update (server state reconciles for everyone)
   state.grid.cells[y][x] = state.tool;
+}
+
+/* Door actions (door-features spec §7.5/§7.6): the ONLY door wire frame.
+   GM: any of unlock/lock/open/close (from the Door tool's armed action).
+   Player: open/close only (from tapping a doorway cell). No optimistic
+   local mutation — the server is authoritative and the next state
+   broadcast (which carries map.doors) reconciles the render. */
+function sendDoor(x, y, action) {
+  wsSend({ type: "door", x, y, action });
 }
 
 /* ───────────────────────────── GM tools ───────────────────────────── */
@@ -1318,11 +1473,13 @@ function updateControlHint() {
       } else {
         hint = "Click an entity to select it, then a tile";
       }
+    } else if (state.tool === "door") {
+      hint = `Click a door to ${state.doorAction}`;
     } else {
       hint = `Drag on the map to paint ${state.tool}`;
     }
   } else {
-    hint = "Tap a tile to move your character";
+    hint = "Tap a tile to move your character · tap a door to open/close it";
   }
   els.controlHint.textContent = hint;
 }
@@ -1333,8 +1490,12 @@ function setTool(tool) {
   $$("#paint-group .tool-btn").forEach((btn) => {
     btn.setAttribute("aria-pressed", String(btn.dataset.tool === tool));
   });
+  // The Door tool's action sub-buttons are only visible while the tool is
+  // armed (hidden via [hidden] otherwise — CSS).
+  els.doorActionRow.hidden = tool !== "door";
   els.canvasWrap.classList.remove(
-    "mode-select", "mode-paint-floor", "mode-paint-wall", "mode-paint-doorway"
+    "mode-select", "mode-paint-floor", "mode-paint-wall",
+    "mode-paint-doorway", "mode-paint-door"
   );
   els.canvasWrap.classList.add(
     tool === "select" ? "mode-select" : `mode-paint-${tool}`
@@ -1342,9 +1503,22 @@ function setTool(tool) {
   updateControlHint();
 }
 
+// GM Door tool: pick the armed action (default "unlock"), then click a
+// door cell to apply it (same click-to-apply ergonomics as paint).
+function setDoorAction(action) {
+  if (state.tool !== "door") return;
+  state.doorAction = action;
+  $$("#paint-group .door-action").forEach((btn) => {
+    btn.setAttribute("aria-pressed", String(btn.dataset.doorAction === action));
+  });
+  updateControlHint();
+}
+
 $("#paint-group").addEventListener("click", (ev) => {
   const btn = ev.target.closest(".tool-btn");
-  if (btn) setTool(btn.dataset.tool);
+  if (btn) { setTool(btn.dataset.tool); return; }
+  const act = ev.target.closest(".door-action");
+  if (act) setDoorAction(act.dataset.doorAction);
 });
 
 els.newEntityName.addEventListener("input", () => {

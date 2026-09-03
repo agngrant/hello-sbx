@@ -67,6 +67,11 @@ NOT_ALLOWED = "not allowed"
 #: the GM itself has NO token — docs/design/gm-controller.md §2.3).
 CREATABLE_KINDS = ("npc", "enemy")
 
+#: Door actions (docs/design/door-features.md §4/§18): the client→server
+#: ``{type:"door", x, y, action}`` message. ``unlock``/``lock`` are GM-only;
+#: ``open``/``close`` are allowed for any client while the door is unlocked.
+DOOR_ACTIONS = ("unlock", "lock", "open", "close")
+
 
 def _as_int(value: Any) -> int | None:
     """Coerce a JSON int; reject bools and non-integers (→ ``None``)."""
@@ -349,12 +354,23 @@ class GameSession:
         simply never added (D4 — the GM payload is untouched by the
         feature). Every player snapshot (welcome, broadcast, request_state)
         routes through here, all under the session lock.
+
+        Doors (door-features spec §8.1/A9/I5): the additive ``map.doors``
+        field carries the FULL door object — every doorway's current state
+        (unrecorded doorways default to ``"L"``) — whenever the grid has a
+        doorway cell, so the wire is unambiguous (a door open/close
+        broadcast reaches every viewer up to date); the key is absent when
+        the grid has no doorways (the client ⇒ all locked).
         """
         is_gm = viewer.role == "gm"
         own = self.entities.get(viewer.entity_id) if viewer.entity_id else None
+        map_dict = self.grid.to_dict()
+        doors_wire = self.grid.doors_for_wire()
+        if doors_wire is not None:
+            map_dict["doors"] = doors_wire
         payload = {
             "type": "state",
-            "map": self.grid.to_dict(),
+            "map": map_dict,
             "players": [p.to_dict() for p in self.players.values()],
             "entities": [e.to_dict() for e in self.entities.values()] if is_gm else [],
             "you_entity": own.to_dict() if (own is not None and not is_gm) else None,
@@ -525,6 +541,8 @@ class GameSession:
             return self._gm_only(is_gm, lambda: self._on_set_fog(msg))
         if mtype == "use_map":
             return self._gm_only(is_gm, lambda: self._on_use_map(msg))
+        if mtype == "door":
+            return self._on_door(player, is_gm, msg)
         return {"type": "error", "message": UNKNOWN_TYPE}
 
     # -- helpers ------------------------------------------------------------
@@ -757,8 +775,96 @@ class GameSession:
             # Same primitive as the REST paint route (app.grid.set_cell
             # semantics: bounds-checked, in-place mutation of the grid).
             self.grid.cells[y][x] = cell_type
+            # D4 (door-features spec §9): keep door state in sync with the
+            # cell type (paint a doorway → door created locked; paint
+            # floor/wall over a door → state deleted).
+            self.grid.sync_doors_after_cell_set(x, y)
             self._run_b(self._broadcast())
         return None
+
+    def _on_door(self, player: Player, is_gm: bool, msg: dict[str, Any]) -> dict[str, Any] | None:
+        """The door state machine + permissions (door-features spec §4).
+
+        A client asks to ``unlock``/``lock``/``open``/``close`` the door on
+        the ``doorway`` cell at ``(x, y)``. Validation is the spec's
+        deterministic order (AC3), first failure wins:
+
+          1. ``x``/``y`` are ints (bools rejected) → ``"x and y must be
+             integers"``
+          2. in bounds → ``"destination out of bounds"``
+          3. the cell is a ``doorway`` → ``"not a doorway"``
+          4. ``action`` is valid → ``"action must be one of unlock/lock/
+             open/close"``
+          5. the ``(state, action)`` transition is legal (with the
+             occupancy guard folded in — a transition that would make the
+             door closed with a token on it is rejected) → the state-
+             specific error
+          6. the action is role-allowed (``unlock``/``lock`` are GM-only)
+             → ``"not allowed"``
+
+        On success the state is applied and the ``state`` broadcast carries
+        the new ``map.doors`` (no per-client reply, cf. ``paint``). The
+        state machine (spec §4.1): ``L ─GM unlock→ U ─open→ O ─close→ U``;
+        GM ``lock`` from ``U`` or ``O`` (force-closes ``O``) → ``L``. Players
+        may only ``open``/``close`` an UNLOCKED door.
+        """
+        x = _as_int(msg.get("x"))
+        y = _as_int(msg.get("y"))
+        if x is None or y is None:
+            return {"type": "error", "message": "x and y must be integers"}
+        with self._lock:
+            if not (0 <= x < self.grid.width and 0 <= y < self.grid.height):
+                return {"type": "error", "message": "destination out of bounds"}
+            if self.grid.cells[y][x] != "doorway":
+                return {"type": "error", "message": "not a doorway"}
+            action = msg.get("action")
+            if action not in DOOR_ACTIONS:
+                return {"type": "error",
+                        "message": "action must be one of unlock/lock/open/close"}
+            cur = self.grid.door_state_at(x, y)  # "L" | "U" | "O"
+            # Transition legality (before role, so a state failure is the
+            # more informative one — spec §4.3). The occupancy guard is
+            # folded in: it fires on exactly the transitions that make the
+            # door CLOSED (``close``, and ``lock`` from ``open`` — A5), never
+            # on ``lock`` from ``unlocked`` (already closed).
+            if action == "open" and cur == "O":
+                return {"type": "error", "message": "door is already open"}
+            if action == "open" and cur == "L":
+                return {"type": "error", "message": "door is locked"}
+            if action == "close" and cur == "L":
+                return {"type": "error", "message": "door is locked"}
+            if action == "close" and cur != "O":
+                return {"type": "error", "message": "door is already closed"}
+            if action == "close" and self._any_entity_at(x, y):
+                return {"type": "error",
+                        "message": "cannot close a door with a token on it"}
+            if action == "unlock" and cur != "L":
+                return {"type": "error", "message": "door is already unlocked"}
+            if action == "lock" and cur == "L":
+                return {"type": "error", "message": "door is already locked"}
+            if action == "lock" and cur == "O" and self._any_entity_at(x, y):
+                # lock-while-open force-closes → same occupancy guard as close.
+                return {"type": "error",
+                        "message": "cannot close a door with a token on it"}
+            # Role: unlock/lock are GM-only (open/close already gated by the
+            # locked/unlocked state above, so a locked door reports
+            # "door is locked" even for a player).
+            if action in ("unlock", "lock") and not is_gm:
+                return {"type": "error", "message": NOT_ALLOWED}
+            new_state = {
+                ("unlock", "L"): "U",
+                ("open", "U"): "O",
+                ("close", "O"): "U",
+                ("lock", "U"): "L",
+                ("lock", "O"): "L",
+            }[(action, cur)]
+            self.grid.set_door(x, y, new_state)
+            self._run_b(self._broadcast())
+        return None
+
+    def _any_entity_at(self, x: int, y: int) -> bool:
+        """True if any entity occupies ``(x, y)`` (D3 occupancy guard)."""
+        return any(e.x == x and e.y == y for e in self.entities.values())
 
     def _on_set_fog(self, msg: dict[str, Any]) -> dict[str, Any] | None:
         # Wire compatibility: the ``fog`` flag is stored and broadcast, but

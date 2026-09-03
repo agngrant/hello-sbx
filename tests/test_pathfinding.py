@@ -35,16 +35,27 @@ def check_path(
     path: list[tuple[int, int]],
     start: tuple[int, int],
     goal: tuple[int, int],
+    doors: frozenset[tuple[int, int]] | None = None,
 ) -> None:
-    """Assert a path is well-formed: endpoints, valid steps, walkable cells."""
+    """Assert a path is well-formed: endpoints, valid steps, walkable cells.
+
+    ``doors`` is the optional closed-door set forwarded to ``is_valid_step``
+    so a route through an OPEN door validates as legal (an empty set = no
+    closed doors = every doorway open)."""
     case.assertIsNotNone(path)
     case.assertEqual(path[0], start)
     case.assertEqual(path[-1], goal)
     for a, b in zip(path, path[1:]):
-        case.assertTrue(is_valid_step(grid, a, b), f"illegal step {a} -> {b}")
+        case.assertTrue(is_valid_step(grid, a, b, doors), f"illegal step {a} -> {b}")
     for (x, y) in path:
         case.assertIn(grid.cells[y][x], ("floor", "doorway"),
                       f"path visits non-walkable cell {(x, y)}")
+
+
+# An EMPTY closed-door set = no door is closed = every doorway is open. This
+# is how the A1-updated tests "open the door first" to preserve the original
+# open-doorway assertion (door-features spec §13/AC5).
+OPEN = frozenset()
 
 
 class TestWalkable(unittest.TestCase):
@@ -58,7 +69,11 @@ class TestWalkable(unittest.TestCase):
 
     def test_floor_and_doorway_walkable(self):
         self.assertTrue(walkable(self.grid, 1, 0))   # floor
-        self.assertTrue(walkable(self.grid, 2, 0))   # doorway
+        # A1 (door-features): a BARE doorway is now CLOSED (locked) by default
+        # → not walkable. Open the (2,0) door first (empty closed set) to
+        # preserve the original "doorway is walkable" assertion.
+        self.assertFalse(walkable(self.grid, 2, 0))  # closed door: blocked
+        self.assertTrue(walkable(self.grid, 2, 0, OPEN))  # open door: walkable
         self.assertTrue(walkable(self.grid, 0, 1))   # floor
 
     def test_wall_blocked(self):
@@ -117,7 +132,10 @@ class TestIsValidStep(unittest.TestCase):
             ["floor", "doorway"],
             ["doorway", "floor"],
         ])
-        self.assertTrue(is_valid_step(grid, (0, 0), (1, 1)))
+        # A1: closed door elbows block the diagonal; open the two doorway
+        # elbows (empty closed set) to preserve the original assertion.
+        self.assertFalse(is_valid_step(grid, (0, 0), (1, 1)))       # closed
+        self.assertTrue(is_valid_step(grid, (0, 0), (1, 1), OPEN))  # open
 
 
 class TestFindPathOpenFloor(unittest.TestCase):
@@ -182,32 +200,37 @@ class TestFindPathBlocked(unittest.TestCase):
 class TestFindPathDoorway(unittest.TestCase):
     def test_routes_through_the_door_gap(self):
         # Full wall column except a single doorway at (1,1): the path MUST
-        # pass through it — proving doorways are walkable.
+        # pass through it — proving an OPEN doorway is walkable. A1: the
+        # door is closed by default (no path); opening it (empty closed set)
+        # restores the original route-through-the-gap assertion.
         grid = make_grid([
             ["floor", "wall", "floor"],
             ["floor", "doorway", "floor"],
             ["floor", "wall", "floor"],
             ["floor", "wall", "floor"],
         ])
-        path = find_path(grid, (0, 0), (2, 3))
+        self.assertIsNone(find_path(grid, (0, 0), (2, 3)))          # closed: blocked
+        path = find_path(grid, (0, 0), (2, 3), OPEN)                 # open
         self.assertIsNotNone(path)
         self.assertIn((1, 1), path)
-        check_path(self, grid, path, (0, 0), (2, 3))
+        check_path(self, grid, path, (0, 0), (2, 3), OPEN)
 
     def test_door_diagonal_elbow_is_walkable(self):
         # Diagonal into the doorway from (0,0): elbow (1,0) is a wall →
-        # forbidden; the path must approach the doorway orthogonally.
+        # forbidden; the path must approach the doorway orthogonally. A1:
+        # open the (1,1) door (empty closed set) to keep the route.
         grid = make_grid([
             ["floor", "wall", "floor"],
             ["floor", "doorway", "floor"],
             ["floor", "wall", "floor"],
         ])
-        path = find_path(grid, (0, 0), (2, 1))
+        self.assertIsNone(find_path(grid, (0, 0), (2, 1)))           # closed
+        path = find_path(grid, (0, 0), (2, 1), OPEN)                 # open
         self.assertIsNotNone(path)
         self.assertIn((1, 1), path)
         steps = list(zip(path, path[1:]))
         self.assertNotIn(((0, 0), (1, 1)), steps)
-        check_path(self, grid, path, (0, 0), (2, 1))
+        check_path(self, grid, path, (0, 0), (2, 1), OPEN)
 
     def test_door_gap_fully_walled_is_blocked(self):
         grid = make_grid([
@@ -309,8 +332,12 @@ class TestLineOfSight(unittest.TestCase):
         self.assertFalse(has_line_of_sight(grid, (0, 0), (2, 0)))
 
     def test_doorway_does_not_block_sight(self):
+        # A1 (door-features): a CLOSED door DOES block sight (like a wall);
+        # opening the (1,0) door (empty closed set) restores the original
+        # "doorway does not block sight" assertion.
         grid = make_grid([["floor", "doorway", "floor"]])
-        self.assertTrue(has_line_of_sight(grid, (0, 0), (2, 0)))
+        self.assertFalse(has_line_of_sight(grid, (0, 0), (2, 0)))   # closed
+        self.assertTrue(has_line_of_sight(grid, (0, 0), (2, 0), OPEN))  # open
 
     def test_wall_off_the_line_does_not_block(self):
         grid = make_grid([
@@ -391,6 +418,140 @@ class TestLineOfSight(unittest.TestCase):
             ["floor", "floor", "floor"],
         ])
         self.assertTrue(has_line_of_sight(grid, (0, 0), (2, 2)))
+
+
+# ---------------------------------------------------------------------------
+# Doors (door-features spec §5 / AC4, AC5): a closed door is a wall (not
+# walkable, blocks LOS incl. corner-cut); an open door is a doorway. The
+# optional ``doors`` parameter pins the exact closed-door set.
+# ---------------------------------------------------------------------------
+
+
+class TestDoorWalkable(unittest.TestCase):
+    """AC5: closed door not walkable, open door walkable, doors=None ⇒ locked."""
+
+    def test_closed_door_not_walkable(self):
+        grid = make_grid([["floor", "doorway", "floor"]])
+        # A bare grid (doors=None): the doorway is the CLOSED (locked) default.
+        self.assertFalse(walkable(grid, 1, 0))
+        # Explicitly closed (L or U) via the derived set: blocked.
+        self.assertFalse(walkable(grid, 1, 0, frozenset({(1, 0)})))
+        # Open door (not in the closed set): walkable.
+        self.assertTrue(walkable(grid, 1, 0, frozenset()))
+
+    def test_floor_unaffected_by_doors(self):
+        grid = make_grid([["floor", "wall"]])
+        self.assertTrue(walkable(grid, 0, 0))                      # floor walkable
+        self.assertTrue(walkable(grid, 0, 0, frozenset()))         # empty set
+        self.assertFalse(walkable(grid, 1, 0))                     # wall
+
+    def test_doors_none_means_all_locked(self):
+        # Regression: a bare grid's doorway is blocked by default (A2).
+        grid = make_grid([["floor", "doorway"]])
+        self.assertFalse(walkable(grid, 1, 0))
+        self.assertFalse(is_valid_step(grid, (0, 0), (1, 0)))
+
+
+class TestDoorStep(unittest.TestCase):
+    """AC5: a diagonal into a closed door is illegal; an open door is fine."""
+
+    def test_onto_closed_door_illegal(self):
+        grid = make_grid([["floor", "doorway"]])
+        self.assertFalse(is_valid_step(grid, (0, 0), (1, 0)))        # closed
+        self.assertTrue(is_valid_step(grid, (0, 0), (1, 0), frozenset()))  # open
+
+    def test_diagonal_elbows_closed_doors_corner_cut(self):
+        # Elbows (1,0) and (0,1) are doorways; the diagonal (0,0)->(1,1) needs
+        # BOTH elbows walkable. A closed door elbow is not walkable, so closing
+        # EITHER elbow blocks the diagonal (movement corner-cut preserved);
+        # with both open the diagonal is legal.
+        grid = make_grid([
+            ["floor", "doorway"],
+            ["doorway", "floor"],
+        ])
+        self.assertFalse(is_valid_step(grid, (0, 0), (1, 1),
+                                       frozenset({(1, 0), (0, 1)})))  # both closed
+        self.assertFalse(is_valid_step(grid, (0, 0), (1, 1),
+                                       frozenset({(1, 0)})))  # one elbow closed
+        self.assertTrue(is_valid_step(grid, (0, 0), (1, 1), frozenset()))  # open
+
+
+class TestDoorLineOfSight(unittest.TestCase):
+    """AC4: closed door blocks LOS like a wall (incl. corner-cut); open = clear."""
+
+    def test_closed_door_blocks_sight_open_transparent(self):
+        grid = make_grid([["floor", "doorway", "floor"]])
+        closed = frozenset({(1, 0)})
+        self.assertFalse(has_line_of_sight(grid, (0, 0), (2, 0), closed))
+        self.assertTrue(has_line_of_sight(grid, (0, 0), (2, 0), frozenset()))
+
+    def test_closed_door_blocks_like_a_wall(self):
+        # Identical geometry with a wall vs a closed door → identical LOS.
+        wall = make_grid([["floor", "wall", "floor"]])
+        door = make_grid([["floor", "doorway", "floor"]])
+        self.assertFalse(has_line_of_sight(wall, (0, 0), (2, 0)))
+        self.assertFalse(has_line_of_sight(door, (0, 0), (2, 0),
+                                          frozenset({(1, 0)})))
+        self.assertEqual(
+            has_line_of_sight(wall, (0, 0), (2, 0)),
+            has_line_of_sight(door, (0, 0), (2, 0), frozenset({(1, 0)})),
+        )
+
+    def test_diagonal_both_elbows_closed_doors_blocked(self):
+        # A diagonal whose both elbows are closed doors is a corner-cut.
+        grid = make_grid([
+            ["floor", "doorway", "floor"],
+            ["doorway", "floor", "floor"],
+            ["floor", "floor", "floor"],
+        ])
+        closed_both = frozenset({(1, 0), (0, 1)})
+        self.assertFalse(has_line_of_sight(grid, (0, 0), (1, 1), closed_both))
+        self.assertFalse(has_line_of_sight(grid, (0, 0), (2, 2), closed_both))
+        # One elbow open → the line passes (a single closed corner grazes).
+        self.assertTrue(has_line_of_sight(grid, (0, 0), (1, 1),
+                                          frozenset({(1, 0)})))
+
+    def test_endpoint_never_blocks(self):
+        # A token on the cell sees itself even if that cell is a closed door.
+        grid = make_grid([["doorway", "floor"]])
+        self.assertTrue(has_line_of_sight(grid, (0, 0), (0, 0),
+                                          frozenset({(0, 0)})))
+
+
+class TestDoorFindPath(unittest.TestCase):
+    """AC5: A* routes around a closed door / through an open one; None sealed."""
+
+    WALL_WITH_DOOR = [
+        ["floor", "wall", "floor"],
+        ["floor", "doorway", "floor"],
+        ["floor", "wall", "floor"],
+    ]
+
+    def test_sealed_by_closed_door_none_via_open(self):
+        grid = make_grid(self.WALL_WITH_DOOR)
+        self.assertIsNone(find_path(grid, (0, 1), (2, 1), frozenset({(1, 1)})))
+        path = find_path(grid, (0, 1), (2, 1), frozenset())
+        self.assertIsNotNone(path)
+        self.assertIn((1, 1), path)
+
+    def test_routes_around_closed_door(self):
+        # A closed door in one place, an open detour elsewhere: A* takes the
+        # open route and never visits the closed door.
+        grid = make_grid([
+            ["floor", "doorway", "floor"],
+            ["floor", "floor", "floor"],
+        ])
+        closed = frozenset({(1, 0)})
+        path = find_path(grid, (0, 0), (2, 0), closed)
+        self.assertIsNotNone(path)
+        self.assertNotIn((1, 0), path)
+        for a, b in zip(path, path[1:]):
+            self.assertTrue(is_valid_step(grid, a, b, closed))
+
+    def test_doors_none_blocks_bare_doorway(self):
+        grid = make_grid(self.WALL_WITH_DOOR)
+        # A bare grid (doors=None): the doorway is the closed default → None.
+        self.assertIsNone(find_path(grid, (0, 1), (2, 1)))
 
 
 if __name__ == "__main__":

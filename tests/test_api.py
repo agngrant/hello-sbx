@@ -117,11 +117,14 @@ class TestMapDetail(ServerTestCase):
 
     def test_detail_shape(self):
         _, _, data = self.get_json("/api/maps/sample-dungeon")
+        # Additive `doors` (door-features spec §8.2/A9/AC10): the sample map
+        # has 3 doorways, so the full door object (all L by default) is present.
         self.assertEqual(
             set(data.keys()),
             {"id", "name", "width", "height", "image", "cells",
-             "entities", "players"},
+             "entities", "players", "doors"},
         )
+        self.assertEqual(data["doors"], {"5,5": "L", "10,4": "L", "9,7": "L"})
 
     def test_grid_matches_model(self):
         _, _, data = self.get_json("/api/maps/sample-dungeon")
@@ -207,16 +210,25 @@ class TestUploadPaint(ServerTestCase):
             "dark_is_wall": True,
         })
         self.assertEqual(status, 200)
+        # Additive `doors` (door-features spec §8.2/A9/AC10): a fresh upload
+        # has its detected doorways all L (default), so the full door object
+        # is present with every doorway -> "L".
         self.assertEqual(set(data.keys()),
-                         {"id", "name", "width", "height", "cells", "thumbnail"})
+                         {"id", "name", "width", "height", "cells",
+                          "thumbnail", "doors"})
         self.assertEqual(data["name"], "Upload Test")
         self.assertEqual((data["width"], data["height"]), (16, 12))
         self.assertEqual(len(data["cells"]), 12)
         self.assertTrue(all(len(r) == 16 for r in data["cells"]))
         # at least one doorway detected (the gap at (8,5))
-        doors = [(x, y) for y in range(12) for x in range(16)
-                 if data["cells"][y][x] == "doorway"]
-        self.assertTrue(doors, "expected a detected doorway")
+        doorway_cells = [(x, y) for y in range(12) for x in range(16)
+                         if data["cells"][y][x] == "doorway"]
+        self.assertTrue(doorway_cells, "expected a detected doorway")
+        # every detected doorway is a door, all L (closed+locked by default)
+        self.assertEqual(
+            data["doors"],
+            {f"{x},{y}": "L" for (x, y) in doorway_cells},
+        )
         # the thumbnail is a decodable PNG data-URL
         self.assertTrue(data["thumbnail"].startswith("data:image/png;base64,"))
         new_png = base64.b64decode(data["thumbnail"].split(",", 1)[1])
@@ -226,7 +238,7 @@ class TestUploadPaint(ServerTestCase):
         after = self._map_ids()
         new_ids = after - before
         self.assertEqual(new_ids, {data["id"]})
-        # ... and the detail endpoint serves the same grid
+        # ... and the detail endpoint serves the same grid + door states
         status, _, detail = self.get_json(f"/api/maps/{data['id']}")
         self.assertEqual(status, 200)
         self.assertEqual(detail["cells"], data["cells"])
@@ -382,9 +394,18 @@ class TestGenerateMap(ServerTestCase):
             "name": "The Deep Warrens", "cols": 24, "rows": 16, "seed": 1337,
         })
         self.assertEqual(status, 200)
-        # Key set is EXACTLY the upload key set (byte-identical shape).
+        # Key set is EXACTLY the upload key set (byte-identical shape); both
+        # now carry the additive `doors` object (door-features spec §8.2/A9).
         self.assertEqual(set(gen_data.keys()),
-                         {"id", "name", "width", "height", "cells", "thumbnail"})
+                         {"id", "name", "width", "height", "cells",
+                          "thumbnail", "doors"})
+        # C2/AC10: a fresh generated map has every carved doorway "L" (locked).
+        gen_doors = [(x, y) for y in range(gen_data["height"])
+                     for x in range(gen_data["width"])
+                     if gen_data["cells"][y][x] == "doorway"]
+        self.assertGreaterEqual(len(gen_doors), 3)
+        self.assertEqual(gen_data["doors"],
+                         {f"{x},{y}": "L" for (x, y) in gen_doors})
         status, up_data = self.post_json("/api/maps/upload", {
             "name": "keyset-ref", "image_b64": self.png_b64, "cols": 16, "rows": 12,
         })
@@ -412,8 +433,10 @@ class TestGenerateMap(ServerTestCase):
         })
         self.assertEqual(status, 200)
         self.assertEqual((data["width"], data["height"]), (10, 10))
+        # Additive `doors` present (every carved doorway all L).
         self.assertEqual(set(data.keys()),
-                         {"id", "name", "width", "height", "cells", "thumbnail"})
+                         {"id", "name", "width", "height", "cells",
+                          "thumbnail", "doors"})
         self.assertIn("seednull", self._map_ids())
 
     def test_name_trimming_and_id_registration(self):
