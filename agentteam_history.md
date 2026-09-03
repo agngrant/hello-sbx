@@ -589,13 +589,23 @@ file). Verified `*:8000 (LISTEN)`, `/health` ok, uvicorn banner on
 0.0.0.0:8000.
 - **PID: 42118** — left running in background (serves the doors feature).
 
+### Prompt 28
+> restart the server
+
+**Action:** Transferred to `backend_engineer` (server ops).
+**Outcome:** Old PID 42118 stopped with SIGTERM (pid file matched lsof);
+clean shutdown confirmed (`Shutting down` / `Finished server process
+[42118]`); port 8000 released, no leftovers. Relaunched on 0.0.0.0:8000
+per convention. Verified `*:8000 (LISTEN)`, `/health` ok, banner.
+- **PID: 42212** — left running in background.
+
 ---
 
 ## 3. Current State Summary (refreshed — Prompt 26)
 
 | Item | Value |
 |---|---|
-| Server | **RUNNING** (Prompt 27) — `*.8000` LISTEN, PID 42118, `.ld_server.log`/`.ld_server.pid` present (gitignored) |
+| Server | **RUNNING** (Prompt 28 restart) — `*.8000` LISTEN, PID 42212, `.ld_server.log`/`.ld_server.pid` present (gitignored) |
 | Git — remote | `origin` → `https://github.com/agngrant/hello-sbx.git`; `origin/main` = `5ad236f` |
 | Git — `main` | `5ad236f` (in sync with `origin/main`) |
 | Git — **current checkout** | **`feat/explored-map` = `5d49e2c`** — 9 ahead of `main` (`5ad236f`); **4 ahead / 0 behind** `origin/feat/explored-map` (`94a7a9b`); **NOT pushed, NOT merged**; local tag **`working sight`** → `b1ff47e` (pre-doors baseline) |
