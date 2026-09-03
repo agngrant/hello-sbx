@@ -605,17 +605,28 @@ per convention. Verified `*:8000 (LISTEN)`, `/health` ok, banner.
 **Action:** Orchestrator added `sbx-diagnostics-*` to `.gitignore`; `backend_engineer` committed it.
 **Outcome:** `sbx-diagnostics-*` now ignored (`git check-ignore` matches line 34); the existing `sbx-diagnostics-20260903164454.zip` no longer shows as untracked. Commit `eea2770` (`.gitignore` only, +3 lines). Preference recorded so future sbx-diagnostics dumps are never staged/committed.
 
+### Prompt 30
+> stop the server and commit the changes to the remote branch
+
+**Action:** Transferred to `backend_engineer` (server ops + git).
+**Outcome:**
+- **Server stopped:** PID 42212 SIGTERM → clean shutdown (`Shutting down` / `Finished server process [42212]`); port 8000 released; no leftovers; `.ld_server.log`/`.ld_server.pid` deleted.
+- **Committed** the only pending change: `docker-agent.yaml` (sandbox agent-roster config — `awesome_engineer` split into `backend_engineer` + `frontend_engineer`, `qa` gained shell/git) as `fe05e30`.
+- **Pushed:** `feat/explored-map` → `origin/feat/explored-map` (`94a7a9b..fe05e30`, fast-forward, no force). Branch now **0 ahead / 0 behind** its remote; working tree **clean**.
+- Remote branch now carries everything: explored-map + all doors work (feature `a05a013`, fix `69e87a2`, docs `5d49e2c`, prompts 27–29, `eea2770`, `fe05e30`). `main` still at `5ad236f` — **NOT merged** (owner's call).
+**Current state: server STOPPED; no artifacts; branch fully pushed.**
+
 ---
 
-## 3. Current State Summary (refreshed — Prompt 26)
+## 3. Current State Summary (refreshed — Prompt 30)
 
 | Item | Value |
 |---|---|
-| Server | **RUNNING** (Prompt 28 restart) — `*.8000` LISTEN, PID 42212, `.ld_server.log`/`.ld_server.pid` present (gitignored) |
+| Server | **Stopped** (Prompt 30) — no listener on 8000; `.ld_server.log`/`.ld_server.pid` deleted |
 | Git — remote | `origin` → `https://github.com/agngrant/hello-sbx.git`; `origin/main` = `5ad236f` |
 | Git — `main` | `5ad236f` (in sync with `origin/main`) |
-| Git — **current checkout** | **`feat/explored-map` = `5d49e2c`** — 9 ahead of `main` (`5ad236f`); **4 ahead / 0 behind** `origin/feat/explored-map` (`94a7a9b`); **NOT pushed, NOT merged**; local tag **`working sight`** → `b1ff47e` (pre-doors baseline) |
-| Working tree | Clean except pre-existing `M docker-agent.yaml` (agent-roster rename, unrelated) + `?? sbx-diagnostics-*.zip` (sandbox artifact, untracked) |
+| Git — **current checkout** | **`feat/explored-map` = `origin/feat/explored-map`** (0 ahead / 0 behind, pushed Prompt 30) — ahead of `main` (`5ad236f`); **NOT merged to `main`**; tag **`working sight`** → `b1ff47e` (pre-doors baseline, local only / unpushed) |
+| Working tree | **Clean** (verified post-push Prompt 30); server **stopped**, `.ld_server.*` deleted |
 | Docs vs code | **In sync:** PROJECT.md §4/§5/§6/§8/§9 + README Doors section + spec errata all match the shipped doors feature; `docs/qa/qa-signoff-doors.md` = PASS |
 | Open items | see resume checklist below + `TODO.md` (repo root) |
 

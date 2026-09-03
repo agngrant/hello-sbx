@@ -36,11 +36,11 @@ GM-generated BSP maps, **explored map** (S/E/H fog with memory), and now
 
 ## In progress
 
-- [ ] Nothing in flight. **Server RUNNING** on `0.0.0.0:8000` (PID 42212,
-      restarted Prompt 28; branch `feat/explored-map` @ `f0a4fe3`, doors
-      feature live).
-- [ ] Next owner decision: **merge** `feat/explored-map` → `main`
-      (10 commits ahead) and/or **push** the branch (5 ahead of remote).
+- [ ] Nothing in flight. **Server STOPPED** (Prompt 30).
+- [ ] Branch **fully pushed**: `feat/explored-map` = `origin/feat/explored-map`
+      (0 ahead / 0 behind) — includes explored-map + doors feature + all docs.
+- [ ] Next owner decision: **merge** `feat/explored-map` → `main` (fast-forward
+      is safe) — or leave as a PR/review flow.
 
 ## Open items (backlog, no change)
 
