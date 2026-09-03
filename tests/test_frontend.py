@@ -1422,7 +1422,14 @@ class TestExploredMapStateAndValidate(FrontendBase):
 
 class TestExploredMapRender(FrontendBase):
     """AC13b/c — the real drawGridOnCanvas tiers cells for a player and stays
-    full-detail for the GM and the preview (no third argument)."""
+    full-detail for the GM and the preview (no third argument).
+
+    Grid-line pass (BUG-EXPLORED-01, spec §6.2): in tiered mode EVERY cell
+    edge that has a drawn (S/E) cell on at least one side gets its 1px
+    segment — the region's frontier against hidden cells (frontier edge of
+    an S cell = full #d9d1bd, of an E cell = 30%-alpha dimmed), the outer
+    canvas frame, and the shared edges between two drawn cells (S-side
+    style wins over E-side). H cells never contribute their own lines."""
 
     # 5x4 map: a 3x2 open floor block (x1-3, y1-2) inside a wall ring.
     #   y0: all wall ; y1: wall floor floor floor wall ; y2: same ; y3: all wall
@@ -1474,6 +1481,183 @@ class TestExploredMapRender(FrontendBase):
                       , "no dimmed grid line for E cells: %s" % out["strokes"])
         # The full grid line is also present (S cell edges).
         self.assertIn("#d9d1bd", out["strokes"])
+
+    def _line_segments(self, vis):
+        """Render ``map``+``vis`` on the 800x600 harness canvas via a direct
+        ``drawGridOnCanvas`` call and return ``{key: style}`` for every drawn
+        *line* segment (the wall-hatch/border ``rect`` segments are skipped).
+
+        Key format (``s=150, ox=25, oy=0`` so grid lines land at the +0.5px
+        hairline positions ``gx=25.5,175.5,325.5,475.5,625.5,775.5`` and
+        ``gy=0.5,150.5,300.5,450.5,600.5``):
+          vertical   ``V<x>:<y>``            (x, y = the +0.5 grid line + min end)
+          horizontal ``H<x>,<y>,<len>``      (x, y = min end, len = 150)
+        If a segment is drawn MORE THAN ONCE in DIFFERENT styles its value is
+        ``"duplicate"`` (spec §6.2: a shared edge may legitimately be stroked
+        by both drawn cells, but only ever in the SAME style — so any
+        double-stroke must agree, which this still catches)."""
+        expr = (
+            "(()=>{const map=" + self._MAP_JS + ";"
+            "api.state.role='player';api.state.grid=map;"
+            "api.els.canvas.width=800;api.els.canvas.height=600;"
+            "const c=api.els.canvas.getContext('2d');"
+            "c._strokes.length=0;"
+            "api.drawGridOnCanvas(api.els.canvas,c," + vis + ");"
+            "const v=Object.create(null);"
+            "for(const s of c._strokes){"
+            "for(const seg of s.path){"
+            "if(!seg.m||!seg.l)continue;"
+            "const a=[seg.m[0],seg.m[1]],b=[seg.l[0],seg.l[1]];"
+            "const dx=Math.abs(a[0]-b[0]),dy=Math.abs(a[1]-b[1]);"
+            "if(dx>0&&dy>0)continue;"
+            "const x=Math.min(a[0],b[0]),y=Math.min(a[1],b[1]);"
+            "const key=(dx===0?'V'+x+':'+y:'H'+x+','+y+','+dx);"
+            "if(v[key]===undefined)v[key]=s.style;"
+            "else if(v[key]!==s.style)v[key]='duplicate';}}"
+            "return v;})()"
+        )
+        return json.loads(js(expr))
+
+    def test_tiered_grid_line_frontier_and_outer_frame(self):
+        # BUG-EXPLORED-01 (spec §6.2): in tiered mode EVERY cell edge that has
+        # an S/E cell on at least one side gets its 1px segment — a frontier
+        # edge against a hidden cell in the drawn cell's OWN style (S edge ->
+        # full #d9d1bd, E edge -> 30%-alpha dim), the outer canvas frame, and
+        # a shared edge between two drawn cells in the full "S" style when
+        # either side is S. An H cell contributes no line of its own (an H|H
+        # edge is never drawn).
+        #
+        # Direct-call drawGridOnCanvas on the 5x4 grid. Harness canvas is
+        # 800x600 at dpr 1, so s = floor(min(800/5, 600/4)) = 150 and the
+        # origin is centered: ox = floor((800 - 5*150)/2) = 25,
+        # oy = floor((600 - 4*150)/2) = 0.
+        #
+        # Matrix (each drawn cell is diagonal to the others, so this phase
+        # exercises frontier + frame only — the shared S|E case is covered by
+        # test_tiered_shared_s_e_edge_is_full below):
+        #   y0: HHHHH   (all H)
+        #   y1: HSHHH   S at (1,1)
+        #   y2: HHHEH   E at (3,2)
+        #   y3: HHHHS   S at (4,3)
+        #
+        # The complete expected set is 12 segments, hand-derived cell by cell:
+        #   S(1,1) [4 frontiers, all full]:
+        #     top    H175,150.5,150   left  V175.5:150
+        #     right  V325.5:150       bottom H175,300.5,150
+        #   E(3,2) [4 frontiers, all dim]:
+        #     left   V475.5:300       right V625.5:300
+        #     top    H475,300.5,150   bottom H475,450.5,150
+        #   S(4,3) [frontier + frame, all full]:
+        #     left   V625.5:450       top  H625,450.5,150
+        #     right frame   V775.5:450
+        #     bottom frame  H625,600.5,150
+        vis = json.dumps(["HHHHH", "HSHHH", "HHHEH", "HHHHS"])
+        full = "#d9d1bd"
+        dim = "rgba(217, 209, 189, 0.3)"
+        out = self._line_segments(vis)
+
+        # (i) outer-frame segments over the drawn border cells: the frame is
+        # drawn only over the cell that is actually drawn (the right frame
+        # beside S(4,3) and the bottom frame under S(4,3) — note the frame
+        # sits at x=775.5 = gx(5), NOT 875, and the top of S(1,1) is at
+        # y=150.5, not the row-0 frame at y=0.5).
+        # (ii) frontier segments against H neighbours, in the drawn cell's
+        # OWN style (S frontier -> full, E frontier -> 30% dim).
+        expected = {
+            # -- S(1,1): four frontier edges, full (its own style) --
+            "H175,150.5,150": full,   # top (vs H(1,0))
+            "V175.5:150": full,       # left (vs H(0,1))
+            "V325.5:150": full,       # right (vs H(2,1))
+            "H175,300.5,150": full,   # bottom (vs H(1,2))
+            # -- E(3,2): four frontier edges, dim (its own style) --
+            "V475.5:300": dim,        # left (vs H(2,2))
+            "V625.5:300": dim,        # right (vs H(4,2))
+            "H475,300.5,150": dim,    # top (vs H(3,1))
+            "H475,450.5,150": dim,    # bottom (vs H(3,3))
+            # -- S(4,3): two frontiers + right/bottom frame, full --
+            "V625.5:450": full,       # left (vs H(3,3))
+            "H625,450.5,150": full,   # top (vs H(4,2))
+            "V775.5:450": full,       # right FRAME (off-grid, S style)
+            "H625,600.5,150": full,   # bottom FRAME (off-grid, S style)
+        }
+        # (e) the COMPLETE segment set: exact count + every key at the
+        # exact style (regression guard against spurious segments in either
+        # style AND against a missing/mis-styled one).
+        self.assertEqual(out, expected,
+                         "drawn segment set != expected 12 segments: %s"
+                         % json.dumps(out, sort_keys=True))
+        self.assertEqual(len(out), 12)
+        # (v) no segment drawn twice in DIFFERENT styles.
+        self.assertNotIn("duplicate", out.values(),
+                         "a segment was overpainted in a different style: %s"
+                         % json.dumps(out))
+        # (iv) a representative H|H edge set is ABSENT: the row-0 frame over
+        # the all-H row (incl. the top edge of H(0,0) at y=0.5), the left
+        # frame beside the H column 0, and the interior H|H boundaries.
+        for key in ("H25,0.5,150", "H175,0.5,150", "H325,0.5,150",
+                    "H475,0.5,150", "H625,0.5,150",
+                    "V25.5:0", "V25.5:150", "V25.5:300", "V25.5:450",
+                    "H25,150.5,150", "H25,300.5,150", "H25,450.5,150",
+                    "H325,450.5,150", "V475.5:450", "V775.5:0",
+                    "V775.5:150", "V775.5:300", "V325.5:300",
+                    "V325.5:450", "V475.5:150", "V625.5:150",
+                    "V175.5:300", "V175.5:450", "V775.5:600"):
+            self.assertNotIn(key, out,
+                             "H|H edge must not be drawn: %s" % key)
+
+    def test_tiered_shared_s_e_edge_is_full(self):
+        # spec §6.2 (property iii): a shared edge between two drawn cells is
+        # drawn at FULL ("S wins") when either side is S; a shared edge whose
+        # two sides are both E stays dim. The Phase-1 matrix has no adjacent
+        # S/E pair, so cover it here.
+        #   y0: SSSSS   (all S)
+        #   y1: SSSEE   S at (0,1)(1,1)(2,1); E at (3,1) and (4,1)
+        #   y2: HHHHH   (all H)
+        #   y3: HHHHH   (all H)
+        # The S|E boundary is the vertical edge at gx(3)=475.5 between S(2,1)
+        # and E(3,1) -> key V475.5:150, drawn FULL (S wins). The E|E boundary
+        # at gx(4)=625.5 between E(3,1) and E(4,1) -> key V625.5:150, stays
+        # DIM. Complete set: 27 unique segments, 23 full + 4 dim, no
+        # conflicting overpaint.
+        vis = json.dumps(["SSSSS", "SSSEE", "HHHHH", "HHHHH"])
+        full = "#d9d1bd"
+        dim = "rgba(217, 209, 189, 0.3)"
+        out = self._line_segments(vis)
+
+        # the two boundary edges, explicitly:
+        self.assertEqual(out.get("V475.5:150"), full,
+                         "shared S|E edge (S(2,1)|E(3,1)) must be FULL "
+                         "(S wins): %s" % json.dumps(out))
+        self.assertEqual(out.get("V625.5:150"), dim,
+                         "shared E|E edge (E(3,1)|E(4,1)) must stay DIM: %s"
+                         % json.dumps(out))
+
+        # Complete set: exactly 27 segments (23 full + 4 dim).
+        expected = {
+            # row 0 top frame + internal verticals (all S)
+            "H25,0.5,150": full, "H175,0.5,150": full, "H325,0.5,150": full,
+            "H475,0.5,150": full, "H625,0.5,150": full,
+            "V25.5:0": full, "V175.5:0": full, "V325.5:0": full,
+            "V475.5:0": full, "V625.5:0": full, "V775.5:0": full,
+            # row 0 / row 1 shared horizontal (all S)
+            "H25,150.5,150": full, "H175,150.5,150": full,
+            "H325,150.5,150": full, "H475,150.5,150": full,
+            "H625,150.5,150": full,
+            # row 1 verticals: S|S full, the S|E boundary full (S wins)
+            "V25.5:150": full, "V175.5:150": full, "V325.5:150": full,
+            "V475.5:150": full, "V625.5:150": dim, "V775.5:150": dim,
+            # row 1 / row 2 boundary: S cells -> full, E cells -> dim
+            "H25,300.5,150": full, "H175,300.5,150": full,
+            "H325,300.5,150": full, "H475,300.5,150": dim,
+            "H625,300.5,150": dim,
+        }
+        self.assertEqual(out, expected,
+                         "drawn segment set != expected 27 segments: %s"
+                         % json.dumps(out, sort_keys=True))
+        self.assertEqual(len(out), 27)
+        self.assertNotIn("duplicate", out.values(),
+                         "a segment was overpainted in a different style: %s"
+                         % json.dumps(out))
 
     def test_player_render_no_fill_over_hidden_cell(self):
         # A matrix whose ONLY S/E cells are (1,1) [S] and (3,2) [E]; every

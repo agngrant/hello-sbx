@@ -593,10 +593,16 @@ function drawGridOnCanvas(canvas, ctx, visibility = null) {
   } else {
     // Tiered (player): fill each S/E cell with its tier's floor color (a wall
     // or doorway cell gets the floor base too — its own art overpaints it in
-    // step 2), and draw each grid segment between two *drawn* (S/E) neighbors
-    // in that tier's line style (full vs 30%-alpha dim). Hidden cells
-    // contribute neither a fill nor a grid line, so the dark region has no
-    // outline. A shared S|E edge is drawn at full (the "S" wins) style.
+    // step 2). §6.2: EVERY cell edge with a drawn (S/E) cell on at least one
+    // side gets its 1px segment — so each drawn cell's four edges are all
+    // drawn: a shared edge with a drawn neighbor in that tier's line style
+    // (shared S|E edge: the full "S" style wins), a frontier edge against a
+    // hidden cell in the drawn cell's OWN style (S edge → #d9d1bd full, E
+    // edge → 30%-alpha dimmed), and the outer canvas frame (the top of row
+    // 0, the left of col 0, the right of the last col, the bottom of the last
+    // row). The explored/seen region thus outlines its frontier against the
+    // dark and keeps its frame; an H cell of its own never contributes a
+    // line (an H|H edge is not drawn).
     for (let y = 0; y < g.height; y++) {
       for (let x = 0; x < g.width; x++) {
         const t = tier(x, y);
@@ -608,32 +614,59 @@ function drawGridOnCanvas(canvas, ctx, visibility = null) {
     const gx = (x) => Math.round(ox + x * s) + 0.5;
     const gy = (y) => Math.round(oy + y * s) + 0.5;
     ctx.lineWidth = 1;
+    // Each drawn cell's four edges are all drawn — an edge with a drawn
+    // neighbor is a SHARED edge (that tier's style, S side wins over E);
+    // an edge against a hidden cell or off the grid is a FRONTIER/frame
+    // edge and uses the drawn cell's own style.
     for (let y = 0; y < g.height; y++) {
       for (let x = 0; x < g.width; x++) {
         const t = tier(x, y);
         if (t === "H") continue;
         const lineStyle = (full) => (full ? T.gridLine : T.gridLineDim);
-        // Right edge: shared with the cell to the east.
-        if (x + 1 < g.width) {
-          const te = tier(x + 1, y);
-          if (te !== "H") {
-            ctx.strokeStyle = lineStyle(t === "S" || te === "S");
-            ctx.beginPath();
-            ctx.moveTo(gx(x + 1), oy + y * s);
-            ctx.lineTo(gx(x + 1), oy + (y + 1) * s);
-            ctx.stroke();
-          }
+        const own = () => lineStyle(t === "S");
+        // Right edge: against the cell to the east or the right frame.
+        {
+          const px = gx(x + 1);
+          const te = x + 1 < g.width ? tier(x + 1, y) : null;
+          ctx.strokeStyle = (te ? lineStyle(t === "S" || te === "S")
+                                : own());
+          ctx.beginPath();
+          ctx.moveTo(px, oy + y * s);
+          ctx.lineTo(px, oy + (y + 1) * s);
+          ctx.stroke();
         }
-        // Bottom edge: shared with the cell to the south.
-        if (y + 1 < g.height) {
-          const ts = tier(x, y + 1);
-          if (ts !== "H") {
-            ctx.strokeStyle = lineStyle(t === "S" || ts === "S");
-            ctx.beginPath();
-            ctx.moveTo(ox + x * s, gy(y + 1));
-            ctx.lineTo(ox + (x + 1) * s, gy(y + 1));
-            ctx.stroke();
-          }
+        // Left edge: against the cell to the west or the left frame.
+        {
+          const px = gx(x);
+          const tw = x > 0 ? tier(x - 1, y) : null;
+          ctx.strokeStyle = (tw ? lineStyle(t === "S" || tw === "S")
+                                : own());
+          ctx.beginPath();
+          ctx.moveTo(px, oy + y * s);
+          ctx.lineTo(px, oy + (y + 1) * s);
+          ctx.stroke();
+        }
+        // Bottom edge: against the cell to the south or the bottom frame.
+        {
+          const py = gy(y + 1);
+          const ts = y + 1 < g.height ? tier(x, y + 1) : null;
+          ctx.strokeStyle = (ts ? lineStyle(t === "S" || ts === "S")
+                                : own());
+          ctx.beginPath();
+          ctx.moveTo(ox + x * s, py);
+          ctx.lineTo(ox + (x + 1) * s, py);
+          ctx.stroke();
+        }
+        // Top edge: against the cell to the north or the top frame.
+        {
+          const py = gy(y);
+          const tn = y > 0 ? tier(x, y - 1) : null;
+          ctx.strokeStyle = (tn ? lineStyle(t === "S" || tn === "S")
+                                : own());
+          ctx.beginPath();
+          ctx.moveTo(ox + x * s, py);
+          ctx.lineTo(ox + (x + 1) * s, py);
+          ctx.stroke();
         }
       }
     }
