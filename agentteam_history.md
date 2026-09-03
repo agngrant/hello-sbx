@@ -434,6 +434,7 @@ log, then transferred to `awesome_engineer` (git) to push
 **Outcome:** branch pushed (verification details in the engineer's report
 — see the §3 table, which was updated after the push). No merge to
 `main` was performed; `main` is untouched unless the owner asks for it.
+  - Pushed state: `origin/feat/explored-map` = `79998e3` (= local HEAD), upstream `origin/feat/explored-map` configured; `main`/`origin/main` untouched at `5ad236f`.
 
 ---
 
