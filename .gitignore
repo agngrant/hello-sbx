@@ -29,3 +29,6 @@ server.log
 server.pid
 .ld_server.log
 .ld_server.pid
+
+# Sandbox diagnostics dumps (user preference: always ignore)
+sbx-diagnostics-*
