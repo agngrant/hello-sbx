@@ -434,6 +434,31 @@ log, then transferred to `awesome_engineer` (git) to push
 **Outcome:** branch pushed (verification details in the engineer's report
 — see the §3 table, which was updated after the push). No merge to
 `main` was performed; `main` is untouched unless the owner asks for it.
+
+### Prompt 23
+> run the server from the branch on 0.0.0.0:8000
+
+**Action:** Transferred to `awesome_engineer` (server ops) — start the
+server from the current checkout (`feat/explored-map`, `94a7a9b`, the
+pushed state) on `0.0.0.0:8000` per the established convention; keep it
+running.
+**Outcome:** Branch/commit confirmed (`feat/explored-map` @ `94a7a9b`,
+no switching); port was free; launched per convention; verified
+`*:8000 (LISTEN)`, `/health` ok, 0.0.0.0:8000 banner.
+- **PID: 18309** — left running in background.
+
+### Prompt 24
+> stop the server and commit the current version to branch
+
+**Action:** Orchestrator logged prompts 23–24 in this file, then
+transferred to `awesome_engineer` (server ops + git).
+**Task:** stop PID 18309 (SIGTERM via `.ld_server.pid`), verify clean
+shutdown + port free + no leftovers, delete `.ld_server.log`/
+`.ld_server.pid`, inspect `git status`, and commit the full current
+working tree to `feat/explored-map` (expected dirt: `agentteam_history.md`
+only — if anything else is modified, commit it too per the owner's "commit
+the current version", but flag it explicitly in the report). No push
+this time — owner said commit to branch only.
   - Pushed state: `origin/feat/explored-map` = `79998e3` (= local HEAD), upstream `origin/feat/explored-map` configured; `main`/`origin/main` untouched at `5ad236f`.
 
 ---
@@ -445,8 +470,8 @@ log, then transferred to `awesome_engineer` (git) to push
 | Server | **Stopped** — no listener on 8000; no `.ld_server.log`/`.ld_server.pid` present (gitignored when created) |
 | Git — remote | `origin` → `https://github.com/agngrant/hello-sbx.git`; `origin/main` = `5ad236f` |
 | Git — `main` | `5ad236f` (in sync with `origin/main` at last check) |
-| Git — **current checkout** | **`feat/explored-map`** — `c9d9b83` (i.e. `b5eafad` + the Prompt-20 commit: BUG-EXPLORED-01 fix, live QA script, session log), **NOT pushed** (no upstream) |
-| Working tree | Clean after the Prompt-20 commit (`.ld_server.*` deleted; `agentteam_history.md` now **tracked**) — verify with `git status` |
+| Git — **current checkout** | **`feat/explored-map` = `origin/feat/explored-map` = `94a7a9b`** — 4 commits ahead of `main` (`5ad236f`); upstream configured; **pushed at Prompt 22** |
+| Working tree | **Clean** (verified post-push); server **stopped**, `.ld_server.*` deleted |
 | Docs vs code | PROJECT.md §5/§9 + README "explored map" section already updated for the feature |
 | Open items | see resume checklist below |
 
@@ -474,8 +499,11 @@ log, then transferred to `awesome_engineer` (git) to push
    git status && git fetch && git log --oneline --all --decorate
    lsof -iTCP:8000 -sTCP:LISTEN   # expect: nothing listening
    ```
-   Expected at this writing: `feat/explored-map` at `c9d9b83`, 2 commits
-   ahead of `main` (`5ad236f`), not pushed, clean tree.
+   Expected at this writing: `feat/explored-map` = `origin/feat/explored-map`
+   at `94a7a9b` (4 commits ahead of `main` = `5ad236f`), clean tree. The
+   explored-map feature is **pushed but NOT merged to `main`** — a
+   fast-forward `git checkout main && git merge --ff-only
+   feat/explored-map && git push` is the remaining disposition step.
 2. **Establish the green baseline** before any new work:
    ```sh
    ./.venv/bin/python -m pytest                    # primary runner
@@ -491,13 +519,12 @@ log, then transferred to `awesome_engineer` (git) to push
    ./.venv/bin/python scripts/qa_explored_map.py   # exit 0 = all checks pass
    kill "$(cat .ld_server.pid)" && rm -f .ld_server.log .ld_server.pid
    ```
-4. **Decide branch disposition** (owner's call): fast-forward-merge
-   `feat/explored-map` → `main` (safe: `main` is exactly the branch
-   point) — `git checkout main && git merge --ff-only feat/explored-map
-   && git push` — or keep the feature branch / rebase. Nothing is pushed
-   yet, so there is no remote cleanup either way. (The branch has no
-   upstream configured; a first push needs `git push -u origin
-   feat/explored-map`.)
+4. **Merge to `main` (owner's call)** — the explored-map feature is
+   pushed to `origin/feat/explored-map` but `main` is still at `5ad236f`.
+   Fast-forward is safe (main is exactly the branch point):
+   `git checkout main && git merge --ff-only feat/explored-map &&
+   git push`. If the team prefers a PR/review flow, open the PR from
+   `feat/explored-map` → `main` (both ends now exist on the remote).
 5. **QA sign-off for the explored map — DONE for BUG-EXPLORED-01**
    (`docs/qa/BUG-EXPLORED-01.md`, verdict FIXED, Prompt 21). The earlier
    `docs/qa/qa-signoff.md` still only covers pass 2 (BUG-001…011); an
