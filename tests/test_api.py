@@ -312,5 +312,138 @@ class TestUploadPaint(ServerTestCase):
         self.assertEqual(status, 400)
 
 
+class TestGenerateMap(ServerTestCase):
+    """generated-maps spec §5/§9: POST /api/maps/generate (C9/C10)."""
+
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        # Upload reference for the C10 key-set comparison: a 16x12 fixture
+        # with a 1-cell gap at (8,5) — encodes to a doorway deterministically
+        # (same fixture as TestUploadPaint).
+        w, h = 16, 12
+        cls.rows = [
+            [
+                (0, 0, 0) if (
+                    x in (0, w - 1) or y in (0, h - 1)
+                    or (x == 8 and 1 <= y <= 10 and (x, y) != (8, 5))
+                    or (x == 9 and 1 <= y <= 10 and (x, y) not in ((9, 4), (9, 5), (9, 6)))
+                ) else (255, 255, 255)
+                for x in range(w)
+            ]
+            for y in range(h)
+        ]
+        cls.png_b64 = base64.b64encode(encode_png(w, h, cls.rows)).decode("ascii")
+
+    def _map_ids(self) -> set[str]:
+        status, _, body = self.get_json("/api/maps")
+        self.assertEqual(status, 200)
+        return {m["id"] for m in body["maps"]}
+
+    # -- C9: validation errors (exact §5.1 strings, first failure wins) ----
+
+    def test_validation_errors(self):
+        cases = [
+            ({"name": "x", "cols": 7, "rows": 10}, "'cols' must be an integer in 8-60"),
+            ({"name": "x", "cols": 10, "rows": 61}, "'rows' must be an integer in 8-60"),
+            ({"name": "x", "cols": "24", "rows": 10}, "'cols' must be an integer in 8-60"),
+            ({"name": "x", "cols": True, "rows": 10}, "'cols' must be an integer in 8-60"),
+            ({"name": "", "cols": 10, "rows": 10}, "'name' must be a non-empty string"),
+            ({"cols": 10, "rows": 10}, "'name' must be a non-empty string"),
+            ({"name": "  ", "cols": 10, "rows": 10}, "'name' must be a non-empty string"),
+            ({"name": 42, "cols": 10, "rows": 10}, "'name' must be a non-empty string"),
+            ({"name": "x", "cols": 10, "rows": 10, "seed": "abc"}, "'seed' must be an integer"),
+            ({"name": "x", "cols": 10, "rows": 10, "seed": True}, "'seed' must be an integer"),
+            ({"name": "x", "cols": 24.0, "rows": 10}, "'cols' must be an integer in 8-60"),
+            ({"name": "x", "cols": 10, "rows": None}, "'rows' must be an integer in 8-60"),
+        ]
+        for body, expected_msg in cases:
+            status, data = self.post_json("/api/maps/generate", body)
+            self.assertEqual(status, 400, f"{body!r}")
+            self.assertEqual(data, {"error": expected_msg}, f"{body!r}")
+
+    def test_non_object_and_malformed_body(self):
+        # Non-object JSON body (a list parses fine but is not an object).
+        status, data = self.post_json("/api/maps/generate", [{"name": "x"}])
+        self.assertEqual(status, 400)
+        self.assertEqual(data, {"error": "request body must be a JSON object"})
+        # Malformed JSON → shared helper's message.
+        status, _, raw = self.request(
+            "POST", "/api/maps/generate",
+            body=b"{not json", headers={"Content-Type": "application/json"},
+        )
+        self.assertEqual(status, 400)
+        self.assertEqual(json.loads(raw), {"error": "request body must be JSON"})
+
+    # -- C10: success response shape -------------------------------------
+
+    def test_success_shape_mirrors_upload(self):
+        status, gen_data = self.post_json("/api/maps/generate", {
+            "name": "The Deep Warrens", "cols": 24, "rows": 16, "seed": 1337,
+        })
+        self.assertEqual(status, 200)
+        # Key set is EXACTLY the upload key set (byte-identical shape).
+        self.assertEqual(set(gen_data.keys()),
+                         {"id", "name", "width", "height", "cells", "thumbnail"})
+        status, up_data = self.post_json("/api/maps/upload", {
+            "name": "keyset-ref", "image_b64": self.png_b64, "cols": 16, "rows": 12,
+        })
+        self.assertEqual(status, 200)
+        self.assertEqual(set(gen_data.keys()), set(up_data.keys()))
+
+        # C1: exact dimensions in the response.
+        self.assertEqual((gen_data["width"], gen_data["height"]), (24, 16))
+        self.assertEqual(len(gen_data["cells"]), 16)
+        self.assertTrue(all(len(row) == 24 for row in gen_data["cells"]))
+        # name is trimmed and stored.
+        self.assertEqual(gen_data["name"], "The Deep Warrens")
+        # id is a slug.
+        self.assertEqual(gen_data["id"], "the-deep-warrens")
+        # thumbnail: PNG data-URL that decodes to a PNG.
+        self.assertTrue(gen_data["thumbnail"].startswith("data:image/png;base64,"))
+        self.assertTrue(base64.b64decode(
+            gen_data["thumbnail"].split(",", 1)[1]).startswith(b"\x89PNG"))
+
+    def test_seed_null_is_unseeded(self):
+        # §3.5: "null / omitted ⇒ unseeded" — an explicit "seed": null must
+        # behave exactly like an omitted seed and generate normally.
+        status, data = self.post_json("/api/maps/generate", {
+            "name": "seednull", "cols": 10, "rows": 10, "seed": None,
+        })
+        self.assertEqual(status, 200)
+        self.assertEqual((data["width"], data["height"]), (10, 10))
+        self.assertEqual(set(data.keys()),
+                         {"id", "name", "width", "height", "cells", "thumbnail"})
+        self.assertIn("seednull", self._map_ids())
+
+    def test_name_trimming_and_id_registration(self):
+        # Leading/trailing whitespace is trimmed from the stored name and
+        # the slug is built from the trimmed value.
+        status, data = self.post_json("/api/maps/generate", {
+            "name": "  Spaced Hall  ", "cols": 12, "rows": 12, "seed": 0,
+        })
+        self.assertEqual(status, 200)
+        self.assertEqual(data["name"], "Spaced Hall")
+        self.assertEqual(data["id"], "spaced-hall")
+        # Registered: the new id appears in GET /api/maps ...
+        self.assertIn(data["id"], self._map_ids())
+        # ... and GET /api/maps/{id} returns the same cells with image: null.
+        status, _, detail = self.get_json(f"/api/maps/{data['id']}")
+        self.assertEqual(status, 200)
+        self.assertEqual(detail["cells"], data["cells"])
+        self.assertEqual(detail["name"], "Spaced Hall")
+        self.assertIsNone(detail["image"], "generated maps have no source image")
+        # A second generate with the same name gets the -2 suffix (upload
+        # id rules apply to generated maps too).
+        status, second = self.post_json("/api/maps/generate", {
+            "name": "Spaced Hall", "cols": 12, "rows": 12, "seed": 0,
+        })
+        self.assertEqual(status, 200)
+        self.assertEqual(second["id"], "spaced-hall-2")
+        self.assertIn(second["id"], self._map_ids())
+        # Same seed + size → identical cells regardless of which id.
+        self.assertEqual(second["cells"], data["cells"])
+
+
 if __name__ == "__main__":
     unittest.main()

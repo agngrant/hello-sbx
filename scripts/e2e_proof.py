@@ -35,6 +35,13 @@ scenario and prints a check per behaviour:
      a subsequent paint still works (BUG-002 regression).
   7. Permissions over the wire: Bob can't set_fog, can't move Alice; a 7th
      join is rejected with "session full".
+  8. GENERATED MAP (generated-maps spec C11): GM POSTs /api/maps/generate
+     (24x16, seed 42) -> the GM + a player open it in a FRESH session via
+     use_map; the player spawns walkable, is re-parked onto the new grid,
+     and is moved by the GM to the BFS-farthest walkable cell (a corner-to-
+     corner route through the generated doorways — legal A* steps, no
+     corner cuts). The GM then paints a wall on the generated map and the
+     state broadcast carries it (editor of record works on generated maps).
 
 Run:  .venv/bin/python scripts/e2e_proof.py   (starts its own server)
 """
@@ -48,6 +55,8 @@ import threading
 os.environ.setdefault("LITTLEDUNGEONS_QUIET_LOGS", "1")
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from app.models import Grid
+from app.pathfinding import is_valid_step
 from app.server import ThreadingHTTPServer
 from tests.wsclient import WSClient
 
@@ -394,6 +403,114 @@ def main():
         check("GM view: 1 GM + 6 players, 8 tokens (6 players + 2 npcs)",
               len(st["players"]) == 7 and len(st["entities"]) == 8)
         p7.close()
+
+        # 8. GENERATED MAP (generated-maps spec C11): generate -> open ->
+        # pathfind corner to corner. Over a FRESH session so the default
+        # session's sample-dungeon layout is untouched. A* finds the route
+        # because C5 guarantees every generated room is reachable.
+        print("\n[8] generate 24x16 seed 42 + open in a fresh session + pathfind")
+        conn = http.client.HTTPConnection(host, port, timeout=5)
+        conn.request("POST", "/api/maps/generate", body=json.dumps({
+            "name": "E2E Crypt", "cols": 24, "rows": 16, "seed": 42}),
+            headers={"Content-Type": "application/json"})
+        genresp = json.loads(conn.getresponse().read())
+        conn.close()
+        gen_id = genresp["id"]
+        gen_cells = genresp["cells"]
+        # C1 on the returned cells: exact dimensions.
+        check("generate 200 + exact 24x16 dimensions",
+              genresp.get("width") == 24 and genresp.get("height") == 16
+              and len(gen_cells) == 16 and all(len(r) == 24 for r in gen_cells))
+        # C2: the outer border ring is all wall.
+        check("generated border is all wall",
+              all(gen_cells[0][x] == "wall" and gen_cells[15][x] == "wall"
+                  for x in range(24))
+              and all(gen_cells[y][0] == "wall" and gen_cells[y][23] == "wall"
+                      for y in range(16)))
+
+        g2 = WSClient(host, port, path="/ws?session=e2e-gen-42", timeout=10).connect()
+        pl = WSClient(host, port, path="/ws?session=e2e-gen-42", timeout=10).connect()
+        try:
+            w2 = g2.join("GenGM", "gm")
+            check("fresh session GM joined (role=gm)",
+                  w2["type"] == "welcome" and w2["you"]["role"] == "gm")
+            wpl = pl.join("Zoe", "player")
+            check("player joined; spawns on a walkable cell",
+                  wpl["type"] == "welcome" and bool(wpl["you"]["entity_id"]))
+            pl_ent = wpl["you"]["entity_id"]
+            # The player's join broadcast a state to the GM (1 token now).
+            gm_join_state = state_until(g2)
+            check("GM saw the player join (1 token present)",
+                  gm_join_state["type"] == "state"
+                  and len(gm_join_state["entities"]) == 1)
+
+            # GM opens the generated map in this session (use_map). The
+            # player's token is re-parked onto a free floor/doorway of the
+            # new grid (players are kept, not stranded).
+            g2.send_json({"type": "use_map", "map_id": gen_id})
+            gm_state = state_until(g2)
+            check("session now plays the generated 24x16 grid",
+                  gm_state["map"]["width"] == 24 and gm_state["map"]["height"] == 16
+                  and gm_state["map"]["cells"] == gen_cells)
+            from app.main import get_session, maps_registry
+            check("session grid is the registry grid (shared identity)",
+                  get_session("e2e-gen-42").grid is maps_registry[gen_id]["grid"])
+            pl_state = state_until(pl)
+            check("player STAYS in the session (re-parked onto the new grid)",
+                  pl_state["map"]["width"] == 24
+                  and len(pl_state["players"]) == 2)
+            spawn = (pl_state["you_entity"]["x"], pl_state["you_entity"]["y"])
+            check("player re-parked onto a walkable cell",
+                  pl_state["map"]["cells"][spawn[1]][spawn[0]] in ("floor", "doorway"))
+
+            # Target = BFS-farthest walkable cell from spawn (a corner-to-
+            # corner room, computed over the generated grid).
+            from collections import deque
+            def bfs_farthest(cells, w, h, start):
+                WALK = ("floor", "doorway")
+                dist = {start: 0}
+                q = deque([start])
+                while q:
+                    cx, cy = q.popleft()
+                    for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+                        nx, ny = cx + dx, cy + dy
+                        if (0 <= nx < w and 0 <= ny < h and (nx, ny) not in dist
+                                and cells[ny][nx] in WALK):
+                            dist[(nx, ny)] = dist[(cx, cy)] + 1
+                            q.append((nx, ny))
+                return min(dist, key=lambda c: (-dist[c], c[0], c[1]))
+            target = bfs_farthest(gen_cells, 24, 16, spawn)
+
+            g2.send_json({"type": "move", "entity_id": pl_ent,
+                          "x": target[0], "y": target[1]})
+            m = g2.recv_json()
+            check("GM got a path reply (no error)",
+                  m["type"] == "path" and m["entity_id"] == pl_ent, json.dumps(m))
+            path = m["path"]
+            check("path starts at spawn, ends at the BFS-farthest cell, len >= 2",
+                  path[0] == {"x": spawn[0], "y": spawn[1]}
+                  and path[-1] == {"x": target[0], "y": target[1]}
+                  and len(path) >= 2, json.dumps(path))
+            proof_grid = Grid.from_dict({"width": 24, "height": 16, "cells": gen_cells})
+            check("every path step is a legal A* step (no corner cuts)",
+                  all(is_valid_step(proof_grid, (path[i]["x"], path[i]["y"]),
+                                     (path[i + 1]["x"], path[i + 1]["y"]))
+                      for i in range(len(path) - 1)))
+            state_until(g2)  # consume the move's state snapshot
+
+            # GM paints a floor cell (off the path) to wall -> state carries
+            # it (editor-of-record works on generated maps).
+            path_set = {(p["x"], p["y"]) for p in path} | {spawn, target}
+            floor_cells = [(x, y) for y in range(16) for x in range(24)
+                           if gen_cells[y][x] == "floor" and (x, y) not in path_set]
+            px, py = floor_cells[0]
+            g2.send_json({"type": "paint", "x": px, "y": py, "cell_type": "wall"})
+            gstate = state_until(g2)
+            check("GM paint on generated map broadcasts (state reflects it)",
+                  gstate["map"]["cells"][py][px] == "wall")
+        finally:
+            g2.close()
+            pl.close()
     finally:
         for c in (gm, alice, bob):
             c.close()

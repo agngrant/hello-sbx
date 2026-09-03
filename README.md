@@ -154,6 +154,18 @@ corrections through the UI.
 offered by the picker). **Interlaced PNG is not supported** — the decoder
 deliberately rejects `interlace != 0`. There is no lossy-compression decoding at all.
 
+### Generate a map (GM)
+
+No image? The **New map** view has a **Generate map** tab: the GM sets the
+map name, the grid size **X by Y (8–60 each)**, and an optional seed (same
+seed + same size ⇒ same map; blank = random) and clicks **Generate**. The
+server procedurally generates and registers a dungeon of that exact size —
+rooms separated by solid 1-cell walls — and the GM gets the same preview →
+**Open map in session** flow as uploads. Doorways are **sparse by design**
+(the room-door graph is a tree with no loops), so some rooms are only
+reachable via **detours** through others. As with uploads, generation is a
+suggestion: the GM can still paint floor/wall/door to fix anything.
+
 ---
 
 ## Architecture overview
@@ -194,6 +206,7 @@ app/
 ├── ws.py          # RFC 6455 CLIENT helpers only (raw-socket test client; server side deleted)
 ├── imaging.py     # Pillow PNG/BMP decode + encode + gray/resize/Otsu/median
 ├── detection.py   # image -> grid: Otsu -> median -> walls -> doorway -> auto-invert
+├── generation.py  # procedural dungeon generation: BSP rooms, tree doorways (POST /api/maps/generate)
 ├── pathfinding.py # A* (8-dir, no corner cut), has_line_of_sight
 ├── awareness.py   # per-player overlay: colors, labels, relation rules
 ├── session.py     # GameSession: authoritative state, permissions, broadcast

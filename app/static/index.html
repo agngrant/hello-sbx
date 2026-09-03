@@ -30,11 +30,15 @@
     </div>
   </section>
 
-  <!-- ══════════════════════════ UPLOAD (GM) — wireframes §7 ══════════════════════════
-       Iteration 3: the form POSTs the chosen file (FileReader → base64) as
-       JSON to /api/maps/upload; the detected grid is registered and
-       previewed, then "Open map in session" switches to the map view.
-       The full before/after paint editor is Iteration 6 polish. -->
+  <!-- ══════════════════════════ NEW MAP (GM) — wireframes §7, generated-maps §6 ══
+       Two sources, one shared preview + open flow (source tab bar):
+       Upload — the form POSTs the chosen file (FileReader → base64) as JSON
+       to /api/maps/upload; the detected grid is registered and previewed,
+       then "Open map in session" switches to the map view. The full
+       before/after paint editor is Iteration 6 polish.
+       Generate — cols×rows (+ optional seed) → POST /api/maps/generate;
+       the server generates and registers a dungeon of that exact size.
+       Generated maps plug into the identical preview / use_map flow. -->
   <section id="upload-view" data-state="idle" hidden>
     <header class="topbar">
       <span class="session-title">LITTLEDUNGEONS</span>
@@ -44,6 +48,10 @@
       <button id="btn-back-top" class="btn btn-small">Back (Esc)</button>
     </header>
     <main class="upload-main">
+      <div id="map-source-tabs" class="map-source-tabs" role="tablist">
+        <button id="tab-upload" class="tab-btn is-active" aria-pressed="true">Upload map</button>
+        <button id="tab-generate" class="tab-btn" aria-pressed="false">Generate map</button>
+      </div>
       <div id="upload-form" class="panel">
         <h2 class="section-label">Upload map</h2>
         <label class="field-label" for="upload-name">Map name</label>
@@ -70,15 +78,40 @@
           <button id="btn-detect" class="btn btn-primary" disabled>Upload &amp; detect</button>
         </div>
       </div>
-      <div id="upload-preview" class="panel" hidden>
-        <h2 class="section-label">Detected map</h2>
-        <div class="upload-preview-panes">
+      <div id="gen-form" class="panel" hidden>
+        <h2 class="section-label">Generate map</h2>
+        <label class="field-label" for="gen-name">Map name</label>
+        <input id="gen-name" type="text" maxlength="40" placeholder="The Deep Warrens" />
+        <div class="gen-grid-size">
           <div>
+            <label class="field-label" for="gen-cols">Grid size — Cols (X)</label>
+            <input id="gen-cols" type="number" min="8" max="60" step="1" value="24" />
+          </div>
+          <div>
+            <label class="field-label" for="gen-rows">Rows (Y)</label>
+            <input id="gen-rows" type="number" min="8" max="60" step="1" value="16" />
+          </div>
+        </div>
+        <label class="field-label" for="gen-seed">Seed (optional)</label>
+        <input id="gen-seed" type="number" step="1" placeholder="random" />
+        <p class="muted small">Same seed + same size ⇒ same map; blank = random.</p>
+        <p id="gen-note" class="muted small">
+          Note: walls are generated for this exact size; doors are sparse
+          (a tree — no loops), so some rooms require detours.
+        </p>
+        <div class="upload-actions">
+          <button id="btn-generate" class="btn btn-primary" disabled>Generate map</button>
+        </div>
+      </div>
+      <div id="upload-preview" class="panel" hidden>
+        <h2 id="preview-title" class="section-label">Detected map</h2>
+        <div class="upload-preview-panes">
+          <div id="pane-source">
             <h3 class="section-label">Source</h3>
             <img id="preview-image" alt="Uploaded source image" />
           </div>
           <div>
-            <h3 class="section-label">Detection</h3>
+            <h3 id="pane-grid-title" class="section-label">Detection</h3>
             <canvas id="preview-canvas" aria-label="Detected grid"></canvas>
           </div>
           <div>
@@ -86,12 +119,12 @@
             <img id="preview-thumbnail" alt="Server thumbnail" />
           </div>
         </div>
-        <p class="muted small">
+        <p id="preview-note" class="muted small">
           Note: detection is a suggestion — you are the editor of record.
           (Side-by-side before/after painting lands in Iteration 6.)
         </p>
         <div class="upload-actions">
-          <button id="btn-back" class="btn">Upload another</button>
+          <button id="btn-back" class="btn">Start over</button>
           <button id="btn-start-map" class="btn btn-primary">Open map in session</button>
         </div>
       </div>

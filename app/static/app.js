@@ -42,6 +42,21 @@ const els = {
   previewCanvas: $("#preview-canvas"),
   previewThumbnail: $("#preview-thumbnail"),
   uploadNote: $("#upload-note"),
+  // upload view: source tabs + generate form (generated-maps spec §6)
+  mapSourceTabs: $("#map-source-tabs"),
+  tabUpload: $("#tab-upload"),
+  tabGenerate: $("#tab-generate"),
+  genForm: $("#gen-form"),
+  genName: $("#gen-name"),
+  genCols: $("#gen-cols"),
+  genRows: $("#gen-rows"),
+  genSeed: $("#gen-seed"),
+  genNote: $("#gen-note"),
+  btnGenerate: $("#btn-generate"),
+  previewTitle: $("#preview-title"),
+  paneSource: $("#pane-source"),
+  paneGridTitle: $("#pane-grid-title"),
+  previewNote: $("#preview-note"),
   // map: top bar
   mapName: $("#map-name"),
   mapThumbnail: $("#map-thumbnail"),
@@ -99,6 +114,7 @@ const state = {
   tool: "select",       // "select" | "floor" | "wall" | "doorway"
   painting: false,
   lastHovered: null,    // last hovered cell (GM entity spawn target)
+  uploadSource: "upload", // "upload" | "generate" — client-side only (spec §6)
   animations: {},       // entity_id -> {path, i, timer} for in-flight move anims
   moveRetry: null,      // pending {entity_id, x, y} for the "Move anyway" toast
 };
@@ -1304,15 +1320,93 @@ function syncUploadButton() {
   els.btnDetect.disabled = els.uploadFile.files.length === 0;
 }
 
+/* ───────────────────────── Source tabs: Upload | Generate (spec §6.3) ── */
+
+// Upload-side preview copy, restored by resetUploadForm() so "New map…"
+// always reopens the view on the Upload tab, exactly like before.
+const UPLOAD_PREVIEW_COPY = {
+  title: "Detected map",
+  gridTitle: "Detection",
+  note: "Note: detection is a suggestion — you are the editor of record. " +
+        "(Side-by-side before/after painting lands in Iteration 6.)",
+};
+
+let genBusyFlag = false;
+const genBusy = () => genBusyFlag;
+
+function setSourceTab(source) {           // "upload" | "generate"
+  if (els.uploadView.dataset.state === "preview") return;  // locked in preview
+  state.uploadSource = source;
+  els.uploadForm.hidden = source !== "upload";
+  els.genForm.hidden = source !== "generate";
+  syncTabStyles();
+  if (source === "generate") syncGenerateButton();
+}
+
+function syncTabStyles() {
+  const gen = state.uploadSource === "generate";
+  const inPreview = els.uploadView.dataset.state === "preview";
+  els.tabUpload.classList.toggle("is-active", !gen);
+  els.tabGenerate.classList.toggle("is-active", gen);
+  els.tabUpload.setAttribute("aria-pressed", String(!gen));
+  els.tabGenerate.setAttribute("aria-pressed", String(gen));
+  // Tabs are the only way to switch forms; locked (no-op + disabled look)
+  // while the preview is up.
+  els.tabUpload.disabled = inPreview;
+  els.tabGenerate.disabled = inPreview;
+}
+
+function syncGenerateButton() {
+  const nameOk = els.genName.value.trim().length > 0;
+  const cols = Number(els.genCols.value), rows = Number(els.genRows.value);
+  const sizeOk = Number.isInteger(cols) && Number.isInteger(rows)
+    && cols >= 8 && cols <= 60 && rows >= 8 && rows <= 60;
+  els.btnGenerate.disabled = !(nameOk && sizeOk) || genBusy();
+}
+
+function setGenerateBusy(busy, label = "Generating…") {
+  genBusyFlag = busy;
+  els.btnGenerate.disabled = busy;
+  els.btnGenerate.textContent = busy ? label : "Generate map";
+}
+
 function resetUploadForm() {
   els.uploadView.dataset.state = "idle";
+  syncTabStyles();                        // unlock the source tabs
   els.uploadForm.hidden = false;
   els.uploadPreview.hidden = true;
   els.uploadNote.hidden = true;
   els.btnStartMap.disabled = true;
   setUploadBusy(false);
+  setGenerateBusy(false);
   syncUploadButton();
+  // Back on the Upload tab with a clean generate form ("New map…" reopens
+  // on Upload exactly like before the tabs existed).
+  setSourceTab("upload");
+  els.genName.value = "";
+  els.genSeed.value = "";
+  syncGenerateButton();
+  els.previewTitle.textContent = UPLOAD_PREVIEW_COPY.title;
+  els.paneGridTitle.textContent = UPLOAD_PREVIEW_COPY.gridTitle;
+  els.previewNote.textContent = UPLOAD_PREVIEW_COPY.note;
 }
+
+els.tabUpload.addEventListener("click", () => setSourceTab("upload"));
+els.tabGenerate.addEventListener("click", () => setSourceTab("generate"));
+els.genName.addEventListener("input", syncGenerateButton);
+els.genCols.addEventListener("input", syncGenerateButton);
+els.genRows.addEventListener("input", syncGenerateButton);
+// Enter in any generate field triggers the generate (parity with lobby).
+for (const el of [els.genName, els.genCols, els.genRows, els.genSeed]) {
+  el.addEventListener("keydown", (ev) => {
+    if (ev.key === "Enter" && !els.btnGenerate.disabled) generateMap();
+  });
+}
+// Parity with btnDetect (wired above, upload flow): pressing the button
+// must trigger generation. Double-submit is guarded by the same pattern —
+// while a request is in flight setGenerateBusy(true) keeps the button
+// disabled, so a second click is ignored by the browser.
+els.btnGenerate.addEventListener("click", generateMap);
 
 function setUploadBusy(busy, label = "Uploading & detecting…") {
   els.btnDetect.disabled = busy;
@@ -1365,14 +1459,59 @@ async function uploadMap() {
   }
 }
 
+/* Generate flow (generated-maps spec §6.3): POST the cols×rows (+ optional
+   seed) as JSON to /api/maps/generate; the response has the SAME shape as
+   upload, so the shared preview + "Open map in session" (use_map) flow is
+   reused unchanged — a generated map is already in the registry. */
+async function generateMap() {
+  setGenerateBusy(true);
+  try {
+    const body = {
+      name: els.genName.value.trim(),
+      cols: Number(els.genCols.value),
+      rows: Number(els.genRows.value),
+    };
+    if (els.genSeed.value !== "") body.seed = Number(els.genSeed.value);
+    const resp = await fetch("/api/maps/generate", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) throw new Error(data.error ||
+      `generate failed (HTTP ${resp.status})`);
+    state.uploadedMap = {
+      id: data.id, name: data.name, width: data.width, height: data.height,
+      cells: data.cells, thumbnail: data.thumbnail || null,
+      dataUrl: null,           // no source image → #pane-source hidden
+    };
+    showUploadPreview();
+  } catch (err) {
+    toast(`Generate failed: ${err.message}`, "error");
+    setGenerateBusy(false);
+  }
+}
+
 function showUploadPreview() {
   els.uploadView.dataset.state = "preview";
+  syncTabStyles();                           // lock the source tabs
   els.uploadForm.hidden = true;
+  els.genForm.hidden = true;                 // only the preview shows
   els.uploadPreview.hidden = false;
   const m = state.uploadedMap;
-  els.previewImage.src = m.dataUrl;
+  const gen = state.uploadSource === "generate";
+  els.previewTitle.textContent = gen ? "Generated map" : "Detected map";
+  els.paneSource.hidden = gen;               // no source image for generate
+  if (m.dataUrl) els.previewImage.src = m.dataUrl;   // uploads only
   els.previewThumbnail.src = m.thumbnail || "";
-  els.uploadNote.textContent = `Detected ${m.width}×${m.height} grid — map id “${m.id}”.`;
+  els.paneGridTitle.textContent = gen ? "Grid" : "Detection";
+  els.previewNote.textContent = gen
+    ? "Generation is a suggestion — you are the editor of record. " +
+      "Paint to add rooms, walls, or extra doors."
+    : UPLOAD_PREVIEW_COPY.note;
+  els.uploadNote.textContent = gen
+    ? `Generated ${m.width}×${m.height} grid — map id “${m.id}”.`
+    : `Detected ${m.width}×${m.height} grid — map id “${m.id}”.`;
   els.uploadNote.hidden = false;
   // Render the detected grid on the preview canvas (same shared renderer).
   const saved = state.grid;
@@ -1382,7 +1521,9 @@ function showUploadPreview() {
   drawGridOnCanvas(els.previewCanvas, els.previewCanvas.getContext("2d"));
   state.grid = saved;
   els.btnStartMap.disabled = false;
-  toast(`Map “${m.name}” detected and registered.`);
+  toast(gen
+    ? `Map “${m.name}” generated and registered.`
+    : `Map “${m.name}” detected and registered.`);
 }
 
 function openUploadedMap() {

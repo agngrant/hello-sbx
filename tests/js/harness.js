@@ -93,15 +93,39 @@ function makeCtx(el) {
 
 function makeEl() {
   const el = {
-    id: "", hidden: false, textContent: "", value: "", checked: false,
+    id: "", textContent: "", value: "", checked: false,
     disabled: false, tabIndex: 0, innerHTML: "", files: [],
     style: {}, dataset: {},
     clientWidth: 800, clientHeight: 600, width: 0, height: 0, src: "",
     classList: {
       _s: new Set(),
-      add() {}, remove() {}, toggle() {}, contains() { return false; },
+      add(...cs) { for (const c of cs) this._s.add(c); },
+      remove(...cs) { for (const c of cs) this._s.delete(c); },
+      toggle(c, force) {
+        const on = force === undefined ? !this._s.has(c) : !!force;
+        if (on) this._s.add(c); else this._s.delete(c);
+        return on;
+      },
+      contains(c) { return this._s.has(c); },
     },
-    addEventListener() {}, removeEventListener() {},
+    _listeners: {},
+    addEventListener(type, fn) {
+      (this._listeners[type] = this._listeners[type] || []).push(fn);
+    },
+    removeEventListener(type, fn) {
+      const l = this._listeners[type];
+      if (l) {
+        const i = l.indexOf(fn);
+        if (i >= 0) l.splice(i, 1);
+      }
+    },
+    // Lets tests trigger registered handlers (e.g. a button click) through
+    // the REAL app.js code path instead of calling the handler directly.
+    dispatchEvent(ev) {
+      for (const fn of this._listeners[ev.type] || []) fn(ev);
+      return true;
+    },
+    setAttribute() {}, getAttribute() { return null; },
     setAttribute() {}, getAttribute() { return null; },
     appendChild(c) { return c; }, removeChild() {}, remove() {},
     insertBefore() {}, querySelector() { return null; }, querySelectorAll() { return []; },
@@ -109,6 +133,20 @@ function makeEl() {
     setPointerCapture() {},
     closest() { return null; }, children: { length: 0 }, firstChild: null,
   };
+  // Model the `hidden` attribute (HTML semantics: the attribute is present
+  // for every stubbed id, i.e. the element starts hidden — JS explicitly
+  // re-sets .hidden wherever visibility matters). Backed by the classList
+  // set so the two stay consistent.
+  Object.defineProperty(el, "hidden", {
+    get() { return el.classList._s.has("hidden"); },
+    set(v) {
+      if (v) el.classList._s.add("hidden");
+      else el.classList._s.delete("hidden");
+    },
+    configurable: true,
+    enumerable: true,
+  });
+  el.classList._s.add("hidden");   // the attribute is present at creation
   // One shared context per canvas element (arc/fillText recordings persist
   // across the layout -> render passes within a single test expression).
   let _ctx = null;
@@ -152,7 +190,19 @@ function buildApi() {
     close() { if (this.onclose) this.onclose(); }
   };
   WebSocket.OPEN = 1;
-  const fetch = () => Promise.reject(new Error("no network in harness"));
+  // Recorded fetch stub (generated-maps spec C12, optional): every call is
+  // captured in __FETCH.sent; the Promise resolves with __FETCH.response so
+  // tests can drive generateMap() end-to-end. The old behavior (hard reject
+  // of "no network in harness") is restored by __FETCH.hardReject = true.
+  const __FETCH = { sent: [], response: null, hardReject: false, reset() {
+    this.sent.length = 0; this.response = null; this.hardReject = false; } };
+  const fetch = (url, opts) => {
+    __FETCH.sent.push({ url, opts });
+    if (__FETCH.hardReject) {
+      return Promise.reject(new Error("no network in harness"));
+    }
+    return Promise.resolve(__FETCH.response);
+  };
   const FileReader = class { readAsDataURL() {} };
   // Shadow the globals so app.js drives the controllable timer.
   const setTimeout = (fn, ms) => timer.schedule(ms, fn);
@@ -168,7 +218,8 @@ function buildApi() {
     "openUploadedMap, sendMove, selectEntity," +
     "createEntity, toggleFog, canvasHint, showGmFirstRunHint, dismissGmFirstRunHint, updateControlHint," +
     "join, connectWs, setConn, scheduleReconnect, showView, wsSend, wsUrl," +
-    "_timer: timer, _send: __SEND }";
+    "uploadMap, generateMap, showUploadPreview, resetUploadForm, setSourceTab, syncTabStyles, syncGenerateButton, setGenerateBusy, setUploadBusy, syncUploadButton," +
+    "_timer: timer, _send: __SEND, _fetch: __FETCH }";
   // eslint-disable-next-line no-eval
   eval(src + EXPORTS);
 

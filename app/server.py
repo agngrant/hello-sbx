@@ -59,6 +59,7 @@ from starlette.staticfiles import StaticFiles
 from starlette.types import Receive, Scope, Send
 
 from app.detection import detect_grid, grid_to_thumbnail_png
+from app.generation import GEN_MAX_EDGE, GEN_MIN_EDGE, generate_grid
 from app.main import (
     BASE_DIR,
     MAX_BODY,
@@ -184,6 +185,12 @@ def build_app() -> FastAPI:
         """``POST /api/maps/upload`` — JSON body (NOT multipart), same
         validation + status codes as the old handler."""
         return await _handle_upload(request)
+
+    @app.post("/api/maps/generate")
+    async def maps_generate(request: Request) -> JSONResponse:
+        """``POST /api/maps/generate`` — generate a dungeon of the exact
+        requested cols x rows (generated-maps spec §5)."""
+        return await _handle_generate(request)
 
     @app.post("/api/maps/{map_id}/paint")
     async def maps_paint(map_id: str, request: Request) -> JSONResponse:
@@ -418,6 +425,72 @@ async def _handle_upload(request: Any) -> JSONResponse:
     slug = slug_map_id(name.strip())
     map_id = _unique_map_id(slug) if slug else _timestamp_map_id()
     grid.image = name.strip()
+    _register_map(map_id, grid)
+
+    return JSONResponse(
+        {
+            "id": map_id,
+            "name": grid.name,
+            "width": grid.width,
+            "height": grid.height,
+            "cells": grid.cells,
+            "thumbnail": grid_to_thumbnail_png(grid),
+        },
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+async def _handle_generate(request: Any) -> JSONResponse:
+    """``POST /api/maps/generate`` (generated-maps spec §5).
+
+    JSON body: ``{"name": str, "cols": int 8-60, "rows": int 8-60,
+    "seed"?: int}``. :func:`app.generation.generate_grid` → register →
+    200 with the SAME key set as upload (``{"id","name","width","height",
+    "cells","thumbnail"}``). Validation order per §5.1 (body-object →
+    name → cols → rows → seed) with the exact §5.1 error strings; bools are
+    rejected for every int field (same style as the upload route).
+    """
+    body, err = await _read_body_checked(request)
+    if err is not None:
+        return err
+    payload, err = await _parse_json_body(body)
+    if err is not None:
+        return err
+    if not isinstance(payload, dict):
+        return _error_json(400, "request body must be a JSON object")
+
+    name = payload.get("name")
+    if not isinstance(name, str) or not name.strip():
+        return _error_json(400, "'name' must be a non-empty string")
+    cols = payload.get("cols")
+    if (
+        isinstance(cols, bool)
+        or not isinstance(cols, int)
+        or not (GEN_MIN_EDGE <= cols <= GEN_MAX_EDGE)
+    ):
+        return _error_json(400, "'cols' must be an integer in 8-60")
+    rows = payload.get("rows")
+    if (
+        isinstance(rows, bool)
+        or not isinstance(rows, int)
+        or not (GEN_MIN_EDGE <= rows <= GEN_MAX_EDGE)
+    ):
+        return _error_json(400, "'rows' must be an integer in 8-60")
+    seed = payload.get("seed")  # optional: omitted or null → unseeded
+    if seed is not None and (
+        isinstance(seed, bool) or not isinstance(seed, int)
+    ):
+        return _error_json(400, "'seed' must be an integer")
+
+    try:
+        grid = generate_grid(cols, rows, name.strip(), seed)
+    except ValueError as exc:
+        # Belt-and-braces: the endpoint checks first, but a defensive
+        # ValueError from the generator maps to 400 like upload's does.
+        return _error_json(400, str(exc))
+
+    slug = slug_map_id(name.strip())
+    map_id = _unique_map_id(slug) if slug else _timestamp_map_id()
     _register_map(map_id, grid)
 
     return JSONResponse(

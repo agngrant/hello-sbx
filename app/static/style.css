@@ -497,6 +497,30 @@ input[type="file"] { color: var(--text-muted); }
 #upload-view { display: flex; flex-direction: column; height: 100dvh; }
 .upload-main { flex: 1; overflow-y: auto; padding: var(--s5); }
 .upload-main .panel { max-width: 720px; margin: 0 auto var(--s4); }
+.map-source-tabs { display: flex; gap: var(--s1); max-width: 720px; margin: 0 auto var(--s3); }
+.map-source-tabs .tab-btn {
+  padding: 8px 14px;
+  border-radius: var(--r-control);
+  background: transparent;
+  border: 1px solid #39415a;   /* same border token as .btn (no --border var) */
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+.map-source-tabs .tab-btn:hover:not(:disabled) { border-color: var(--accent); }
+.map-source-tabs .tab-btn.is-active {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #10202e;
+  font-weight: 600;
+}
+.map-source-tabs .tab-btn:disabled { opacity: 0.45; cursor: not-allowed; }
+
+/* Cols + Rows side by side in the generate form (like .upload-grid-size) */
+#gen-form .gen-grid-size { display: flex; gap: var(--s3); }
+#gen-form .gen-grid-size > div { flex: 1; min-width: 0; }
+#gen-form .gen-grid-size input { width: 100%; }
+
 .upload-actions { display: flex; justify-content: flex-end; gap: var(--s3); margin-top: var(--s4); }
 .upload-preview-panes { display: flex; gap: var(--s4); }
 .upload-preview-panes > div { flex: 1; min-width: 0; }

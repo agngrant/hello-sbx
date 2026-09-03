@@ -317,6 +317,20 @@ Flow:
 UI after upload to fix detection. Detection is a *suggestion*; the GM is the
 editor of record.
 
+**Procedural generation (no image):** the New map view also offers a
+**Generate map** tab (`POST /api/maps/generate`, `app/generation.py`):
+`{"name", "cols" (8–60), "rows" (8–60), "seed"?}` → a BSP dungeon of that
+exact size — rooms (≥ 3×3 floor rectangles) separated by solid 1-cell walls
+with one doorway per split, so the room–door graph is a **tree** (connected,
+no loops: `doors = rooms − 1`), every floor cell reachable from any other,
+and some geometrically adjacent rooms deliberately **door-less** (detours).
+Same `cols`/`rows`/`seed` ⇒ identical grid (reproducible); no seed ⇒ fresh
+random. The response has the same key set as upload
+(`{"id","name","width","height","cells","thumbnail"}`) and the map is
+registered like an upload, so the frontend preview → `use_map` flow and GM
+paint work unchanged (generation is a suggestion; the GM is the editor of
+record). Full spec: `docs/design/generated-maps.md`.
+
 ---
 
 ## 8. REST API (JSON)
@@ -327,6 +341,7 @@ editor of record.
 | GET | `/api/maps` | any | `{"maps":[{"id","name","width","height"}]}` |
 | GET | `/api/maps/{id}` | any | `{"id","name","width","height","cells","entities":[],"players":[]}` |
 | POST | `/api/maps/upload` | GM | JSON body §7 → create map, return map + thumbnail |
+| POST | `/api/maps/generate` | GM | `{"name","cols","rows","seed"?}` → procedurally generated map (same response shape as upload, §7) |
 | POST | `/api/maps/{id}/paint` | GM | `{"x","y","cell_type"}` set one cell |
 
 **Role assignment:** the first client to send `role:"gm"` over WebSocket (or

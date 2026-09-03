@@ -40,6 +40,21 @@ Each test maps to the specific QA report it proves:
            onError, while not yet joined, must surface the message on the
            lobby status slot instead.
 
+Generated maps (generated-maps spec §6 / C12 — frontend):
+* ``index.html`` carries the new source-tab bar + generate form ids
+  (``#map-source-tabs``, ``#tab-upload``, ``#tab-generate``, ``#gen-form``,
+  ``#gen-name``, ``#gen-cols``/``#gen-rows`` with min="8" max="60",
+  ``#gen-seed``, ``#btn-generate``, ``#pane-source``, ``#preview-title``)
+  AND every pre-existing upload id is still present (regression guard).
+* The real app.js under the stub DOM: booting doesn't throw;
+  ``setSourceTab("generate")`` hides ``#upload-form``, shows ``#gen-form``
+  and sets ``state.uploadSource === "generate"`` (and is a no-op while the
+  preview is up); ``syncGenerateButton`` gates ``#btn-generate`` on a
+  non-empty name + integer 8–60 size; ``generateMap()`` driven end-to-end
+  against the harness' recorded fetch stub (body, success preview branch,
+  "Generated…" copy, source pane hidden) and its error path (toast + busy
+  cleared, no crash).
+
 Awareness tier rendering (player three-tier model, §5):
 * the canvas must render the three states: FULL contacts (line of sight)
   as a colored token WITH a name label + colorblind shape marker (players
@@ -75,13 +90,15 @@ def js(expr: str) -> str:
     expression ``expr``, returning the result as a JSON string.
 
     The expression is passed via an environment variable so no shell/JS
-    quote-escaping is involved.
+    quote-escaping is involved. The result may be a thenable (e.g. the
+    promise from ``generateMap()``) — the node program awaits it; sync
+    results pass through ``Promise.resolve`` unchanged.
     """
     program = (
         'const {buildApi}=require(process.env.HARNESS);\n'
         'const api=buildApi();\n'
         'const out=eval(process.env.EXPR);\n'
-        'process.stdout.write(JSON.stringify(out));\n'
+        'Promise.resolve(out).then(o=>{process.stdout.write(JSON.stringify(o));});\n'
     )
     env = dict(os.environ)
     env["APPJS_PATH"] = APPJS
@@ -857,6 +874,414 @@ class TestIndexHtml(FrontendBase):
         legend = re.sub(r"\s+", " ", m.group(1)).lower()
         self.assertIn("4 square", legend)
         self.assertIn("hidden", legend)
+
+
+@unittest.skipUnless(shutil.which("node") is not None,
+                     "Node.js not found; skipping HTML static checks")
+class TestIndexHtmlGeneratedMaps(FrontendBase):
+    """C12 (static half): the generate UI ids exist in the real index.html,
+    the generate number inputs are range-bounded, and every PRE-EXISTING
+    upload-view id is still present (regression guard)."""
+
+    def setUp(self):
+        with open(INDEX, encoding="utf-8") as fh:
+            self.html = fh.read()
+
+    def test_new_generate_ids_present(self):
+        # ids the C12 acceptance pins, each checked in context
+        for attr in (
+            'id="map-source-tabs"',
+            'id="tab-upload"',
+            'id="tab-generate"',
+            'id="gen-form"',
+            'id="gen-name"',
+            'id="gen-cols"',
+            'id="gen-rows"',
+            'id="gen-seed"',
+            'id="btn-generate"',
+            'id="pane-source"',
+            'id="preview-title"',
+            'id="pane-grid-title"',
+            'id="preview-note"',
+            'id="gen-note"',
+        ):
+            self.assertIn(attr, self.html, f"missing {attr}")
+
+    def test_gen_number_inputs_bounded_8_60(self):
+        # The server hard-validates cols/rows as integers in 8-60; the
+        # inputs must advertise the same range.
+        for attr in ('id="gen-cols"', 'id="gen-rows"'):
+            i = self.html.index(attr)
+            block = self.html[i:i + 160]
+            self.assertIn('type="number"', block, attr)
+            self.assertIn('min="8"', block, attr)
+            self.assertIn('max="60"', block, attr)
+            self.assertIn('step="1"', block, attr)
+
+    def test_generate_defaults(self):
+        i = self.html.index('id="gen-cols"')
+        self.assertIn('value="24"', self.html[i:i + 160])
+        i = self.html.index('id="gen-rows"')
+        self.assertIn('value="16"', self.html[i:i + 160])
+        i = self.html.index('id="gen-seed"')
+        self.assertIn('placeholder="random"', self.html[i:i + 160])
+        i = self.html.index('id="gen-name"')
+        self.assertIn('maxlength="40"', self.html[i:i + 160])
+        self.assertIn('placeholder="The Deep Warrens"', self.html[i:i + 200])
+
+    def test_tab_buttons_and_default_active(self):
+        i = self.html.index('id="tab-upload"')
+        self.assertIn("Upload map", self.html[i:i + 200])
+        self.assertIn("is-active", self.html[i:i + 200])   # default tab
+        i = self.html.index('id="tab-generate"')
+        self.assertIn("Generate map", self.html[i:i + 200])
+
+    def test_generate_button_starts_disabled(self):
+        i = self.html.index('id="btn-generate"')
+        self.assertIn("disabled", self.html[i:i + 200])
+
+    # Regression guard: every id the pre-existing upload flow + tests rely
+    # on must still be present and unchanged.
+    def test_preexisting_upload_ids_still_present(self):
+        for attr in (
+            'id="upload-view"', 'id="upload-form"', 'id="upload-name"',
+            'id="upload-file"', 'id="upload-file-name"', 'id="upload-cols"',
+            'id="upload-rows"', 'id="dark-is-wall"', 'id="dark-is-wall-wrap"',
+            'id="upload-preview"', 'id="upload-note"', 'id="btn-detect"',
+            'id="btn-start-map"', 'id="btn-back"', 'id="btn-back-top"',
+            'id="preview-image"', 'id="preview-canvas"',
+            'id="preview-thumbnail"', 'id="new-entity-kind"',
+            'id="join-name"', 'id="join-gm"', 'id="join-player"',
+        ):
+            self.assertIn(attr, self.html, f"regression: {attr} missing")
+
+
+class TestGeneratedMapsFrontend(FrontendBase):
+    """C12 (JS half): the real app.js under the stub DOM. Booting must not
+    throw; the source tabs switch forms + state; generate is gated; and
+    generateMap() runs end-to-end against the harness' recorded fetch stub."""
+
+    def test_boot_with_stubbed_dom_does_not_throw(self):
+        # buildApi() evals the real app.js (including all the new
+        # generate-form listeners); reaching here means boot is clean.
+        out = js(
+            "({state:typeof api.state,src:api.state.uploadSource,"
+            "timers:api._timer.pending()})"
+        )
+        self.assertIn('"state":"object"', out)
+        self.assertIn('"src":"upload"', out)   # default source is upload
+
+    def test_set_source_tab_generate(self):
+        expr = (
+            "(()=>{api.state.joined=true;"
+            "api.state.role='gm';"
+            "api.state.you={id:'p1',name:'G',role:'gm',entity_id:null};"
+            "api.els.uploadView.dataset.state='idle';"
+            "api.els.genCols.value='24';"
+            "api.els.genRows.value='16';"
+            "api.setSourceTab('generate');"
+            "return {"
+            "uploadFormHidden:api.els.uploadForm.hidden,"
+            "genFormHidden:api.els.genForm.hidden,"
+            "uploadSource:api.state.uploadSource,"
+            "genActive:api.els.tabGenerate.classList._s.has('is-active'),"
+            "uploadActive:api.els.tabUpload.classList._s.has('is-active'),"
+            "btnDisabled:api.els.btnGenerate.disabled};})()"
+        )
+        out = js(expr)
+        # Upload form hidden, generate form shown, state updated, active tab
+        # styled; button disabled because #gen-name is empty.
+        self.assertIn('"uploadFormHidden":true', out, out)
+        self.assertIn('"genFormHidden":false', out, out)
+        self.assertIn('"uploadSource":"generate"', out, out)
+        self.assertIn('"genActive":true', out)
+        self.assertIn('"uploadActive":false', out)
+        self.assertIn('"btnDisabled":true', out)
+
+    def test_set_source_tab_back_to_upload(self):
+        expr = (
+            "(()=>{api.state.joined=true;"
+            "api.state.role='gm';"
+            "api.state.you={id:'p1',name:'G',role:'gm',entity_id:null};"
+            "api.els.uploadView.dataset.state='idle';"
+            "api.setSourceTab('generate');"
+            "api.setSourceTab('upload');"
+            "return {"
+            "uploadFormHidden:api.els.uploadForm.hidden,"
+            "genFormHidden:api.els.genForm.hidden,"
+            "uploadSource:api.state.uploadSource};})()"
+        )
+        out = js(expr)
+        self.assertIn('"uploadFormHidden":false', out, out)
+        self.assertIn('"genFormHidden":true', out, out)
+        self.assertIn('"uploadSource":"upload"', out, out)
+
+    def test_tabs_locked_during_preview(self):
+        expr = (
+            "(()=>{api.state.joined=true;"
+            "api.state.role='gm';"
+            "api.state.you={id:'p1',name:'G',role:'gm',entity_id:null};"
+            "api.els.uploadView.dataset.state='preview';"
+            "api.syncTabStyles();"
+            "api.setSourceTab('generate');"
+            "return {"
+            "uploadSource:api.state.uploadSource,"
+            "genFormHidden:api.els.genForm.hidden,"
+            "tabsDisabled:api.els.tabUpload.disabled&&"
+            "api.els.tabGenerate.disabled};})()"
+        )
+        out = js(expr)
+        # Locked in preview: state unchanged, generate form still hidden.
+        self.assertIn('"uploadSource":"upload"', out, out)
+        self.assertIn('"genFormHidden":true', out)
+        self.assertIn('"tabsDisabled":true', out)
+
+    def test_reset_upload_form_reopens_on_upload_tab(self):
+        # C12: "New map…" reopens on the Upload tab, generate fields reset,
+        # upload preview copy restored.
+        expr = (
+            "(()=>{api.state.joined=true;"
+            "api.state.role='gm';"
+            "api.state.you={id:'p1',name:'G',role:'gm',entity_id:null};"
+            "api.els.uploadView.dataset.state='idle';"
+            "api.setSourceTab('generate');"
+            "api.els.genName.value='Keep me?';"
+            "api.els.genSeed.value='42';"
+            "api.els.btnGenerate.disabled=false;"
+            "api.els.previewTitle.textContent='Generated map';"
+            "api.els.paneGridTitle.textContent='Grid';"
+            "api.els.previewNote.textContent='gen note';"
+            "api.resetUploadForm();"
+            "return {"
+            "uploadSource:api.state.uploadSource,"
+            "genFormHidden:api.els.genForm.hidden,"
+            "genName:api.els.genName.value,"
+            "genSeed:api.els.genSeed.value,"
+            "btnDisabled:api.els.btnGenerate.disabled,"
+            "title:api.els.previewTitle.textContent,"
+            "gridTitle:api.els.paneGridTitle.textContent,"
+            "noteRestored:api.els.previewNote.textContent.indexOf('detection')" +
+            ">=0};})()"
+        )
+        out = js(expr)
+        self.assertIn('"uploadSource":"upload"', out, out)
+        self.assertIn('"genFormHidden":true', out)
+        self.assertIn('"genName":""', out)
+        self.assertIn('"genSeed":""', out)
+        self.assertIn('"btnDisabled":true', out)
+        self.assertIn('"title":"Detected map"', out)
+        self.assertIn('"gridTitle":"Detection"', out)
+        self.assertIn('"noteRestored":true', out)
+
+    def test_sync_generate_button_gating(self):
+        # disabled: no name / out-of-range / non-integer size;
+        # enabled: name + integers in 8-60.
+        expr = (
+            "(()=>{const run=(n,c,r)=>{api.els.genName.value=n;"
+            "api.els.genCols.value=c;api.els.genRows.value=r;"
+            "api.syncGenerateButton();"
+            "return api.els.btnGenerate.disabled};"
+            "return {noName:run('', '24','16'),"
+            "low:run('x','7','16'),high:run('x','24','61'),"
+            "nonInt:run('x','24.5','16'),"
+            "edgeOk:!run('x','8','8'),"
+            "midOk:!run('x','24','16'),"
+            "maxOk:!run('x','60','60')};})()"
+        )
+        out = js(expr)
+        for key in ("noName", "low", "high", "nonInt", "edgeOk", "midOk",
+                    "maxOk"):
+            self.assertIn(f'"{key}":true', out, out)
+
+    def test_generate_map_success_end_to_end(self):
+        # Drives the real generateMap() against the recorded fetch stub:
+        # body {name, cols, rows, seed} -> 200 response -> preview state
+        # with the generate copy, source pane hidden, start button enabled.
+        gen_cells = (
+            "Array.from({length:8},(_,y)=>Array.from({length:10},(x)=>"
+            "(x===0||y===0||x===9||y===7)?'wall':'floor'))"
+        )
+        expr = (
+            "(()=>{api.state.joined=true;"
+            "api.state.role='gm';"
+            "api.state.you={id:'p1',name:'G',role:'gm',entity_id:null};"
+            "api.els.uploadView.dataset.state='idle';"
+            "api.setSourceTab('generate');"
+            "api.els.genName.value='  The Deep Warrens  ';"
+            "api.els.genCols.value='10';"
+            "api.els.genRows.value='8';"
+            "api.els.genSeed.value='42';"
+            "api._fetch.reset();"
+            "api._fetch.response={ok:true,status:200,json:async()=>({"
+            "id:'the-deep-warrens',name:'The Deep Warrens',"
+            "width:10,height:8,cells:" + gen_cells +
+            ",thumbnail:'data:image/png;base64,x'})};"
+            "return api.generateMap().then(()=>({"
+            "posted:api._fetch.sent.length===1,"
+            "body:api._fetch.sent[0]?JSON.parse(api._fetch.sent[0].opts.body)" +
+            ":null,"
+            "map:api.state.uploadedMap,"
+            "state:api.els.uploadView.dataset.state,"
+            "title:api.els.previewTitle.textContent,"
+            "paneSourceHidden:api.els.paneSource.hidden,"
+            "paneGridTitle:api.els.paneGridTitle.textContent,"
+            "previewNote:api.els.previewNote.textContent.indexOf('Generation')" +
+            ">=0,"
+            "uploadNote:api.els.uploadNote.textContent,"
+            "noteHidden:api.els.uploadNote.hidden,"
+            "startEnabled:!api.els.btnStartMap.disabled,"
+            "genLabel:api.els.btnGenerate.textContent," +
+            "genDisabled:api.els.btnGenerate.disabled" +
+            "}));})()"
+        )
+        out = js(expr)
+        self.assertIn('"posted":true', out, out)
+        self.assertIn(
+            '"body":{"name":"The Deep Warrens","cols":10,"rows":8,' +
+            '"seed":42}', out, out)
+        self.assertIn('"id":"the-deep-warrens"', out)
+        self.assertIn('"dataUrl":null', out)
+        self.assertIn('"state":"preview"', out)
+        self.assertIn('"title":"Generated map"', out)
+        self.assertIn('"paneSourceHidden":true', out)
+        self.assertIn('"paneGridTitle":"Grid"', out)
+        self.assertIn('"previewNote":true', out)
+        self.assertIn('Generated 10\u00d78 grid', out)
+        self.assertIn('"noteHidden":false', out)
+        self.assertIn('"startEnabled":true', out)
+        self.assertIn('"genLabel":"Generating…"', out)
+        # busy held (same parity as the upload flow: the button stays busy
+        # until "Start over" → resetUploadForm() clears it); and the button
+        # stays disabled — the (unchanged) empty name field fails the gate.
+        self.assertIn('"genDisabled":true', out)
+
+    def test_generate_map_success_omits_blank_seed(self):
+        expr = (
+            "(()=>{api.state.joined=true;"
+            "api.state.role='gm';"
+            "api.state.you={id:'p1',name:'G',role:'gm',entity_id:null};"
+            "api.els.uploadView.dataset.state='idle';"
+            "api.setSourceTab('generate');"
+            "api.els.genName.value='No Seed';"
+            "api.els.genCols.value='8';"
+            "api.els.genRows.value='8';"
+            "api.els.genSeed.value='';"
+            "api._fetch.reset();"
+            "api._fetch.response={ok:true,status:200,json:async()=>({"
+            "id:'no-seed',name:'No Seed',width:8,height:8,"
+            "cells:Array.from({length:8},()=>Array(8).fill('floor')),"
+            "thumbnail:null})};"
+            "return api.generateMap().then(()=>({"
+            "body:JSON.parse(api._fetch.sent[0].opts.body),"
+            "thumb:api.state.uploadedMap.thumbnail" +
+            "}));})()"
+        )
+        out = js(expr)
+        # Blank seed -> no seed key on the wire; null thumbnail tolerated.
+        self.assertIn(
+            '"body":{"name":"No Seed","cols":8,"rows":8}', out, out)
+        self.assertIn('"thumb":null', out)
+
+    def test_generate_button_click_triggers_generate(self):
+        # Regression (the QA coverage gap): the "Generate map" BUTTON was
+        # a no-op because app.js never registered a click listener on
+        # #btn-generate — only the Enter-key handler and direct
+        # generateMap() calls triggered it (the earlier harness tests
+        # called generateMap() directly, so the gap passed QA). This
+        # simulates the user flow through the REAL addEventListener wiring:
+        # switch to the generate tab, fill the fields (dispatching the
+        # "input" events that enable the button), assert it is enabled,
+        # then CLICK the button via dispatchEvent — never calling
+        # generateMap() directly — and assert the fetch stub received
+        # POST /api/maps/generate with the right body and the preview comes up.
+        expr = (
+            "(()=>{api.state.joined=true;"
+            "api.state.role='gm';"
+            "api.state.you={id:'p1',name:'G',role:'gm',entity_id:null};"
+            "api.els.uploadView.dataset.state='idle';"
+            "api.setSourceTab('generate');"
+            "api._fetch.reset();"
+            "api._fetch.response={ok:true,status:200,json:async()=>({"
+            "id:'deep-warrens',name:'Deep Warrens',width:10,height:8,"
+            "cells:Array.from({length:8},(_,y)=>Array.from({length:10},"
+            "(x)=>(x===0||y===0||x===9)?'wall':'floor')),"
+            "thumbnail:null})};"
+            "const out={posted:false,enabledBefore:false,"
+            "busyDisabledRightAfterClick:true,"
+            "url:'',method:'',body:null,state:'',title:''};"
+            "api.els.genName.value='Deep Warrens';"
+            "api.els.genCols.value='10';"
+            "api.els.genRows.value='8';"
+            "for(const el of [api.els.genName,api.els.genCols,"
+            "api.els.genRows]){el.dispatchEvent({type:'input'})};"
+            "out.enabledBefore=!api.els.btnGenerate.disabled;"
+            "api.els.btnGenerate.dispatchEvent({type:'click'});"
+            "out.posted=api._fetch.sent.length===1;"
+            "out.url=api._fetch.sent[0]?api._fetch.sent[0].url:null;"
+            "out.method=api._fetch.sent[0]?"
+            "api._fetch.sent[0].opts.method:null;"
+            "out.body=api._fetch.sent[0]?"
+            "JSON.parse(api._fetch.sent[0].opts.body):null;"
+            "out.busyDisabledRightAfterClick=api.els.btnGenerate.disabled;"
+            "const pump=(n)=>n>0?Promise.resolve().then(()=>pump(n-1)):"
+            "Promise.resolve();"
+            "return pump(12).then(()=>{"
+            "out.state=api.els.uploadView.dataset.state;"
+            "out.title=api.els.previewTitle.textContent;"
+            "return out;});})()"
+        )
+        out = js(expr)
+        self.assertIn('"enabledBefore":true', out, out)
+        self.assertIn('"posted":true', out)
+        self.assertIn('"url":"/api/maps/generate"', out)
+        self.assertIn('"method":"POST"', out)
+        self.assertIn(
+            '"body":{"name":"Deep Warrens","cols":10,"rows":8}', out, out)
+        self.assertIn('"busyDisabledRightAfterClick":true', out)
+        # user flow completed: preview up with the generated map
+        self.assertIn('"state":"preview"', out)
+        self.assertIn('"title":"Generated map"', out)
+
+    def test_generate_map_error_toasts_and_no_crash(self):
+        # 400 -> error toast "Generate failed: ...", busy released, no
+        # crash, preview untouched. The second subtest covers the old
+        # hard-reject fetch behavior via the stub's hardReject flag.
+        for reject_mode in ("http", "hard"):
+            with self.subTest(reject_mode=reject_mode):
+                expr = (
+                    "(()=>{api.state.joined=true;"
+                    "api.state.role='gm';"
+                    "api.state.you={id:'p1',name:'G',role:'gm',entity_id:null};"
+                    "api.els.uploadView.dataset.state='idle';"
+                    "api.setSourceTab('generate');"
+                    "api.els.genName.value='Boom';"
+                    "api.els.genCols.value='10';"
+                    "api.els.genRows.value='8';"
+                    "api._fetch.reset();"
+                    + ("api._fetch.hardReject=true;"
+                       if reject_mode == "hard" else
+                       "api._fetch.response={ok:false,status:400,"
+                       "json:async()=>({error:\"'cols' must be an integer "
+                       "in 8-60\"})};")
+                    + "api.els.btnGenerate.disabled=false;"
+                    "const doc=api.document;const spans=[];"
+                    "const realCreate=doc.createElement;"
+                    "doc.createElement=(t)=>{const el=realCreate(t);"
+                    "if(t==='span')spans.push(()=>el.textContent);return el};"
+                    "return api.generateMap().then(()=>{"
+                    "doc.createElement=realCreate;"
+                    "const texts=spans.map(f=>f());"
+                    "return {toastText:texts[texts.length-1]||null,"
+                    "state:api.els.uploadView.dataset.state,"
+                    "genLabel:api.els.btnGenerate.textContent,"
+                    "mapped:!!api.state.uploadedMap};});})()"
+                )
+                out = js(expr)
+                self.assertIn("Generate failed:", out, out)
+                # no crash, no preview switch, busy released (label back).
+                self.assertIn('"state":"idle"', out)
+                self.assertIn('"genLabel":"Generate map"', out)
+                self.assertIn('"mapped":false', out)
 
 
 if __name__ == "__main__":
