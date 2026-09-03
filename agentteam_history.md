@@ -599,6 +599,12 @@ clean shutdown confirmed (`Shutting down` / `Finished server process
 per convention. Verified `*:8000 (LISTEN)`, `/health` ok, banner.
 - **PID: 42212** — left running in background.
 
+### Prompt 29
+> for future reference, sbx-diagnostics files or zips should be ignored in git
+
+**Action:** Orchestrator added `sbx-diagnostics-*` to `.gitignore`; `backend_engineer` committed it.
+**Outcome:** `sbx-diagnostics-*` now ignored (`git check-ignore` matches line 34); the existing `sbx-diagnostics-20260903164454.zip` no longer shows as untracked. Commit `eea2770` (`.gitignore` only, +3 lines). Preference recorded so future sbx-diagnostics dumps are never staged/committed.
+
 ---
 
 ## 3. Current State Summary (refreshed — Prompt 26)
@@ -666,9 +672,10 @@ per convention. Verified `*:8000 (LISTEN)`, `/health` ok, banner.
    ```
    Expected at this writing: `feat/explored-map` = `5d49e2c` (9 ahead of
    `main` = `5ad236f`; 4 ahead / 0 behind `origin/feat/explored-map` =
-   `94a7a9b`), clean tree except pre-existing `docker-agent.yaml` mod +
-   untracked `sbx-diagnostics-*.zip`. Both the explored-map AND the doors
-   feature are **NOT merged to `main`** — a fast-forward `git checkout main
+   `94a7a9b`), clean tree except pre-existing `docker-agent.yaml` mod
+   (`sbx-diagnostics-*` is now gitignored — see Prompt 29). Both the
+   explored-map AND the doors feature are **NOT merged to `main`** — a
+   fast-forward `git checkout main
    && git merge --ff-only feat/explored-map && git push` would land both;
    the baseline tag `working sight` (`b1ff47e`) marks the pre-doors state.
 2. **Establish the green baseline** before any new work:
