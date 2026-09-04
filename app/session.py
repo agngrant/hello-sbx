@@ -72,6 +72,17 @@ CREATABLE_KINDS = ("npc", "enemy")
 #: ``open``/``close`` are allowed for any client while the door is unlocked.
 DOOR_ACTIONS = ("unlock", "lock", "open", "close")
 
+#: Safe-room door actions (safe-room spec §4/§18): the client→server
+#: ``{type:"safe_door", x, y, action}`` message. WHOLLY GM-only: a safe door
+#: is GM-controlled end-to-end (mark/unmark/open/close) — there is no
+#: player path and no lock state (it is always unlocked).
+SAFE_DOOR_ACTIONS = ("mark", "unmark", "open", "close")
+
+#: Safe-room spec §5.2 (D4): the safety-rule rejection — a hostile is never
+#: moved/placed/created/team-changed onto a safe-room door cell, even under
+#: GM override.
+HOSTILE_ON_SAFE_DOOR = "cannot place a hostile on a safe room door"
+
 
 def _as_int(value: Any) -> int | None:
     """Coerce a JSON int; reject bools and non-integers (→ ``None``)."""
@@ -368,6 +379,13 @@ class GameSession:
         doors_wire = self.grid.doors_for_wire()
         if doors_wire is not None:
             map_dict["doors"] = doors_wire
+        # Additive (safe-room spec §8.1, I5): the safe object — every
+        # safe-door cell's current state — whenever the grid has >= 1 safe
+        # door (``to_dict`` already carries it; this is the explicit wire
+        # policy point, disjoint from map.doors which skips safe cells).
+        safe_wire = self.grid.safe_for_wire()
+        if safe_wire is not None:
+            map_dict["safe"] = safe_wire
         payload = {
             "type": "state",
             "map": map_dict,
@@ -543,6 +561,8 @@ class GameSession:
             return self._gm_only(is_gm, lambda: self._on_use_map(msg))
         if mtype == "door":
             return self._on_door(player, is_gm, msg)
+        if mtype == "safe_door":
+            return self._on_safe_door(player, is_gm, msg)
         return {"type": "error", "message": UNKNOWN_TYPE}
 
     # -- helpers ------------------------------------------------------------
@@ -623,11 +643,22 @@ class GameSession:
                         "path": [{"x": entity.x, "y": entity.y}]}
 
             if override:
-                # GM "ignore walls": direct move to the target, walls ignored.
+                # GM "ignore walls": direct move to the target, walls
+                # ignored — EXCEPT the safe-room safety rule (safe-room
+                # spec §5.2, D4): a HOSTILE is never moved onto a
+                # safe-room door cell (open or closed); party/neutral keep
+                # the normal ignore-walls ability (E11).
+                if self.grid.is_safe_door(x, y) and entity.team == "hostile":
+                    return {"type": "error",
+                            "message": HOSTILE_ON_SAFE_DOOR}
                 entity.x, entity.y = x, y
                 path = [{"x": x, "y": y}]
             else:
-                path = find_path(self.grid, (entity.x, entity.y), (x, y))
+                # Team-aware A* (safe-room spec §5.3): the restriction is
+                # judged by the MOVING entity's team — a hostile treats an
+                # open safe door as a wall, party/neutral walk through it.
+                path = find_path(self.grid, (entity.x, entity.y), (x, y),
+                                 team=entity.team)
                 if path is None:
                     return {"type": "error", "message": NO_ROUTE}
                 entity.x, entity.y = x, y
@@ -657,6 +688,12 @@ class GameSession:
                 return {"type": "error", "message": "no such entity"}
             if not (0 <= x < self.grid.width and 0 <= y < self.grid.height):
                 return {"type": "error", "message": "destination out of bounds"}
+            # Safe-room spec §5.2 (D4): a hostile is never placed on a
+            # safe-room door cell (open or closed); party/neutral keep the
+            # normal ignore-walls place (E11).
+            if self.grid.is_safe_door(x, y) and entity.team == "hostile":
+                return {"type": "error",
+                        "message": HOSTILE_ON_SAFE_DOOR}
             entity.x, entity.y = x, y  # GM direct place — walls allowed
             self._run_b(self._broadcast())
         return None
@@ -680,6 +717,11 @@ class GameSession:
         with self._lock:
             if not (0 <= x < self.grid.width and 0 <= y < self.grid.height):
                 return {"type": "error", "message": "destination out of bounds"}
+            # Safe-room spec §5.2 (D4): a hostile is never CREATED on a
+            # safe-room door cell (open or closed).
+            if self.grid.is_safe_door(x, y) and team == "hostile":
+                return {"type": "error",
+                        "message": HOSTILE_ON_SAFE_DOOR}
             n = len(self.entities)
             eid = f"e{n + 1}"
             while eid in self.entities:
@@ -721,6 +763,15 @@ class GameSession:
             entity = self.entities.get(entity_id)
             if entity is None:
                 return {"type": "error", "message": "no such entity"}
+            # Safe-room spec §5.4 (E4): the last path by which a hostile
+            # could end up on a safe-door cell — a token standing on an
+            # open safe door (legal for party/neutral, I4) whose team is
+            # switched to hostile. Rejected so "no hostile on a safe cell"
+            # stays invariant under every mutation (I4b).
+            if team == "hostile" and self.grid.is_safe_door(
+                    entity.x, entity.y):
+                return {"type": "error",
+                        "message": HOSTILE_ON_SAFE_DOOR}
             entity.team = team
             self._run_b(self._broadcast())
         return None
@@ -810,6 +861,13 @@ class GameSession:
         state machine (spec §4.1): ``L ─GM unlock→ U ─open→ O ─close→ U``;
         GM ``lock`` from ``U`` or ``O`` (force-closes ``O``) → ``L``. Players
         may only ``open``/``close`` an UNLOCKED door.
+
+        Safe-room guard (safe-room spec §4.4, AC13b): a SAFE-room door cell
+        is NOT a normal door (mutual exclusion, I1) — any ``door`` message on
+        it is rejected with ``"not a normal door"`` before the state machine
+        runs, so a stray normal-door message can never write a ``doors``
+        entry on a safe cell. The guard never fires for a cell without a
+        safe record, so every existing normal-door path is byte-identical.
         """
         x = _as_int(msg.get("x"))
         y = _as_int(msg.get("y"))
@@ -820,6 +878,8 @@ class GameSession:
                 return {"type": "error", "message": "destination out of bounds"}
             if self.grid.cells[y][x] != "doorway":
                 return {"type": "error", "message": "not a doorway"}
+            if self.grid.is_safe_door(x, y):
+                return {"type": "error", "message": "not a normal door"}
             action = msg.get("action")
             if action not in DOOR_ACTIONS:
                 return {"type": "error",
@@ -867,6 +927,97 @@ class GameSession:
                 ("lock", "O"): "L",
             }[(action, cur)]
             self.grid.set_door(x, y, new_state)
+            self._run_b(self._broadcast())
+        return None
+
+    def _on_safe_door(self, player: Player, is_gm: bool,
+                      msg: dict[str, Any]) -> dict[str, Any] | None:
+        """The safe-room door state machine + permissions (safe-room spec
+        §4) — WHOLLY GM-controlled (mark/unmark/open/close; there is no
+        lock state and no player path at all).
+
+        Validation is the spec's deterministic order (§4.3, AC3), first
+        failure wins:
+
+          1. role: the sender must be the GM → ``"not allowed"``
+             (the safe-door surface has NO player path, so the role gate
+             runs FIRST — unlike the normal door handler)
+          2. ``x``/``y`` are ints (bools rejected) → ``"x and y must be
+             integers"``
+          3. in bounds → ``"destination out of bounds"``
+          4. the cell is a ``doorway`` → ``"not a doorway"``
+          5. ``action`` is valid → ``"action must be one of
+             mark/unmark/open/close"``
+          6. the ``(state, action)`` transition is legal → the
+             state-specific error (``"already a safe door"``,
+             ``"not a safe door"``, ``"safe door is already open"``,
+             ``"safe door is already closed"``)
+          7. occupancy: ``mark`` with a token on the cell → ``"cannot mark
+             a safe door with a token on it"``; ``close`` with a token on
+             the cell → ``"cannot close a door with a token on it"``.
+
+        ``mark`` turns a (normal) doorway into a safe door, starting ``C``
+        (closed; the recorded normal-door state, if any, is dropped — the
+        two records are mutually exclusive, I1). ``unmark`` reverts a safe
+        door to a NORMAL door preserving open/closed (``C``→``U``,
+        ``O``→``O``). On success there is NO per-client reply — the ``state
+        broadcast carries the new ``map.safe`` (and updated ``map.doors``
+        for mark/unmark).
+        """
+        # GM-only, FIRST (the safe-door surface has NO player path — §4.2).
+        if not is_gm:
+            return {"type": "error", "message": NOT_ALLOWED}
+        x = _as_int(msg.get("x"))
+        y = _as_int(msg.get("y"))
+        if x is None or y is None:
+            return {"type": "error", "message": "x and y must be integers"}
+        with self._lock:
+            if not (0 <= x < self.grid.width and 0 <= y < self.grid.height):
+                return {"type": "error",
+                        "message": "destination out of bounds"}
+            if self.grid.cells[y][x] != "doorway":
+                return {"type": "error", "message": "not a doorway"}
+            action = msg.get("action")
+            if action not in SAFE_DOOR_ACTIONS:
+                return {"type": "error",
+                        "message": (
+                            "action must be one of mark/unmark/open/close")}
+            is_safe = self.grid.is_safe_door(x, y)
+            key = f"{x},{y}"
+            if action == "mark":
+                if is_safe:
+                    return {"type": "error",
+                            "message": "already a safe door"}
+                if self._any_entity_at(x, y):
+                    return {"type": "error",
+                            "message": (
+                                "cannot mark a safe door with a token on it")}
+                # Conversion: a recorded NORMAL door is dropped (mutual
+                # exclusion, I1) before the safe record is written — the
+                # new safe door STARTS CLOSED ("C", I2).
+                if (self.grid.doors or {}).get(key) is not None:
+                    self.grid.doors = dict(self.grid.doors)
+                    del self.grid.doors[key]
+                self.grid.set_safe_door(x, y, "C")
+            elif action == "unmark":
+                if not is_safe:
+                    return {"type": "error", "message": "not a safe door"}
+                self.grid.unmark_safe_door(x, y)  # revert to normal (A6)
+            else:  # open / close
+                if not is_safe:
+                    return {"type": "error", "message": "not a safe door"}
+                cur = self.grid.safe_door_state_at(x, y)  # "C" | "O"
+                if action == "open" and cur == "O":
+                    return {"type": "error",
+                            "message": "safe door is already open"}
+                if action == "close" and cur == "C":
+                    return {"type": "error",
+                            "message": "safe door is already closed"}
+                if action == "close" and self._any_entity_at(x, y):
+                    return {"type": "error",
+                            "message": (
+                                "cannot close a door with a token on it")}
+                self.grid.set_safe_door(x, y, "O" if action == "open" else "C")
             self._run_b(self._broadcast())
         return None
 

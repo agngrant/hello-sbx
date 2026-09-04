@@ -60,6 +60,27 @@ DOOR_STATES = ("L", "U", "O")
 
 
 # ---------------------------------------------------------------------------
+# Safe-room door states (docs/design/safe-room-doors.md §3) — a second,
+# ADDITIVE door layer on top of the frozen cell vocabulary + the normal
+# door state machine. A safe-room door is a ``doorway`` cell recorded in
+# ``Grid.safe`` (never in ``Grid.doors`` — the two are mutually exclusive,
+# D1/I1). A safe door has NO lock state (always unlocked): it is either
+# closed ("C", the default when marked) or open ("O").
+# ---------------------------------------------------------------------------
+
+#: The two safe-door states (spec §3.1): ``"C"`` closed (the mark default),
+#: ``"O"`` open. There is deliberately no third char — a safe door has no
+#: lock state (it is always unlocked; "always unlocked, starts closed").
+SAFE_DOOR_STATES = ("C", "O")
+
+#: Teams allowed to occupy a safe-room door cell (spec §5, SAFE-3): the
+#: entity restriction is judged by the entity's ``team`` — ``party`` (player
+#: characters) and ``neutral`` (neutral NPCs) may step onto / stand on a
+#: safe door; the only team excluded is ``hostile``.
+SAFE_DOOR_TEAMS = frozenset({"party", "neutral"})
+
+
+# ---------------------------------------------------------------------------
 # Grid
 # ---------------------------------------------------------------------------
 
@@ -80,7 +101,8 @@ class Grid:
     height: int = 0
     cells: list[list[str]] = field(default_factory=list)  # cells[y][x]
     image: str | None = None  # filename of uploaded source image (optional)
-    doors: dict[str, str] | None = None  # NEW (D1): door state per doorway
+    doors: dict[str, str] | None = None  # NORMAL doors (door-features D1)
+    safe: dict[str, str] | None = None  # SAFE-room doors (safe-room D1): "<x>,<y>" -> "C"|"O"
 
     def __post_init__(self) -> None:
         if len(self.cells) != self.height:
@@ -99,24 +121,54 @@ class Grid:
         # otherwise every key must be a well-formed in-bounds ``"<x>,<y>``
         # over a ``doorway`` cell with a valid state char.
         if self.doors is None:
-            return
-        clean: dict[str, str] = {}
-        for key, st in self.doors.items():
-            if not isinstance(key, str) or "," not in key:
-                raise ValueError(f"invalid door key {key!r}")
-            xs, ys = key.split(",")
-            try:
-                x, y = int(xs), int(ys)
-            except ValueError:
-                raise ValueError(f"invalid door key {key!r}") from None
-            if st not in DOOR_STATES:
-                raise ValueError(f"invalid door state {st!r} at {key!r}")
-            if not (0 <= x < self.width and 0 <= y < self.height):
-                raise ValueError(f"door key {key!r} out of bounds")
-            if self.cells[y][x] != "doorway":
-                raise ValueError(f"door at {key!r} is not on a doorway cell")
-            clean[key] = st
-        self.doors = clean
+            pass  # (fall through — the safe-door validation below still runs)
+        else:
+            clean: dict[str, str] = {}
+            for key, st in self.doors.items():
+                if not isinstance(key, str) or "," not in key:
+                    raise ValueError(f"invalid door key {key!r}")
+                xs, ys = key.split(",")
+                try:
+                    x, y = int(xs), int(ys)
+                except ValueError:
+                    raise ValueError(f"invalid door key {key!r}") from None
+                if st not in DOOR_STATES:
+                    raise ValueError(f"invalid door state {st!r} at {key!r}")
+                if not (0 <= x < self.width and 0 <= y < self.height):
+                    raise ValueError(f"door key {key!r} out of bounds")
+                if self.cells[y][x] != "doorway":
+                    raise ValueError(f"door at {key!r} is not on a doorway cell")
+                clean[key] = st
+            self.doors = clean
+        # Safe-room door state (safe-room spec §3.3): mirrors the door
+        # validation — every key must be a well-formed in-bounds
+        # "<x>,<y>" over a ``doorway`` cell with a valid "C"/"O" state, and
+        # (mutual exclusion, D1/I1) the cell must NOT also carry a recorded
+        # normal-door state.
+        if self.safe is not None:
+            safe_clean: dict[str, str] = {}
+            for key, st in self.safe.items():
+                if not isinstance(key, str) or "," not in key:
+                    raise ValueError(f"invalid safe door key {key!r}")
+                xs, ys = key.split(",")
+                try:
+                    x, y = int(xs), int(ys)
+                except ValueError:
+                    raise ValueError(
+                        f"invalid safe door key {key!r}") from None
+                if st not in SAFE_DOOR_STATES:
+                    raise ValueError(
+                        f"invalid safe door state {st!r} at {key!r}")
+                if not (0 <= x < self.width and 0 <= y < self.height):
+                    raise ValueError(f"safe door key {key!r} out of bounds")
+                if self.cells[y][x] != "doorway":
+                    raise ValueError(
+                        f"safe door at {key!r} is not on a doorway cell")
+                if (self.doors or {}).get(key) is not None:
+                    raise ValueError(
+                        f"door at {key!r} is both normal and safe")
+                safe_clean[key] = st
+            self.safe = safe_clean
 
     def to_dict(self) -> dict[str, Any]:
         """Plain-dict form: ``{"name","width","height","cells","image"}``
@@ -133,6 +185,11 @@ class Grid:
         }
         if self.doors:
             d["doors"] = dict(self.doors)
+        # Additive (safe-room spec §3.2): emit the safe object only when
+        # >= 1 safe door is recorded; absent ⇒ no safe doors (old payloads
+        # parse unchanged to safe=None).
+        if self.safe:
+            d["safe"] = dict(self.safe)
         return d
 
     @classmethod
@@ -149,6 +206,7 @@ class Grid:
             cells=[list(row) for row in data["cells"]],
             image=data.get("image"),
             doors=data.get("doors"),
+            safe=data.get("safe"),  # None ⇒ no safe doors (A2 backward compat)
         )
 
     # -- door state accessors (spec §3.5) ---------------------------------
@@ -158,9 +216,13 @@ class Grid:
 
         ``None`` when the cell is not a ``doorway``; ``"L"`` for a doorway
         with no recorded state (the closed + locked default); the recorded
-        ``"L"|"U"|"O"`` otherwise.
+        ``"L"|"U"|"O"`` otherwise. A SAFE-room door cell has no normal-door
+        state (safe-room spec §4.4 — the safe record is the only door record
+        for that cell), so it returns ``None``.
         """
         if self.cells[y][x] != "doorway":
+            return None
+        if self.is_safe_door(x, y):
             return None
         if self.doors is None:
             return "L"
@@ -176,12 +238,18 @@ class Grid:
         """Set ``(x, y)``'s door to ``state``; materializes ``self.doors``.
 
         Raises ``ValueError`` if ``(x, y)`` is not a doorway or ``state`` is
-        not in :data:`DOOR_STATES` (the WS handler validates first).
+        not in :data:`DOOR_STATES` (the WS handler validates first), and if
+        ``(x, y)`` is a SAFE-room door (mutual exclusion, D1/I1: a doorway
+        carries exactly one door record — the normal-door WS path is guarded
+        upstream by the "not a normal door" check, so this is a model-level
+        invariant tripwire, not a reachable error).
         """
         if self.cells[y][x] != "doorway":
             raise ValueError(f"no door at ({x},{y})")
         if state not in DOOR_STATES:
             raise ValueError(f"invalid door state {state!r}")
+        if self.is_safe_door(x, y):
+            raise ValueError(f"door at ({x},{y}) is a safe door")
         self.doors = dict(self.doors or {})
         self.doors[f"{x},{y}"] = state
 
@@ -198,15 +266,24 @@ class Grid:
         handler and the REST paint route both call it right after setting
         ``grid.cells[y][x]``, so door state can never desync from the cell
         type at runtime (``__post_init__`` only runs at construction).
+
+        Safe-room doors share the same single sync point (safe-room spec
+        §3.5): painting ``floor``/``wall`` over a safe door deletes its
+        ``safe`` record too (a cell that is no longer a doorway has no door
+        of either kind) — the GM's other removal path is ``unmark``.
         """
         if self.doors is None:
             if self.cells[y][x] == "doorway":
                 self.doors = {}  # materialize; the door is L by default
-            return
-        key = f"{x},{y}"
-        if self.cells[y][x] != "doorway":
-            self.doors.pop(key, None)
-        # if still a doorway: leave the entry (or its absence) untouched.
+        else:
+            key = f"{x},{y}"
+            if self.cells[y][x] != "doorway":
+                self.doors.pop(key, None)
+            # if still a doorway: leave the entry (or its absence) untouched.
+        if self.safe is not None and self.cells[y][x] != "doorway":
+            self.safe.pop(f"{x},{y}", None)
+            if not self.safe:
+                self.safe = None
 
     def doors_for_wire(self) -> dict[str, str] | None:
         """The full door object for the WIRE/REST (spec §8.1/§8.2, A9, I5).
@@ -223,14 +300,101 @@ class Grid:
         """
         full: dict[str, str] = {}
         recorded = self.doors or {}
+        safe = self.safe or {}
         found = False
         for y in range(self.height):
             for x in range(self.width):
                 if self.cells[y][x] != "doorway":
                     continue
-                found = True
-                full[f"{x},{y}"] = recorded.get(f"{x},{y}", "L")
+                found = True  # any doorway counts (I5: the `doors` object
+                # is present whenever the grid has >= 1 doorway, even when
+                # every doorway is a safe door → `{}`)
+                key = f"{x},{y}"
+                if key in safe:
+                    # Safe doors ride in `safe`, never in `doors` (I1):
+                    # the two objects are disjoint and jointly cover all
+                    # doorways (spec §8.1). A grid with NO safe doors
+                    # reaches no such cell — byte-identical output.
+                    continue
+                full[key] = recorded.get(key, "L")
         return full if found else None
+
+    def safe_for_wire(self) -> dict[str, str] | None:
+        """The additive ``safe`` object for the WIRE/REST (spec §8.1/§8.2).
+
+        Emitted in FULL (every safe-door cell and its current state) whenever
+        the grid has >= 1 safe door, so the wire is unambiguous (a client can
+        tell open from closed, and a safe door from a normal door); ``None``
+        (the key is omitted) when the grid has no safe doors. Together with
+        :meth:`doors_for_wire` (which skips safe cells) the two objects are
+        disjoint and jointly cover every ``doorway`` cell (I5).
+        """
+        if not self.safe:
+            return None
+        return dict(self.safe)
+
+    # -- safe-room door accessors (safe-room spec §3.5) ----------------------
+
+    def is_safe_door(self, x: int, y: int) -> bool:
+        """True iff ``(x, y)`` is a ``doorway`` marked as a safe-room door."""
+        if self.cells[y][x] != "doorway":
+            return False
+        return self.safe is not None and f"{x},{y}" in self.safe
+
+    def safe_door_state_at(self, x: int, y: int) -> str | None:
+        """The safe-door state at ``(x, y)`` — ``"C"|"O"`` for a safe door,
+        ``None`` for any non-safe cell."""
+        if not self.is_safe_door(x, y):
+            return None
+        return self.safe[f"{x},{y}"]
+
+    def is_safe_door_closed(self, x: int, y: int) -> bool:
+        """True iff ``(x, y)`` is a CLOSED safe door (state ``"C"``)."""
+        st = self.safe_door_state_at(x, y)
+        return st is not None and st != "O"
+
+    def set_safe_door(self, x: int, y: int, state: str) -> None:
+        """Set ``(x, y)`` to a safe door in ``state``; materializes
+        ``self.safe``.
+
+        The cell must be a ``doorway`` and must NOT carry a recorded
+        normal-door state (the mutual-exclusion invariant, D1/I1 — the GM
+        ``mark`` conversion drops any recorded normal state FIRST, then calls
+        this). Raises ``ValueError`` otherwise.
+        """
+        if self.cells[y][x] != "doorway":
+            raise ValueError(f"no doorway at ({x},{y})")
+        if state not in SAFE_DOOR_STATES:
+            raise ValueError(f"invalid safe door state {state!r}")
+        key = f"{x},{y}"
+        if (self.doors or {}).get(key) is not None:
+            raise ValueError(f"door at {key!r} is a normal door, not safe")
+        self.safe = dict(self.safe or {})
+        self.safe[key] = state
+
+    def unmark_safe_door(self, x: int, y: int) -> None:
+        """Remove the safe marking from ``(x, y)``, reverting it to a NORMAL
+        door (safe-room spec §3.5).
+
+        Preserves the open/closed intent: a CLOSED safe door (``"C"``) becomes
+        a closed+UNLOCKED normal door (``"U"``); an OPEN safe door (``"O"``)
+        becomes an open normal door (``"O"``). (A fresh safe door is
+        closed+always-unlocked, so its natural normal-door reversion is
+        ``"U"`` — the GM can re-lock it afterward.) Raises ``ValueError`` if
+        not a safe door.
+        """
+        key = f"{x},{y}"
+        if not self.is_safe_door(x, y):
+            raise ValueError(f"no safe door at ({x},{y})")
+        st = self.safe[key]
+        self.safe = dict(self.safe)
+        del self.safe[key]
+        if not self.safe:
+            self.safe = None
+        # Reversion to a normal door, preserving open/closed:
+        new_state = "O" if st == "O" else "U"
+        self.doors = dict(self.doors or {})
+        self.doors[key] = new_state
 
 
 # ---------------------------------------------------------------------------

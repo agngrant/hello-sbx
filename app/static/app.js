@@ -90,6 +90,7 @@ const els = {
   overrideToggle: $("#override-toggle"),
   controlHint: $("#control-hint"),
   doorActionRow: $("#door-action-row"),
+  safeActionRow: $("#safe-action-row"),
   scrim: $("#scrim"),
 };
 
@@ -114,11 +115,16 @@ const state = {
   fog: false,
   selectedEntityId: null,
   expectCreatedToken: false, // GM "Add" armed: the next state auto-selects the new token
-  tool: "select",       // "select" | "floor" | "wall" | "doorway" | "door"
+  tool: "select",       // "select" | "floor" | "wall" | "doorway" | "door" |
+                        //   | "safeDoor" (safe-room doors spec §7.5)
   doors: {},            // door feature §7.3: client copy of map.doors,
                         //   "<x>,<y>" -> "L"|"U"|"O" ({} when absent ⇒ all
                         //   doors render locked, the safe default)
   doorAction: "unlock", // armed GM door action (door tool sub-button)
+  safe: {},             // safe-room doors spec §7.3: client copy of map.safe,
+                        //   "<x>,<y>" -> "C"|"O" ({} when absent ⇒ no safe
+                        //   doors — every doorway is a normal door)
+  safeAction: "mark",   // armed GM safe-door action (Safe door sub-button)
   painting: false,
   lastHovered: null,    // last hovered cell (GM entity spawn target)
   uploadSource: "upload", // "upload" | "generate" — client-side only (spec §6)
@@ -268,12 +274,19 @@ function applyState(msg) {
   // is treated as absent. The render branch (layoutCanvas) additionally
   // gates on state.role === "player" before drawing with it.
   // state.doors is set in applyState (door-features spec §7.3).
+  // state.safe is set in applyState (safe-room doors spec §7.3).
   // Doors: wire the door states (door-features spec §7.3). The payload
   // field is additive: absent (or malformed — wrong type, bad keys,
   // bad state chars) ⇒ {} ⇒ every doorway renders locked. A validated
   // object replaces what we had wholesale, so a door painted away (its
   // key deleted server-side) can never linger in a stale client copy.
   state.doors = validateDoors(msg.map ? msg.map.doors : undefined);
+  // Safe doors: wire the safe-door states (safe-room doors spec §7.3) —
+  // the SAME additive/defensive pattern as doors: absent (no safe doors)
+  // or malformed ⇒ {} ⇒ no safe doors. `map.safe` and `map.doors`
+  // partition the doorway cells (the server never puts a cell in both),
+  // so a validated replacement keeps the two client copies disjoint.
+  state.safe = validateSafe(msg.map ? msg.map.safe : undefined);
   state.visibility = validateVisibilityMatrix(msg.visibility, state.grid);
   const fogChanged = state.fog !== msg.fog;
   state.fog = !!msg.fog;
@@ -482,6 +495,17 @@ const T = {
   exploredDoorOpen: "#8b94a3",      // E tier: the explored-door grey
   exploredDoorUnlocked: "#9a8f7a",  // E tier: desaturated amber
   exploredDoorLocked: "#a06b6b",    // E tier: desaturated red
+  // Safe-room doors (safe-room doors spec §7.1). A safe door is a
+  // `doorway` cell rendered as a GREEN CROSS over the floor base: bright
+  // mint green #3ddc84 — deliberately distinct from the party token
+  // green #2f9e44 (darker forest; and a CIRCLE vs the CROSS glyph), from
+  // the normal-door red/amber family, and from floor/wall. Open and
+  // closed share the green — the BAR (present when closed) is the
+  // state discriminator, mirroring the normal-door "bar = closed" idiom.
+  safeOpen: "#3ddc84",         // open (O): green cross, no bar
+  safeClosed: "#3ddc84",       // closed (C): green cross + bar
+  exploredSafeOpen: "#8fae9c",     // E tier: desaturated sage green
+  exploredSafeClosed: "#8fae9c",   // E tier: desaturated sage green
   gridLineDim: "rgba(217, 209, 189, 0.3)",
   accent: "#4dabf7",
   danger: "#e03131",
@@ -552,9 +576,99 @@ function doorStateAt(x, y) {
   return state.doors ? state.doors[`${x},${y}`] || "L" : "L";
 }
 
-/* The border/glyph color for a door state at visibility tier t (§7.1): the
-   full-detail amber/red family for "S" (GM + preview + in-sight), the
-   desaturated grey family for "E" (explored memory). */
+/* ─────────────────── Safe doors: state object + per-cell lookup ─────────
+   safe-room doors spec §7.3. `map.safe` is an ADDITIVE wire field that
+   rides inside `map` like `map.doors`: an object "<x>,<y>" -> "C" (closed)
+   | "O" (open) covering EVERY safe-door cell (emitted in full whenever ≥ 1
+   exists; a missing key ⇒ no safe doors ⇒ every doorway is a NORMAL door).
+   `map.safe` and `map.doors` partition the doorway cells server-side
+   (a doorway is one kind of door or the other, never both). A malformed
+   payload (wrong type, bad keys, bad state chars) is treated as {} —
+   defensive, never crashes the render (cf. validateDoors / 
+   validateVisibilityMatrix). */
+const SAFE_STATES = ["C", "O"];
+function validateSafe(safe) {
+  if (safe == null) return {};
+  if (typeof safe !== "object" || Array.isArray(safe)) return {};
+  const clean = {};
+  const keyRe = /^[0-9]+,[0-9]+$/;
+  for (const key of Object.keys(safe)) {
+    if (!keyRe.test(key)) return {};
+    if (SAFE_STATES.indexOf(safe[key]) === -1) return {};
+    clean[key] = safe[key];
+  }
+  return clean;
+}
+
+/* True iff (x,y) is a `doorway` cell recorded as a safe-room door in
+   state.safe (mirrors the server's Grid.is_safe_door). */
+function isSafeDoor(x, y) {
+  const g = state.grid;
+  if (!g || !g.cells) return false;
+  const row = g.cells[y];
+  if (!row || row[x] !== "doorway") return false;
+  return !!state.safe && Object.prototype.hasOwnProperty.call(
+    state.safe, `${x},${y}`);
+}
+
+/* The safe-door state at (x,y): "C"|"O" for a safe-door cell (default "C"),
+   null for a cell that is not a safe door. Mirrors the server's
+   Grid.safe_door_state_at on the client. */
+function safeDoorStateAt(x, y) {
+  if (!isSafeDoor(x, y)) return null;
+  return state.safe[`${x},${y}`] || "C";
+}
+
+/* The safe-door border/glyph color at visibility tier t (safe-room doors
+   spec §7.1): the full-detail mint green #3ddc84 for "S" (GM + preview +
+   in-sight — the GM and preview passes have no matrix, so they always take
+   this branch), the desaturated sage green #8fae9c for "E" (explored
+   memory). Open and closed share the tier's green — the BAR (present when
+   closed, see drawSafeDoorGlyph) is the state discriminator, mirroring the
+   normal-door "bar = closed" idiom but in green. */
+function safeDoorColor(state, t) {
+  if (t === "E") {
+    if (state === "O") return T.exploredSafeOpen;
+    return T.exploredSafeClosed;
+  }
+  if (state === "O") return T.safeOpen;
+  return T.safeClosed;
+}
+
+/* The safe-door glyph over the floor base (safe-room doors spec §7.1): a
+   centered green CROSS (plus sign) — the "safe room" mark — plus, when
+   CLOSED, a horizontal bar across the middle (the "bar = closed" idiom a
+   normal door already uses, here in green). The cross + optional bar makes
+   open vs closed unmistakable, and the green cross is unmistakably a
+   different glyph from a normal door's arch / bar / padlock. `s` = cell
+   size in px, (px,py) = cell origin. */
+function drawSafeDoorGlyph(ctx, state, px, py, s) {
+  const cx = px + s / 2;
+  const cy = py + s / 2;
+  const r = s * 0.28;   // cross arm extent (same scale as the door glyphs)
+  // Cross: two centered strokes.
+  ctx.beginPath();
+  ctx.moveTo(cx - r, cy);
+  ctx.lineTo(cx + r, cy);
+  ctx.moveTo(cx, cy - r);
+  ctx.lineTo(cx, cy + r);
+  ctx.stroke();
+  if (state === "C") {
+    // Bar across the middle: the "closed" mark (the cross arms extend past
+    // it, so the cell still reads as a cross, now shut — same position and
+    // length as the normal-door "U" bar, but drawn over the cross in green).
+    const by = cy + r * 0.8;
+    ctx.beginPath();
+    ctx.moveTo(cx - r, by);
+    ctx.lineTo(cx + r, by);
+    ctx.stroke();
+  }
+}
+
+/* The border/glyph color for a NORMAL door state at visibility tier t
+   (door-features spec §7.1): the full-detail amber/red family for "S"
+   (GM + preview + in-sight), the desaturated grey family for "E".
+   (Safe-room doors use safeDoorColor / drawSafeDoorGlyph instead.) */
 function doorColor(state, t) {
   if (t === "E") {
     if (state === "O") return T.exploredDoorOpen;
@@ -834,14 +948,31 @@ function drawGridOnCanvas(canvas, ctx, visibility = null) {
   // skipped (a hidden door is not drawn), so GM/preview (no matrix) and a
   // player's S cells render full detail while the player's E cells render
   // the desaturated grey variants.
+  //
+  // SAFE-ROOM DOORS (safe-room doors spec §7.2) — a `doorway` cell recorded
+  // in map.safe is a SAFE door, not a normal door: it renders the GREEN
+  // CROSS art (safeDoorColor/drawSafeDoorGlyph — green border + cross, plus
+  // a bar when closed, per tier) and SKIPS the normal-door branch (which
+  // stays byte-for-byte unchanged for every non-safe doorway). Safe and
+  // normal doors partition the doorway cells (map.safe ∩ map.doors = ∅),
+  // so the kind check first is total: a cell takes exactly one branch.
   for (let y = 0; y < g.height; y++) {
     for (let x = 0; x < g.width; x++) {
       if (g.cells[y][x] !== "doorway") continue;
       const t = tier(x, y);
       if (t === "H") continue;
-      const st = doorStateAt(x, y) || "L";
       const px = ox + x * s;
       const py = oy + y * s;
+      if (isSafeDoor(x, y)) {
+        const sst = safeDoorStateAt(x, y) || "C";
+        ctx.strokeStyle = safeDoorColor(sst, t);
+        ctx.lineWidth = Math.max(2, Math.min(3, s / 8));
+        ctx.strokeRect(px + 1.5, py + 1.5, s - 3, s - 3);
+        ctx.lineWidth = Math.max(1.5, s / 24);
+        drawSafeDoorGlyph(ctx, sst, px, py, s);
+        continue;
+      }
+      const st = doorStateAt(x, y) || "L";
       ctx.strokeStyle = doorColor(st, t);
       ctx.lineWidth = Math.max(2, Math.min(3, s / 8));
       ctx.strokeRect(px + 1.5, py + 1.5, s - 3, s - 3);
@@ -971,6 +1102,7 @@ function drawEntitiesAndDots(ctx, s, ox, oy) {
       const fill = state.tool === "wall" ? T.wallFill
                  : state.tool === "doorway" ? T.doorway
                  : state.tool === "door" ? doorColor(state.doorAction, "S")
+                 : state.tool === "safeDoor" ? T.safeOpen
                  : T.floor;
       ctx.globalAlpha = 0.5;
       ctx.fillStyle = fill;
@@ -1332,8 +1464,9 @@ els.canvas.addEventListener("click", (ev) => {
   const hit = entityAtCell(c.x, c.y);
 
   // Paint mode (GM): floor/wall/doorway apply on pointerdown; the DOOR
-  // tool applies the armed action on click (doors never optimistic-mutate —
-  // the server is authoritative, the state broadcast reconciles).
+  // and Safe door tools apply the armed action on click (doors never
+  // optimistic-mutate — the server is authoritative, the state broadcast
+  // reconciles).
   if (state.tool !== "select") {
     if (state.tool === "door") {
       if (!gm) return;                          // players have no door tool
@@ -1341,9 +1474,26 @@ els.canvas.addEventListener("click", (ev) => {
                                                  // cell gets the server's
                                                  // "not a doorway" toast
       sendDoor(c.x, c.y, state.doorAction);
+    } else if (state.tool === "safeDoor") {
+      // GM Safe door tool (safe-room doors spec §7.5): apply the armed
+      // action (Mark/Unmark/Open/Close) on click. GM-only (the button is
+      // GM-only in the UI; the guard mirrors the Door tool). A non-doorway
+      // cell gets the server's "not a doorway" toast — no client gating.
+      if (!gm) return;
+      if (t !== "doorway") return;
+      sendSafeDoor(c.x, c.y, state.safeAction);
     }
     return;
   }
+
+  // Safe doors are GM-controlled (safe-room doors spec §7.6): a PLAYER
+  // can never act on one — the check below is gated INTO the normal-door
+  // tap branch (the safe cell never emits a normal `door` frame), so a
+  // safe-door cell with no entity on it is a pure no-op (no move: a closed
+  // safe door is not walkable; an open one is a destination, not a
+  // door-action target — the player walks onto it by clicking the floor
+  // beyond), while a tap on their OWN token standing on an open safe door
+  // still reaches the selection handling below (re-assert selection).
 
   // Player tapping a doorway cell acts on the DOOR, not movement (a door
   // is a doorway, never a floor, so there is no ambiguity — door-features
@@ -1362,6 +1512,15 @@ els.canvas.addEventListener("click", (ev) => {
   // A tap on a cell occupied by an entity is NOT a door action (entity
   // selection/movement keeps priority).
   if (!gm && t === "doorway" && !hit) {
+    if (isSafeDoor(c.x, c.y)) {
+      // Safe door: no-op (GM controls it). A CLOSED one gets a
+      // client-side hint (spec §7.7 — the client knows the state); an
+      // OPEN one is walkable for the player, so no blocking hint.
+      if (safeDoorStateAt(c.x, c.y) !== "O") {
+        canvasHint("That safe door is closed — the GM controls it");
+      }
+      return;
+    }
     const st = doorStateAt(c.x, c.y) || "L";
     sendDoor(c.x, c.y, st === "O" ? "close" : "open");
     return;
@@ -1397,7 +1556,8 @@ els.canvas.addEventListener("click", (ev) => {
 /* GM paint (deduped: one message per cell per change). */
 let lastPainted = null;
 function paintCell(x, y) {
-  if (!state.grid || state.tool === "select" || state.tool === "door") return;
+  if (!state.grid || state.tool === "select" || state.tool === "door" ||
+      state.tool === "safeDoor") return;
   const key = `${x},${y},${state.tool}`;
   if (lastPainted === key) return;
   lastPainted = key;
@@ -1413,6 +1573,17 @@ function paintCell(x, y) {
    broadcast (which carries map.doors) reconciles the render. */
 function sendDoor(x, y, action) {
   wsSend({ type: "door", x, y, action });
+}
+
+/* Safe-door actions (safe-room doors spec §7.5/§8.3): the ONLY safe-door
+   wire frame, GM-only (players have no Safe door tool and a player tap on
+   a safe cell is a no-op — §7.6). action ∈ mark/unmark/open/close (the
+   armed Safe door sub-button). No optimistic local mutation — the server
+   is authoritative and the next state broadcast (which carries map.safe
+   and the updated map.doors for mark/unmark) reconciles the render. A bad
+   cell/state gets the server's error toast via the normal error path. */
+function sendSafeDoor(x, y, action) {
+  wsSend({ type: "safe_door", x, y, action });
 }
 
 /* ───────────────────────────── GM tools ───────────────────────────── */
@@ -1475,6 +1646,8 @@ function updateControlHint() {
       }
     } else if (state.tool === "door") {
       hint = `Click a door to ${state.doorAction}`;
+    } else if (state.tool === "safeDoor") {
+      hint = `Click a doorway to ${state.safeAction}`;
     } else {
       hint = `Drag on the map to paint ${state.tool}`;
     }
@@ -1490,12 +1663,13 @@ function setTool(tool) {
   $$("#paint-group .tool-btn").forEach((btn) => {
     btn.setAttribute("aria-pressed", String(btn.dataset.tool === tool));
   });
-  // The Door tool's action sub-buttons are only visible while the tool is
-  // armed (hidden via [hidden] otherwise — CSS).
+  // The Door and Safe door tools' action sub-buttons are only visible while
+  // their tool is armed (hidden via [hidden] otherwise — CSS).
   els.doorActionRow.hidden = tool !== "door";
+  els.safeActionRow.hidden = tool !== "safeDoor";
   els.canvasWrap.classList.remove(
     "mode-select", "mode-paint-floor", "mode-paint-wall",
-    "mode-paint-doorway", "mode-paint-door"
+    "mode-paint-doorway", "mode-paint-door", "mode-paint-safeDoor"
   );
   els.canvasWrap.classList.add(
     tool === "select" ? "mode-select" : `mode-paint-${tool}`
@@ -1514,11 +1688,25 @@ function setDoorAction(action) {
   updateControlHint();
 }
 
+// GM Safe door tool (safe-room doors spec §7.5): pick the armed action
+// (default "mark"), then click a doorway cell to apply it — the exact Door
+// tool idiom (tool button + revealed action sub-row + click-to-apply).
+function setSafeAction(action) {
+  if (state.tool !== "safeDoor") return;
+  state.safeAction = action;
+  $$("#paint-group .safe-action").forEach((btn) => {
+    btn.setAttribute("aria-pressed", String(btn.dataset.safeAction === action));
+  });
+  updateControlHint();
+}
+
 $("#paint-group").addEventListener("click", (ev) => {
   const btn = ev.target.closest(".tool-btn");
   if (btn) { setTool(btn.dataset.tool); return; }
   const act = ev.target.closest(".door-action");
-  if (act) setDoorAction(act.dataset.doorAction);
+  if (act) { setDoorAction(act.dataset.doorAction); return; }
+  const safeAct = ev.target.closest(".safe-action");
+  if (safeAct) setSafeAction(safeAct.dataset.safeAction);
 });
 
 els.newEntityName.addEventListener("input", () => {

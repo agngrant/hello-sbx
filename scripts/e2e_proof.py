@@ -59,6 +59,24 @@ scenario and prints a check per behaviour:
      ->(7,2) through it (every path step a legal A* step, independent A*
      re-derivation); closing the door again blocks the return route;
      map.doors is present + full in every state (I5).
+ 11. SAFE-ROOM DOORS (safe-room spec AC14): GM + 1 player on a FRESH
+     session. The welcome map has NO map.safe (absent by default) and
+     map.doors all L (regression); GM `safe_door mark` (5,5) -> map.safe =
+     {"5,5":"C"} and map.doors no longer has "5,5" (disjoint; REST carries
+     the additive safe key); GM open -> "5,5":"O". The RESTRICTION: a GM-
+     created hostile cannot path through the OPEN safe door ("no route",
+     position unchanged) while a neutral npc walks through it; the hostile
+     override/place/create guards reject "cannot place a hostile on a safe
+     room door" while a party/neutral override onto a CLOSED safe door is
+     allowed (E11). AWARENESS: a hostile behind a closed safe door is
+     INVISIBLE beyond the radius, APPROXIMATE within it (GM set_awareness),
+     and FULL behind the OPEN safe door (LOS is team-agnostic). EXPLORED:
+     behind the closed safe door the room is H, the face is S, opening
+     reveals S, closing greys to E (monotonic) — the S-set re-derives via
+     the SAFE-AWARE independent LOS helper (fed the wire map.safe). The
+     player's safe_door mark -> "not allowed"; a normal door message on the
+     safe cell -> "not a normal door"; GM unmark reverts (5,5) to a normal
+     door "U" and map.safe disappears.
 
 Run:  .venv/bin/python scripts/e2e_proof.py   (starts its own server)
 """
@@ -92,7 +110,7 @@ failures = []
 # has_line_of_sight reference handles both), so the sample-dungeon doors
 # must be OPEN before a walk (the GM opens them in the step).
 
-def derive_visible(cells, w, h, pos, doors=None):
+def derive_visible(cells, w, h, pos, doors=None, safe=None):
     """Re-derive the set of (x, y) cells in line of sight from ``pos``.
 
     (S1) a walkable cell is visible iff it has line of sight from pos;
@@ -101,10 +119,14 @@ def derive_visible(cells, w, h, pos, doors=None):
     itself always counts.  Uses app.pathfinding.has_line_of_sight only
     (door-aware: a CLOSED door blocks, an OPEN door is transparent).
     ``doors`` is the wire map.doors object (None ⇒ every doorway closed,
-    matching the all-locked default the server applies to a bare grid).
+    matching the all-locked default the server applies to a bare grid);
+    ``safe`` is the wire map.safe object (None ⇒ no safe doors — a CLOSED
+    safe door blocks LOS exactly like a wall, an OPEN one is transparent —
+    safe-room spec §5.1/§6, fed straight through ``Grid.from_dict``).
     """
     g = Grid.from_dict({"width": w, "height": h, "cells": cells,
-                        "doors": dict(doors or {})})
+                        "doors": dict(doors or {}),
+                        "safe": dict(safe or {})})
     closed = _closed_doors(g)
     pos = (pos[0], pos[1])
     seen = {pos}
@@ -789,6 +811,410 @@ def main():
         finally:
             gm9.close()
             pl9.close()
+
+        # 11. SAFE-ROOM DOORS (safe-room spec AC14) ------------------------------
+        # GM + 1 player on a FRESH session on the sample dungeon. (5,5) — the
+        # gap in the col-5 wall between the player's left room and the right
+        # room — becomes the safe-room door. The sample grid is shared, so
+        # the precondition below first re-locks the normal doors; a stale
+        # safe-door record from a prior run is cleared with `unmark`.
+        print("\n[11] safe-room doors: mark/open, restriction, guards, awareness, explored")
+        # The sample grid is SHARED (the session id resolves to
+        # maps_registry["sample-dungeon"]["grid"]), so a prior run may have
+        # left a safe-door record or the normal doors unlocked. A throwaway
+        # GM canNOT reset the grid here: a disconnect does not leave the
+        # session (it keeps the GM Player record), so a later GM join would
+        # be refused ("session full"). Instead the reset runs on gm11
+        # itself, which joins FIRST and becomes the session's GM.
+        gm11 = WSClient(host, port, path="/ws?session=e2e-safe-doors",
+                        timeout=10).connect()
+        pl11 = WSClient(host, port, path="/ws?session=e2e-safe-doors",
+                        timeout=10).connect()
+        try:
+            wgm11 = gm11.join("SafeGM", "gm")
+            # Precondition: clear any stale safe record and re-lock all
+            # three normal doors to the all-locked default (a prior run may
+            # have left state behind on the shared grid). These run before
+            # any player has joined, so only gm11 receives each broadcast.
+            gm11.send_json({"type": "safe_door", "x": 5, "y": 5,
+                            "action": "unmark"})
+            gm11.recv_json()  # state (was safe) or "not a safe door"
+            for (x, y) in ((5, 5), (10, 4), (9, 7)):
+                gm11.send_json({"type": "door", "x": x, "y": y,
+                                "action": "lock"})
+                gm11.recv_json()  # state (was U/O) or "door is already locked"
+            wpl11 = pl11.join("SafeAl", "player")
+            gm11.recv_json()          # GM's join broadcast (player joined)
+            al_ent11 = wpl11["you"]["entity_id"]
+            pw11 = wpl11["map"]["width"]
+            check("fresh GM + player session on the sample dungeon "
+                  "(player spawns (1,1))",
+                  wgm11["type"] == "welcome"
+                  and wgm11["you"]["role"] == "gm"
+                  and wpl11["type"] == "welcome"
+                  and wpl11["you"]["role"] == "player"
+                  and (wpl11["you_entity"]["x"],
+                       wpl11["you_entity"]["y"]) == (1, 1),
+                  json.dumps([wgm11.get("you"), wpl11.get("you_entity")]))
+
+            # (a) default absent (regression) + REST baseline ----------------
+            check("(a) player welcome: NO map.safe (absent by default)",
+                  "safe" not in wpl11["map"],
+                  json.dumps(wpl11["map"].get("safe")))
+            check("(a) player welcome: map.doors all L (regression)",
+                  wpl11["map"]["doors"] == {"5,5": "L", "10,4": "L",
+                                            "9,7": "L"},
+                  json.dumps(wpl11["map"]["doors"]))
+            conn = http.client.HTTPConnection(host, port, timeout=5)
+            conn.request("GET", "/api/maps/sample-dungeon")
+            rest0 = json.loads(conn.getresponse().read())
+            conn.close()
+            check("(a) REST baseline: no safe key, doors all L",
+                  "safe" not in rest0
+                  and rest0["doors"] == {"5,5": "L", "10,4": "L",
+                                         "9,7": "L"},
+                  json.dumps(rest0.get("doors")))
+
+            # (b) mark -> C (closed), then open -> O --------------------------
+            def wait_safe(c, val):
+                for _ in range(40):
+                    m = c.recv_json()
+                    if m["type"] == "state" and m["map"].get("safe") == val:
+                        return m
+                raise AssertionError(f"no state with map.safe={val!r}")
+
+            def ent_of(st, name):
+                return next(e for e in st["entities"] if e["name"] == name)
+
+            gm11.send_json({"type": "safe_door", "x": 5, "y": 5,
+                            "action": "mark"})
+            m1 = wait_safe(gm11, {"5,5": "C"})
+            check("(b) GM mark: map.safe={'5,5':'C'} (closed, no lock state)",
+                  m1["map"]["safe"] == {"5,5": "C"},
+                  json.dumps(m1["map"].get("safe")))
+            check("(b) map.doors no longer has '5,5' (disjoint partition)",
+                  "5,5" not in m1["map"].get("doors", {}),
+                  json.dumps(m1["map"].get("doors")))
+            wait_safe(pl11, {"5,5": "C"})  # the player copy too
+            conn = http.client.HTTPConnection(host, port, timeout=5)
+            conn.request("GET", "/api/maps/sample-dungeon")
+            rest1 = json.loads(conn.getresponse().read())
+            conn.close()
+            check("(b) REST carries additive safe (disjoint from doors)",
+                  rest1.get("safe") == {"5,5": "C"}
+                  and "5,5" not in rest1.get("doors", {}),
+                  json.dumps(rest1.get("safe")))
+            gm11.send_json({"type": "safe_door", "x": 5, "y": 5,
+                            "action": "open"})
+            m2 = wait_safe(gm11, {"5,5": "O"})
+            wait_safe(pl11, {"5,5": "O"})
+            check("(b) GM open: map.safe={'5,5':'O'}",
+                  m2["map"]["safe"] == {"5,5": "O"},
+                  json.dumps(m2["map"].get("safe")))
+
+            # (c) the restriction: hostile blocked even when OPEN ----------------
+            gm11.send_json({"type": "create_entity", "name": "Vex11",
+                            "kind": "enemy", "team": "hostile",
+                            "x": 6, "y": 5})
+            st11 = state_until(gm11)
+            pl11.recv_json()             # the create broadcast (state)
+            vex = ent_of(st11, "Vex11")
+            check("(c) hostile Vex11 created at (6,5) (right room)",
+                  (vex["x"], vex["y"]) == (6, 5), json.dumps(vex))
+            # The (5,5) safe door is the ONLY gap in the col-5 wall, so the
+            # hostile's only route to the left room crosses it — but an open
+            # safe door is a wall to a hostile: no route, position unchanged.
+            gm11.send_json({"type": "move", "entity_id": vex["id"],
+                            "x": 4, "y": 5})
+            err = gm11.recv_json()
+            check("(c) hostile through the OPEN safe door -> 'no route — wall "
+                  "in the way' (blocked like a wall, AC5/AC6)",
+                  err == {"type": "error",
+                          "message": "no route \u2014 wall in the way"},
+                  json.dumps(err))
+            gm11.send_json({"type": "request_state"})
+            st11 = state_until(gm11)
+            check("(c) hostile position unchanged after the no-route",
+                  (ent_of(st11, "Vex11")["x"],
+                   ent_of(st11, "Vex11")["y"]) == (6, 5))
+            # a NEUTRAL npc (left room -> right room) walks through the open
+            # safe door: legal A* path, via the door cell.
+            gm11.send_json({"type": "create_entity", "name": "Npc11",
+                            "kind": "npc", "team": "neutral", "x": 1, "y": 5})
+            st11 = state_until(gm11)
+            pl11.recv_json()             # the create broadcast (state)
+            npc = ent_of(st11, "Npc11")
+            gm11.send_json({"type": "move", "entity_id": npc["id"],
+                            "x": 6, "y": 5})
+            m11 = gm11.recv_json()       # the GM's path frame
+            steps = m11.get("path", []) if m11.get("type") == "path" else []
+            check("(c) neutral npc walks THROUGH the open safe door "
+                  "(path via (5,5))",
+                  m11.get("type") == "path"
+                  and (5, 5) in {(p["x"], p["y"]) for p in steps}
+                  and (steps[-1]["x"], steps[-1]["y"]) == (6, 5),
+                  json.dumps(m11))
+            state_until(gm11)            # the GM's move state
+            pl11.recv_json()             # the player's path frame
+            pl11.recv_json()             # the player's move state
+            gm11.send_json({"type": "delete_entity",
+                            "entity_id": npc["id"]})
+            state_until(gm11)
+            pl11.recv_json()             # the delete broadcast (state)
+
+            # (d) hostile override guard (AC7): move/place/create rejected ----
+            gm11.send_json({"type": "move", "entity_id": vex["id"],
+                            "x": 5, "y": 5, "override": True})
+            err = gm11.recv_json()
+            check("(d) hostile override onto the safe cell -> 'cannot place a "
+                  "hostile on a safe room door' (NOT teleported)",
+                  err == {"type": "error",
+                          "message": "cannot place a hostile on a safe room door"},
+                  json.dumps(err))
+            gm11.send_json({"type": "place", "entity_id": vex["id"],
+                            "x": 5, "y": 5})
+            err = gm11.recv_json()
+            check("(d) hostile place onto the safe cell -> same rejection",
+                  err == {"type": "error",
+                          "message": "cannot place a hostile on a safe room door"},
+                  json.dumps(err))
+            gm11.send_json({"type": "create_entity", "name": "Vex11b",
+                            "kind": "enemy", "team": "hostile",
+                            "x": 5, "y": 5})
+            err = gm11.recv_json()
+            check("(d) hostile create_entity on the safe cell -> same rejection",
+                  err == {"type": "error",
+                          "message": "cannot place a hostile on a safe room door"},
+                  json.dumps(err))
+            gm11.send_json({"type": "request_state"})
+            st11 = state_until(gm11)
+            check("(d) no hostile created/moved onto the safe cell",
+                  "Vex11b" not in [e["name"] for e in st11["entities"]]
+                  and (ent_of(st11, "Vex11")["x"],
+                       ent_of(st11, "Vex11")["y"]) == (6, 5))
+            # E11 contrast: a party/neutral override onto a CLOSED safe door
+            # IS allowed (ignore-walls, like a closed normal door).
+            gm11.send_json({"type": "safe_door", "x": 5, "y": 5,
+                            "action": "close"})
+            wait_safe(gm11, {"5,5": "C"})
+            pl11.recv_json()             # the close broadcast (state)
+            gm11.send_json({"type": "move", "entity_id": al_ent11,
+                            "x": 5, "y": 5, "override": True})
+            m11 = gm11.recv_json()
+            check("(d) E11: party override onto a CLOSED safe door is "
+                  "ALLOWED (ignore-walls)",
+                  m11.get("type") == "path"
+                  and m11.get("path") == [{"x": 5, "y": 5}],
+                  json.dumps(m11))
+            state_until(gm11)
+            pl11.recv_json()
+            pl11.recv_json()
+            # move Alice off the safe cell again (back to her spawn):
+            gm11.send_json({"type": "place", "entity_id": al_ent11,
+                            "x": 1, "y": 1})
+            state_until(gm11)
+            pl11.recv_json()
+            gm11.send_json({"type": "safe_door", "x": 5, "y": 5,
+                            "action": "open"})
+            wait_safe(gm11, {"5,5": "O"})
+            pl11.recv_json()
+            gm11.send_json({"type": "delete_entity",
+                            "entity_id": vex["id"]})
+            state_until(gm11)
+            pl11.recv_json()
+
+            # (e) awareness (AC8): hostile behind the safe door. Alice is
+            # parked at (1,5) so the LOS line (1,5)->(6,5) crosses the safe
+            # door (5,5) exactly (a clean horizontal line). cheb(1,5 -> 6,5)
+            # = 5: beyond the default radius 4.
+            gm11.send_json({"type": "place", "entity_id": al_ent11,
+                            "x": 1, "y": 5})
+            state_until(gm11)
+            pl11.recv_json()
+            gm11.send_json({"type": "safe_door", "x": 5, "y": 5,
+                            "action": "close"})
+            wait_safe(gm11, {"5,5": "C"})
+            pl11.recv_json()
+            gm11.send_json({"type": "create_entity", "name": "Vex11",
+                            "kind": "enemy", "team": "hostile",
+                            "x": 6, "y": 5})
+            st11 = state_until(gm11)
+            vex = ent_of(st11, "Vex11")
+            al_st = pl11.recv_json()     # the create broadcast (state)
+            check("(e) hostile behind a CLOSED safe door is INVISIBLE to the "
+                  "player (no LOS, cheb 5 > radius 4)",
+                  vex["id"] not in {i.get("entity_id")
+                                    for i in al_st["awareness"]}
+                  and not any(i.get("approximate")
+                              for i in al_st["awareness"]),
+                  json.dumps(al_st["awareness"]))
+            # widen the radius to 6: within range, still no LOS -> APPROX
+            gm11.send_json({"type": "set_awareness",
+                            "entity_id": al_ent11, "value": 6})
+            al_st = pl11.recv_json()
+            check("(e) within the radius (6): APPROXIMATE (grey '?', no "
+                  "identity)",
+                  any(i.get("approximate") and "name" not in i
+                      for i in al_st["awareness"]),
+                  json.dumps(al_st["awareness"]))
+            # open the safe door: LOS through it -> FULL (team-agnostic sight)
+            gm11.send_json({"type": "safe_door", "x": 5, "y": 5,
+                            "action": "open"})
+            wait_safe(gm11, {"5,5": "O"})
+            al_st = pl11.recv_json()
+            item = next((i for i in al_st["awareness"]
+                         if i.get("entity_id") == vex["id"]), None)
+            check("(e) behind the OPEN safe door the hostile is FULL "
+                  "(named/labeled — sight is team-agnostic)",
+                  item is not None and item.get("label") is True
+                  and item.get("name") == "Vex11" and item.get("color") == "red"
+                  and not item.get("approximate"),
+                  json.dumps(al_st["awareness"]))
+            gm11.send_json({"type": "delete_entity",
+                            "entity_id": vex["id"]})
+            state_until(gm11)
+            pl11.recv_json()
+
+            # (f) explored (AC7): H behind closed, face S, open -> S, close -> E.
+            # The observed player must have PRISTINE explored memory for (6,5)
+            # to read H. This step's player (pl11) watched the door OPEN in
+            # (e) while standing at (1,5), so (6,5) is already in its explored
+            # memory and can never read H again. So this sub-proof runs on a
+            # FRESH session (fresh GM + fresh player -> fresh explored set,
+            # pristine memory) — the same isolation step 9 uses for the
+            # explored map. The safe-door record lives on the SHARED sample
+            # grid, so the fresh GM first re-marks (5,5) a CLOSED safe door;
+            # it stays closed, which is exactly the state (g)/(h) expect next.
+            #
+            # The fresh player is placed at (1,5): the ONLY position with a
+            # DIRECT horizontal line of sight through the (5,5) door to (6,5).
+            # From the spawn (1,1) the line (1,1)->(6,5) crosses the col-5 wall
+            # at (5,4), so (6,5) would never be revealed even when the door is
+            # open. (6,5) is in the middle room, connected to the left room
+            # only via the (5,5) doorway.
+            gmf = WSClient(host, port, path="/ws?session=e2e-safe-explored",
+                           timeout=10).connect()
+            plf = WSClient(host, port, path="/ws?session=e2e-safe-explored",
+                           timeout=10).connect()
+            try:
+                gmf.join("SafeExpGM", "gm")
+                # Precondition: a CLOSED safe door at (5,5). Clear any leftover
+                # state, re-mark, so it is deterministically "C".
+                gmf.send_json({"type": "safe_door", "x": 5, "y": 5,
+                               "action": "unmark"})
+                gmf.recv_json()   # state (was safe) or "not a safe door"
+                gmf.send_json({"type": "safe_door", "x": 5, "y": 5,
+                               "action": "mark"})
+                gmf.recv_json()   # state (safe now "C")
+                wplf = plf.join("SafeExpAl", "player")   # spawns (1,1)
+                gmf.recv_json_or_none(timeout=1)  # GM join-broadcast (player)
+                plf_ent = wplf["you"]["entity_id"]
+                pwf, phf = wplf["map"]["width"], wplf["map"]["height"]
+                # Re-anchor the player at (1,5) for a direct LOS through the
+                # door to (6,5). GM place is a direct set (state broadcast).
+                gmf.send_json({"type": "place", "entity_id": plf_ent,
+                               "x": 1, "y": 5})
+                gmf.recv_json()          # GM's place state
+                pf_st = state_until(plf) # player's place state (token (1,5))
+                pf = (pf_st["you_entity"]["x"], pf_st["you_entity"]["y"])
+                check("(f) fresh player re-anchored at (1,5) (direct LOS "
+                      "through the door to (6,5))", pf == (1, 5), str(pf))
+
+                def mask_of_f(st, x, y):
+                    return st["visibility"][y][x]
+                def s_set_of_f(st):
+                    return {(x, y) for y in range(phf) for x in range(pwf)
+                            if st["visibility"][y][x] == "S"}
+                def rederive_f(st, anchor=pf):
+                    # Independent SAFE-AWARE re-derivation, fed the wire
+                    # map.doors/map.safe (derive_visible is safe-aware via the
+                    # frozen has_line_of_sight reference); anchor = token pos.
+                    return derive_visible(
+                        st["map"]["cells"], pwf, phf, anchor,
+                        doors=st["map"].get("doors"),
+                        safe=st["map"].get("safe"))
+
+                check("(f) behind a CLOSED safe door the room (6,5) is H "
+                      "(never explored) and the door FACE (5,5) is S (D5)",
+                      mask_of_f(pf_st, 6, 5) == "H"
+                      and mask_of_f(pf_st, 5, 5) == "S",
+                      f"(6,5)={mask_of_f(pf_st, 6, 5)} "
+                      f"(5,5)={mask_of_f(pf_st, 5, 5)}")
+                check("(f) S-set == SAFE-AWARE re-derivation (closed safe "
+                      "door blocks, like a wall)",
+                      s_set_of_f(pf_st) == rederive_f(pf_st, pf))
+                ever_se = set(s_set_of_f(pf_st))
+
+                # GM opens the safe door: (6,5) becomes in-sight -> S.
+                gmf.send_json({"type": "safe_door", "x": 5, "y": 5,
+                               "action": "open"})
+                gmf.recv_json()   # the open state (GM copy)
+                al_st = state_until(plf)
+                check("(f) opening reveals (6,5) as S (seen through the open "
+                      "safe door)", mask_of_f(al_st, 6, 5) == "S",
+                      mask_of_f(al_st, 6, 5))
+                check("(f) S-set re-derives after opening (safe-aware helper)",
+                      s_set_of_f(al_st) == rederive_f(al_st, pf))
+                ever_se |= s_set_of_f(al_st)
+
+                # GM closes it again: (6,5) falls back to E (memory, NOT H)
+                # and nothing previously S/E regresses to H (I9).
+                gmf.send_json({"type": "safe_door", "x": 5, "y": 5,
+                               "action": "close"})
+                gmf.recv_json()   # the close state (GM copy)
+                al_st = state_until(plf)
+                h_now = {(x, y) for y in range(phf) for x in range(pwf)
+                         if al_st["visibility"][y][x] == "H"}
+                check("(f) closing again greys (6,5) to E (memory, NOT H) and "
+                      "the S-set is monotonic (no S/E -> H)",
+                      mask_of_f(al_st, 6, 5) == "E" and not (ever_se & h_now),
+                      f"(6,5)={mask_of_f(al_st, 6, 5)} "
+                      f"regressed={sorted(ever_se & h_now)}")
+            finally:
+                gmf.close()
+                plf.close()
+
+            # (g) permissions over the wire -----------------------------------
+            pl11.send_json({"type": "safe_door", "x": 5, "y": 5,
+                            "action": "mark"})
+            err = pl11.recv_json()
+            check("(g) a player safe_door mark -> 'not allowed' (GM-only)",
+                  err == {"type": "error", "message": "not allowed"},
+                  json.dumps(err))
+            gm11.send_json({"type": "door", "x": 5, "y": 5,
+                            "action": "unlock"})
+            err = gm11.recv_json()
+            check("(g) a normal door message on the safe cell -> 'not a "
+                  "normal door'",
+                  err == {"type": "error", "message": "not a normal door"},
+                  json.dumps(err))
+
+            # (h) unmark reverts to a normal door (AC3/AC9) ---------------------
+            gm11.send_json({"type": "safe_door", "x": 5, "y": 5,
+                            "action": "unmark"})
+            st11 = state_until(gm11)
+            pl11.recv_json_or_none(timeout=1)
+            check("(h) GM unmark (closed) reverts to a normal door 'U' and "
+                  "map.safe is empty/absent",
+                  "safe" not in st11["map"]
+                  and st11["map"]["doors"].get("5,5") == "U",
+                  json.dumps({"safe": st11["map"].get("safe"),
+                              "doors": st11["map"]["doors"]}))
+            conn = http.client.HTTPConnection(host, port, timeout=5)
+            conn.request("GET", "/api/maps/sample-dungeon")
+            rest2 = json.loads(conn.getresponse().read())
+            conn.close()
+            check("(h) REST back to the no-safe shape after the unmark",
+                  "safe" not in rest2
+                  and rest2["doors"].get("5,5") == "U",
+                  json.dumps(rest2.get("doors")))
+            # clean hand-off: leave the door in the all-locked default.
+            gm11.send_json({"type": "door", "x": 5, "y": 5,
+                            "action": "lock"})
+            gm11.recv_json()
+        finally:
+            gm11.close()
+            pl11.close()
     finally:
         for c in (gm, alice, bob):
             c.close()

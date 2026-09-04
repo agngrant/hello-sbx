@@ -282,17 +282,28 @@ def _map_doors(grid: Grid) -> dict[str, str] | None:
     has a doorway cell; ``None`` (the key is omitted) for a grid with NO
     doorway cells. Uses ``grid.doors_for_wire()`` — the wire policy (differs
     from ``Grid.to_dict``, which emits the key only when recorded state
-    exists). Absent/None on the wire => the client treats every door as
-    locked (the safe default, A2).
+    exists). Safe-room doors (safe-room spec §8.1) ride in the ``safe``
+    object instead: ``doors_for_wire`` SKIPS safe cells, so ``doors`` and
+    ``safe`` are disjoint and jointly cover every doorway. Absent/None on
+    the wire => the client treats every door as locked (the safe default,
+    A2). For a grid with NO safe doors nothing is skipped — byte-identical
+    output to the pre-feature build.
     """
     return grid.doors_for_wire()
 
 
 def _with_doors(payload: dict[str, Any], grid: Grid) -> dict[str, Any]:
-    """Return ``payload`` with the additive ``doors`` key added (if any)."""
+    """Return ``payload`` with the additive ``doors`` key (if any) and the
+    additive ``safe`` key (safe-room spec §8.2: emitted in full whenever the
+    grid has >= 1 safe door; absent ⇒ no safe doors, so fresh upload/
+    generate responses are byte-identical to today) added. ``doors`` skips
+    safe cells, so the two never overlap on the wire."""
     doors = _map_doors(grid)
     if doors is not None:
         payload["doors"] = doors
+    safe = grid.safe_for_wire()
+    if safe is not None:
+        payload["safe"] = safe
     return payload
 
 

@@ -165,6 +165,12 @@
           <span class="legend-chip legend-doors"><i class="swatch door-open"></i>open door</span>
           <span class="legend-chip legend-doors"><i class="swatch door-unlocked"></i>closed (unlocked)</span>
           <span class="legend-chip legend-doors"><i class="swatch door-locked"></i>locked</span>
+          <!-- Safe-room door (safe-room doors spec §7.4): visible to BOTH GM
+               and players (the GM edits safe doors; a player must read the
+               green cross and know they can walk on it while enemies
+               cannot) — intentionally NOT gated by body.is-gm. -->
+          <span class="legend-sep legend-safe">|</span>
+          <span class="legend-chip legend-safe"><i class="swatch safe-door"></i>safe door (green cross)</span>
           <span class="legend-sep">|</span>
           <span class="legend-chip"><i class="dot dot-tri team-party"></i>friend</span>
           <span class="legend-chip"><i class="dot dot-circle team-neutral"></i>neutral</span>
@@ -252,6 +258,17 @@
           <button class="door-action" data-door-action="lock" aria-pressed="false">Lock</button>
           <button class="door-action" data-door-action="open" aria-pressed="false">Open</button>
           <button class="door-action" data-door-action="close" aria-pressed="false">Close</button>
+        </span>
+        <!-- Safe door tool (safe-room doors spec §7.5): GM-only, the same
+             Door-tool idiom — pick Mark/Unmark/Open/Close, then click a
+             doorway cell to apply it. The sub-row is revealed only while
+             the Safe door tool is armed. -->
+        <button class="tool-btn" data-tool="safeDoor" aria-pressed="false">🛡 Safe door</button>
+        <span id="safe-action-row" class="safe-action-row" hidden>
+          <button class="safe-action" data-safe-action="mark" aria-pressed="true">Mark</button>
+          <button class="safe-action" data-safe-action="unmark" aria-pressed="false">Unmark</button>
+          <button class="safe-action" data-safe-action="open" aria-pressed="false">Open</button>
+          <button class="safe-action" data-safe-action="close" aria-pressed="false">Close</button>
         </span>
       </div>
       <label id="override-wrap" class="gm-only" for="override-toggle">

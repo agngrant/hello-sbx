@@ -30,6 +30,14 @@
   --door-unlocked: #f59f00;  /* closed, unlocked (U): lighter amber + bar */
   --door-locked: #e03131;    /* closed, locked (L): red + padlock glyph */
 
+  /* Safe-room doors (safe-room doors spec §7.1): a bright mint green,
+     distinct from floor, wall, the normal-door red/amber family, and the
+     party token green #2f9e44 (and the cross glyph from the token circle).
+     Open and closed share the green — the bar (drawn by the canvas) is
+     the state discriminator. The explored variant is a desaturated sage. */
+  --safe-open: #3ddc84;
+  --explored-safe-open: #8fae9c;
+
   /* Explored map — greyed ("E") tiers (explored-map spec §6.4). Mirrors the
      JS `T` tokens; the hidden tier reuses the canvas background. */
   --explored-floor: #6b7280;
@@ -262,7 +270,8 @@ input[type="file"] { color: var(--text-muted); }
   overflow: hidden;
 }
 #canvas-wrap.mode-paint-floor, #canvas-wrap.mode-paint-wall,
-#canvas-wrap.mode-paint-doorway, #canvas-wrap.mode-paint-door { cursor: crosshair; }
+#canvas-wrap.mode-paint-doorway, #canvas-wrap.mode-paint-door,
+#canvas-wrap.mode-paint-safeDoor { cursor: crosshair; }
 #canvas-wrap.has-selection { cursor: pointer; }
 #map-canvas { display: block; }
 
@@ -403,6 +412,31 @@ input[type="file"] { color: var(--text-muted); }
 .swatch.door-open { background: var(--floor); border: 2px solid var(--door-open); }
 .swatch.door-unlocked { background: var(--floor); border: 2px solid var(--door-unlocked); }
 .swatch.door-locked { background: var(--floor); border: 2px solid var(--door-locked); }
+/* Safe-room door swatch (safe-room doors spec §7.4): floor base + the safe
+   green border + a small green cross (the same two marks as the canvas
+   art) so the legend shows the cross, not just a green box. Visible to
+   BOTH GM and players (no body.is-gm gate). */
+.swatch.safe-door {
+  background: var(--floor);
+  border: 2px solid var(--safe-open);
+  position: relative;
+}
+.swatch.safe-door::before,
+.swatch.safe-door::after {
+  content: "";
+  position: absolute;
+  background: var(--safe-open);
+}
+.swatch.safe-door::before { /* vertical arm */
+  left: 50%; top: 50%;
+  width: 2px; height: 6px;
+  transform: translate(-50%, -50%);
+}
+.swatch.safe-door::after { /* horizontal arm */
+  left: 50%; top: 50%;
+  width: 6px; height: 2px;
+  transform: translate(-50%, -50%);
+}
 /* Explored map tiers (explored-map spec §7): "explored" = greyed floor with a
    grey wall border; "hidden" = the canvas background (nothing drawn). */
 .swatch.explored { background: var(--explored-floor); border: 1px solid var(--explored-wall); }
@@ -497,7 +531,7 @@ input[type="file"] { color: var(--text-muted); }
 #paint-group { display: flex; gap: var(--s1); }
 /* Door tool action sub-row (door-features spec §7.5): compact action
    buttons revealed only while the Door tool is armed. */
-.door-action-row { display: inline-flex; gap: 2px; align-items: center; }
+.door-action-row, .safe-action-row { display: inline-flex; gap: 2px; align-items: center; }
 .door-action {
   font: inherit;
   font-size: 12px;
@@ -514,6 +548,26 @@ input[type="file"] { color: var(--text-muted); }
 .door-action[aria-pressed="true"] {
   color: var(--text);
   border-bottom-color: var(--warn);
+}
+/* Safe door action sub-row (safe-room doors spec §7.5): same compact
+   button style as .door-action; the armed (pressed) underline uses the
+   safe green instead of the door amber, so the two tools read apart. */
+.safe-action {
+  font: inherit;
+  font-size: 12px;
+  color: var(--text-muted);
+  background: transparent;
+  border: none;
+  border-radius: var(--r-control);
+  padding: var(--s1) var(--s2);
+  min-height: 32px;
+  cursor: pointer;
+  border-bottom: 2px solid transparent;
+}
+.safe-action:hover:not(:disabled) { color: var(--text); background: rgba(77, 171, 247, 0.12); }
+.safe-action[aria-pressed="true"] {
+  color: var(--text);
+  border-bottom-color: var(--safe-open);
 }
 #override-wrap {
   display: inline-flex;

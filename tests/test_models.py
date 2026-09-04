@@ -11,15 +11,15 @@ from __future__ import annotations
 import unittest
 
 from app.grid import build_sample_map
-from app.models import DOOR_STATES, Grid
+from app.models import DOOR_STATES, SAFE_DOOR_STATES, SAFE_DOOR_TEAMS, Grid
 
 
-def _grid(rows, doors=None, name="t"):
+def _grid(rows, doors=None, safe=None, name="t"):
     height = len(rows)
     width = len(rows[0])
     return Grid(
         name=name, width=width, height=height,
-        cells=[list(r) for r in rows], doors=doors,
+        cells=[list(r) for r in rows], doors=doors, safe=safe,
     )
 
 
@@ -234,6 +234,277 @@ class TestDoorsForWire(unittest.TestCase):
     def test_wire_none_when_no_doorways(self):
         g = _grid([["floor", "wall"], ["wall", "floor"]])
         self.assertIsNone(g.doors_for_wire())
+
+
+# ---------------------------------------------------------------------------
+# Safe-room doors (safe-room spec §3, AC1, AC12) — a new additive layer on
+# Grid: the `safe` dict, the constants, validation, accessors, the paint-
+# sync point, and the wire partition (doors ∪ safe = all doorways).
+# ---------------------------------------------------------------------------
+
+
+class TestSafeDoorConstants(unittest.TestCase):
+    def test_safe_door_states_are_c_o(self):
+        self.assertEqual(SAFE_DOOR_STATES, ("C", "O"))
+
+    def test_safe_door_teams_exclude_hostile(self):
+        self.assertEqual(SAFE_DOOR_TEAMS, frozenset({"party", "neutral"}))
+        self.assertNotIn("hostile", SAFE_DOOR_TEAMS)
+
+
+class TestSafeDoorRoundTrip(unittest.TestCase):
+    """AC1(a/b/c): `safe` round-trips to_dict/from_dict; absent ⇒ no safe
+    doors; present ⇒ every state preserved (and every doors state too)."""
+
+    def test_none_omits_key_and_round_trips(self):
+        g = _grid(_DOORS_ROWS)
+        self.assertIsNone(g.safe)
+        d = g.to_dict()
+        self.assertNotIn("safe", d)
+        self.assertIsNone(Grid.from_dict(d).safe)
+
+    def test_single_closed_safe_door_round_trips(self):
+        # (1,0) is a doorway of _DOORS_ROWS.
+        g = _grid(_DOORS_ROWS, safe={"1,0": "C"})
+        d = g.to_dict()
+        self.assertEqual(d["safe"], {"1,0": "C"})
+        back = Grid.from_dict(d)
+        self.assertEqual(back.safe, {"1,0": "C"})
+
+    def test_safe_and_doors_both_preserved(self):
+        # A safe door at (1,0) and a normal door at (3,2) survive together.
+        g = _grid(_DOORS_ROWS, {"3,2": "U"}, safe={"1,0": "O"})
+        back = Grid.from_dict(g.to_dict())
+        self.assertEqual(back.safe, {"1,0": "O"})
+        self.assertEqual(back.doors, {"3,2": "U"})
+
+    def test_empty_safe_equivalent_to_none(self):
+        g = _grid(_DOORS_ROWS, safe={})
+        self.assertEqual(g.safe, {})
+        self.assertFalse(g.is_safe_door(1, 0))
+        # to_dict omits an empty object (like doors).
+        self.assertNotIn("safe", g.to_dict())
+
+    def test_old_constructor_positional_still_works(self):
+        # AC12: the old Grid(name, width, height, cells, image, doors)
+        # positional form still constructs; safe defaults to None.
+        g = Grid("t", 4, 3, [list(r) for r in _DOORS_ROWS], None,
+                 {"1,0": "O"})
+        self.assertIsNone(g.safe)
+        self.assertEqual(g.door_state_at(1, 0), "O")
+
+    def test_sample_map_has_no_safe_doors(self):
+        # AC2(a)/AC16: build_sample_map is byte-unchanged — no safe doors
+        # are pre-marked (a GM must author them).
+        g = build_sample_map()
+        self.assertIsNone(g.safe)
+        for x, y in ((5, 5), (10, 4), (9, 7)):
+            self.assertFalse(g.is_safe_door(x, y))
+            self.assertIsNone(g.safe_door_state_at(x, y))
+
+
+class TestSafeDoorPostInitValidation(unittest.TestCase):
+    """AC1(d): __post_init__ rejects a safe key on floor/wall, out of
+    bounds, a bad state char, a malformed key, and (mutual exclusion, I1)
+    a key present in BOTH doors and safe."""
+
+    def test_rejects_safe_on_floor_cell(self):
+        rows = [["floor", "doorway", "wall"]]
+        with self.assertRaises(ValueError):
+            _grid(rows, safe={"0,0": "C"})  # (0,0) is floor
+
+    def test_rejects_safe_on_wall_cell(self):
+        rows = [["wall", "doorway", "floor"]]
+        with self.assertRaises(ValueError):
+            _grid(rows, safe={"0,0": "C"})  # (0,0) is wall
+
+    def test_rejects_out_of_bounds_key(self):
+        with self.assertRaises(ValueError):
+            _grid(_DOORS_ROWS, safe={"9,9": "C"})
+
+    def test_rejects_bad_state_char(self):
+        for bad in ("L", "U", "X", "c", ""):
+            with self.assertRaises(ValueError):
+                _grid(_DOORS_ROWS, safe={"1,0": bad})
+
+    def test_rejects_malformed_key_no_comma(self):
+        with self.assertRaises(ValueError):
+            _grid(_DOORS_ROWS, safe={"10": "C"})
+
+    def test_rejects_malformed_key_non_numeric(self):
+        with self.assertRaises(ValueError):
+            _grid(_DOORS_ROWS, safe={"a,b": "C"})
+
+    def test_rejects_key_in_both_doors_and_safe(self):
+        # I1 mutual exclusion: the same cell may not be both a normal door
+        # (recorded) and a safe door.
+        with self.assertRaises(ValueError):
+            _grid(_DOORS_ROWS, {"1,0": "L"}, safe={"1,0": "C"})
+
+    def test_accepts_valid_states(self):
+        for st in ("C", "O"):
+            g = _grid(_DOORS_ROWS, safe={"1,0": st})
+            self.assertEqual(g.safe_door_state_at(1, 0), st)
+
+    def test_none_bypasses_validation(self):
+        g = _grid([["floor", "wall"]])
+        self.assertIsNone(g.safe)
+
+
+class TestSafeDoorAccessors(unittest.TestCase):
+    """AC1(e): is_safe_door / safe_door_state_at / is_safe_door_closed."""
+
+    def test_is_safe_door_false_for_non_doorway(self):
+        g = _grid(_DOORS_ROWS, safe={"1,0": "C"})
+        self.assertFalse(g.is_safe_door(0, 0))  # floor
+        self.assertFalse(g.is_safe_door(2, 0))  # wall
+
+    def test_is_safe_door_false_for_normal_door(self):
+        g = _grid(_DOORS_ROWS, {"1,0": "O"})  # recorded normal door
+        self.assertFalse(g.is_safe_door(1, 0))
+        self.assertIsNone(g.safe_door_state_at(1, 0))
+
+    def test_safe_door_state_at(self):
+        g = _grid(_DOORS_ROWS, safe={"1,0": "O"})
+        self.assertEqual(g.safe_door_state_at(1, 0), "O")
+        self.assertIsNone(g.safe_door_state_at(0, 0))  # non-safe
+        self.assertIsNone(g.safe_door_state_at(3, 2))  # plain doorway
+
+    def test_is_safe_door_closed(self):
+        g = _grid(_DOORS_ROWS, safe={"1,0": "C", "3,2": "O"})
+        self.assertTrue(g.is_safe_door_closed(1, 0))   # C → closed
+        self.assertFalse(g.is_safe_door_closed(3, 2))  # O → open
+        self.assertFalse(g.is_safe_door_closed(0, 0))  # not a safe door
+
+    def test_door_state_at_none_for_safe_door_cell(self):
+        # §4.4: a safe door has no NORMAL door state (safe record is the
+        # only door record for the cell) — door_state_at returns None.
+        g = _grid(_DOORS_ROWS, safe={"1,0": "C"})
+        self.assertIsNone(g.door_state_at(1, 0))
+
+
+class TestSetSafeDoor(unittest.TestCase):
+    def test_set_safe_door_materializes_and_sets(self):
+        g = _grid(_DOORS_ROWS)
+        self.assertIsNone(g.safe)
+        g.set_safe_door(1, 0, "C")
+        self.assertEqual(g.safe, {"1,0": "C"})
+
+    def test_set_safe_door_rejects_non_doorway(self):
+        g = _grid(_DOORS_ROWS)
+        with self.assertRaises(ValueError):
+            g.set_safe_door(0, 0, "C")  # floor
+
+    def test_set_safe_door_rejects_bad_state(self):
+        g = _grid(_DOORS_ROWS)
+        with self.assertRaises(ValueError):
+            g.set_safe_door(1, 0, "L")
+
+    def test_set_safe_door_rejects_recorded_normal_door(self):
+        # I1: set_safe_door is a model-level invariant tripwire — a cell
+        # with a RECORDED normal door must be converted (the session mark
+        # path drops the normal record first), never overwritten in place.
+        g = _grid(_DOORS_ROWS, {"1,0": "L"})
+        with self.assertRaises(ValueError):
+            g.set_safe_door(1, 0, "C")
+
+
+class TestUnmarkSafeDoor(unittest.TestCase):
+    """§3.5 / A6: unmark reverts a safe door to a NORMAL door, preserving
+    open/closed (C → U, O → O)."""
+
+    def test_unmark_closed_reverts_to_u(self):
+        g = _grid(_DOORS_ROWS, safe={"1,0": "C"})
+        g.unmark_safe_door(1, 0)
+        self.assertIsNone(g.safe)  # last safe door removed → None
+        self.assertEqual(g.doors, {"1,0": "U"})  # closed + unlocked
+        self.assertEqual(g.door_state_at(1, 0), "U")
+
+    def test_unmark_open_reverts_to_o(self):
+        g = _grid(_DOORS_ROWS, safe={"1,0": "O"})
+        g.unmark_safe_door(1, 0)
+        self.assertIsNone(g.safe)
+        self.assertEqual(g.doors, {"1,0": "O"})  # open preserved
+        self.assertEqual(g.door_state_at(1, 0), "O")
+
+    def test_unmark_keeps_other_states(self):
+        g = _grid(_DOORS_ROWS, {"3,2": "L"}, safe={"1,0": "C"})
+        g.unmark_safe_door(1, 0)
+        self.assertEqual(g.doors, {"1,0": "U", "3,2": "L"})
+        self.assertIsNone(g.safe)
+
+    def test_unmark_rejects_non_safe(self):
+        g = _grid(_DOORS_ROWS, {"1,0": "L"})
+        with self.assertRaises(ValueError):
+            g.unmark_safe_door(1, 0)  # a normal door, not a safe door
+
+
+class TestSafeDoorSyncAfterCellSet(unittest.TestCase):
+    """§3.5: painting floor/wall over a safe door deletes its record — the
+    same single sync point as normal doors."""
+
+    def test_paint_floor_over_safe_door_deletes(self):
+        g = _grid(_DOORS_ROWS, safe={"1,0": "C"})
+        g.cells[0][1] = "floor"
+        g.sync_doors_after_cell_set(1, 0)
+        self.assertIsNone(g.safe)
+        self.assertFalse(g.is_safe_door(1, 0))
+
+    def test_paint_wall_over_safe_door_deletes(self):
+        g = _grid(_DOORS_ROWS, safe={"3,2": "O"})
+        g.cells[2][3] = "wall"
+        g.sync_doors_after_cell_set(3, 2)
+        self.assertIsNone(g.safe)
+        self.assertFalse(g.is_safe_door(3, 2))
+
+    def test_paint_doorway_over_safe_door_keeps(self):
+        # Repainting an existing safe doorway leaves the safe state intact.
+        g = _grid(_DOORS_ROWS, safe={"1,0": "O"})
+        g.cells[0][1] = "doorway"  # already a doorway
+        g.sync_doors_after_cell_set(1, 0)
+        self.assertEqual(g.safe, {"1,0": "O"})
+
+    def test_paint_floor_only_affects_that_key(self):
+        g = _grid(_DOORS_ROWS, safe={"1,0": "C", "3,2": "O"})
+        g.cells[0][1] = "floor"
+        g.sync_doors_after_cell_set(1, 0)
+        self.assertEqual(g.safe, {"3,2": "O"})  # the other safe door stays
+
+
+class TestSafeDoorWire(unittest.TestCase):
+    """§8.1 / AC1 / AC10 / I5: doors skips safe cells (disjoint, jointly
+    covering all doorways); safe_for_wire emits full or None."""
+
+    def test_doors_for_wire_excludes_safe_cells(self):
+        g = build_sample_map()
+        g.set_safe_door(5, 5, "C")
+        self.assertEqual(g.doors_for_wire(), {"10,4": "L", "9,7": "L"})
+        self.assertEqual(g.safe_for_wire(), {"5,5": "C"})
+        # disjoint and jointly covering every doorway:
+        self.assertEqual(set(g.doors_for_wire()) | set(g.safe_for_wire()),
+                         {"5,5", "10,4", "9,7"})
+
+    def test_wire_partition_with_multiple_safe_doors(self):
+        g = build_sample_map()
+        g.set_safe_door(5, 5, "C")
+        g.set_safe_door(10, 4, "O")
+        self.assertEqual(g.doors_for_wire(), {"9,7": "L"})
+        self.assertEqual(g.safe_for_wire(), {"5,5": "C", "10,4": "O"})
+
+    def test_safe_for_wire_none_without_safe_doors(self):
+        g = build_sample_map()
+        self.assertIsNone(g.safe_for_wire())
+        # and doors is byte-identical to the no-safe build (nothing skipped)
+        self.assertEqual(g.doors_for_wire(),
+                         {"5,5": "L", "10,4": "L", "9,7": "L"})
+
+    def test_to_dict_emits_safe_only_when_present(self):
+        g = build_sample_map()
+        self.assertNotIn("safe", g.to_dict())
+        g.set_safe_door(9, 7, "O")
+        d = g.to_dict()
+        self.assertEqual(d["safe"], {"9,7": "O"})
+        self.assertNotIn("doors", d)  # no recorded normal doors
 
 
 if __name__ == "__main__":

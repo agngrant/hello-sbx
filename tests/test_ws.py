@@ -869,5 +869,186 @@ class TestWsReplyVsBroadcastFrameIntegrity(unittest.TestCase):
             httpd.server_close()
 
 
+class TestSafeDoorWire(unittest.TestCase):
+    """Safe-door message over a REAL WS (safe-room spec §8/§14/AC14/AC3):
+    the ``{type:"safe_door", x, y, action}`` client→server frame (GM-only),
+    per-client error replies, the success → ``state`` broadcast carrying the
+    additive ``map.safe`` (disjoint from ``map.doors``), and the frozen
+    normal-``door`` guard ("not a normal door") on a safe cell. Server on an
+    ephemeral port; unique session id per test.
+
+    SAFE-STATE RESET (why setUp exists): like :class:`TestDoorWire`, the
+    ``?session=safe-ws-N`` sessions share the SHARED
+    ``maps_registry["sample-dungeon"]["grid"]`` object, so a test that marks
+    a safe door leaks it into the next test. setUp drives a throwaway GM
+    session to (1) ``safe_door unmark`` (5,5) — reverting a leaked safe door
+    to a normal door, or the harmless "not a safe door" error when it is not
+    one — and (2) ``door lock`` (5,5) — force-closing the resulting normal
+    door to the all-locked default. After this, (5,5) is always a normal
+    locked door and no safe door exists, regardless of prior tests."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.httpd = ThreadingHTTPServer(("127.0.0.1", 0), None)
+        cls.httpd.daemon_threads = True
+        cls.httpd.handle_error = lambda *a, **k: None
+        cls.host, cls.port = cls.httpd.server_address[:2]
+        cls.thread = threading.Thread(target=cls.httpd.serve_forever,
+                                      daemon=True, name="littedungeons-safe-ws")
+        cls.thread.start()
+        cls._n = 0
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.httpd.shutdown()
+        cls.httpd.server_close()
+        cls.thread.join(timeout=5)
+
+    def setUp(self):
+        gm = self._client(self._sid()).connect()
+        gm.join("SafeReset-GM", "gm")
+        # (1) revert any leaked safe door at (5,5) to a normal door...
+        gm.send_json({"type": "safe_door", "x": 5, "y": 5, "action": "unmark"})
+        gm.recv_json()  # state (was safe) or "not a safe door"
+        # (2) ...then force-close ALL THREE sample doorways to the all-locked
+        # default. (10,4)/(9,7) are shared with :class:`TestDoorWire` (the
+        # same sample grid), which can leave them unlocked — ``lock`` is the
+        # no-op "door is already locked" when already locked, so it converges
+        # every door to the all-locked default regardless of prior state.
+        for (x, y) in ((5, 5), (10, 4), (9, 7)):
+            gm.send_json({"type": "door", "x": x, "y": y, "action": "lock"})
+            gm.recv_json()  # state (was U/O) or "door is already locked"
+        gm.close()
+
+    def _sid(self):
+        TestSafeDoorWire._n += 1
+        return f"safe-ws-{TestSafeDoorWire._n}"
+
+    def _client(self, session):
+        return WSClient(self.host, self.port,
+                        path=f"/ws?session={session}", timeout=10)
+
+    def _join_gm_player(self):
+        sid = self._sid()
+        gm = self._client(sid).connect()
+        pl = self._client(sid).connect()
+        gm.join("Gamer", "gm")
+        pl.join("Alice", "player")
+        # GM's join broadcast (Alice joined).
+        self.assertEqual(gm.recv_json()["type"], "state")
+        return gm, pl
+
+    def _wait_state_with_safe(self, client, safe):
+        """Next ``state`` frame whose map.safe == ``safe`` (None ⇒ absent)."""
+        for _ in range(40):
+            m = client.recv_json()
+            if m["type"] != "state":
+                continue
+            got = m["map"].get("safe")
+            if got == safe:
+                return m
+        raise AssertionError(f"no state with map.safe={safe!r}")
+
+    def test_welcome_no_safe_absent_and_doors_all_locked(self):
+        # AC10(a): a grid with no safe doors OMITS map.safe (and doors is
+        # byte-identical to today — all three L after the reset).
+        with self._client(self._sid()) as c:
+            w = c.join("Gamer", "gm")
+            self.assertNotIn("safe", w["map"])
+            self.assertEqual(
+                w["map"]["doors"],
+                {"5,5": "L", "10,4": "L", "9,7": "L"},
+            )
+
+    def test_gm_mark_broadcasts_safe_and_shrinks_doors(self):
+        gm, pl = self._join_gm_player()
+        try:
+            gm.send_json({"type": "safe_door", "x": 5, "y": 5,
+                          "action": "mark"})
+            st = self._wait_state_with_safe(gm, {"5,5": "C"})
+            # disjoint + jointly covering all doorways (I5/AC1):
+            self.assertEqual(st["map"]["doors"], {"10,4": "L", "9,7": "L"})
+            self.assertEqual(
+                set(st["map"]["doors"]) | set(st["map"]["safe"]),
+                {"5,5", "10,4", "9,7"},
+            )
+            # the player's broadcast copy carries the same safe state:
+            self._wait_state_with_safe(pl, {"5,5": "C"})
+        finally:
+            gm.close()
+            pl.close()
+
+    def test_gm_mark_then_open(self):
+        gm, pl = self._join_gm_player()
+        try:
+            gm.send_json({"type": "safe_door", "x": 5, "y": 5,
+                          "action": "mark"})
+            self._wait_state_with_safe(gm, {"5,5": "C"})
+            self._wait_state_with_safe(pl, {"5,5": "C"})
+            gm.send_json({"type": "safe_door", "x": 5, "y": 5,
+                          "action": "open"})
+            self._wait_state_with_safe(gm, {"5,5": "O"})
+            self._wait_state_with_safe(pl, {"5,5": "O"})
+        finally:
+            gm.close()
+            pl.close()
+
+    def test_non_gm_safe_door_not_allowed(self):
+        gm, pl = self._join_gm_player()
+        try:
+            pl.send_json({"type": "safe_door", "x": 5, "y": 5,
+                          "action": "mark"})
+            err = pl.recv_json()
+            self.assertEqual(err,
+                             {"type": "error", "message": "not allowed"})
+            # nothing was broadcast (the error is per-client only).
+            self.assertIsNone(gm.recv_json_or_none(timeout=0.4))
+        finally:
+            gm.close()
+            pl.close()
+
+    def test_door_message_on_safe_cell_not_a_normal_door(self):
+        gm, pl = self._join_gm_player()
+        try:
+            gm.send_json({"type": "safe_door", "x": 5, "y": 5,
+                          "action": "mark"})
+            self._wait_state_with_safe(gm, {"5,5": "C"})
+            self._wait_state_with_safe(pl, {"5,5": "C"})
+            # A stray NORMAL door message on the safe cell is rejected
+            # (AC13b) — a per-client error (no broadcast) — and the safe
+            # record is untouched.
+            gm.send_json({"type": "door", "x": 5, "y": 5, "action": "unlock"})
+            err = gm.recv_json()
+            self.assertEqual(err,
+                             {"type": "error", "message": "not a normal door"})
+            # Confirm via a fresh state: the safe state is unchanged and no
+            # doors entry was created on the safe cell (mutual exclusion I1).
+            gm.send_json({"type": "request_state"})
+            st = self._wait_state_with_safe(gm, {"5,5": "C"})
+            self.assertNotIn("5,5", st["map"].get("doors", {}))
+        finally:
+            gm.close()
+            pl.close()
+
+    def test_existing_door_wire_still_works_on_normal_door(self):
+        # Regression: the frozen normal ``door`` frame still works on a
+        # NORMAL (non-safe) door — (10,4) is a plain door after the reset.
+        gm, pl = self._join_gm_player()
+        try:
+            gm.send_json({"type": "door", "x": 10, "y": 4, "action": "unlock"})
+            for _ in range(40):
+                m = gm.recv_json()
+                if m["type"] == "state" and \
+                        m["map"].get("doors", {}).get("10,4") == "U":
+                    break
+            else:
+                raise AssertionError("no state with doors[10,4]=U")
+            # and no safe object appeared (there is no safe door here):
+            self.assertNotIn("safe", m["map"])
+        finally:
+            gm.close()
+            pl.close()
+
+
 if __name__ == "__main__":
     unittest.main()

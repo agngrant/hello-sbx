@@ -264,8 +264,8 @@ diagonal step that squeezes between two wall corners (both orthogonal "elbow"
 cells walls) — the same no-corner-cut rule as movement. Endpoints never
 block (``a == b`` → True). The ``fog`` flag is retained in the payloads for
 wire compatibility but no longer gates visibility. The GM is never fogged or
-filtered. A **CLOSED** door blocks sight exactly like a wall (door-features
-spec); an open door does not.
+filtered. A **CLOSED** door (normal or safe room) blocks sight exactly like a
+wall (door-features spec); an open door does not.
 
 > **Map tiers (explored map, additive):** the *grid* is now also tiered per
 > player — seen (line of sight, full detail) / explored (greyed) / hidden

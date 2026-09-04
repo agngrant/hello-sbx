@@ -592,5 +592,124 @@ class TestInvariants(unittest.TestCase):
             self.assertEqual((g.width, g.height), (before_w, before_h))
 
 
+# ---------------------------------------------------------------------------
+# Safe-room doors (safe-room spec §6 / AC6, AC7, AC8, AC16) — byte-identical
+# S/E/H code, safe-aware only through the LOS predicate: a CLOSED safe door's
+# far side is H/E exactly like a wall, its FACE is S (the existing D5
+# wall-face rule — no new code), an OPEN safe door reveals the far side as S,
+# and a safe-LESS grid's mask is byte-for-byte the pre-feature mask.
+# ---------------------------------------------------------------------------
+
+
+def safe_grid_vis(rows, safe, name="safe-vis"):
+    """A :class:`Grid` with the given ``safe`` set ("<x>,<y>" -> "C"|"O")."""
+    g = make_grid(rows)
+    for key, st in safe.items():
+        x, y = (int(p) for p in key.split(","))
+        g.set_safe_door(x, y, st)
+    return g
+
+
+# A two-room map: token at (1,1); floor (2,1) adjacent to the doorway (3,1)
+# on the TOKEN side (so the closed-door FACE is revealed via that floor);
+# the doorway (3,1) is the only gap; far floor (4,1); wall (5,1); border.
+SAFE_VIS_ROWS = [
+    "WWWWWWW",
+    "W..D.WW",
+    "WWWWWWW",
+]
+SAFE_VIS_POS = (1, 1)
+
+
+class TestSafeDoorVisibility(unittest.TestCase):
+    """AC6/AC7/AC8: closed safe door H/E + face reveal (no new code); open
+    safe door S; monotonic; safe-less regression byte-identical."""
+
+    def test_closed_safe_door_far_side_h(self):
+        # Never explored: the far side (and everything behind) is H — exactly
+        # like a wall; the door FACE (3,1) is S (the D5 wall-face rule, which
+        # already treats a closed door as a wall — no new code).
+        g = safe_grid_vis(SAFE_VIS_ROWS, {"3,1": "C"})
+        mask = build_visibility_mask(g, set(), SAFE_VIS_POS)
+        self.assertEqual(cell(mask, 1, 1), "S")   # token region
+        self.assertEqual(cell(mask, 2, 1), "S")   # left-room floor
+        self.assertEqual(cell(mask, 3, 1), "S")   # the closed safe door FACE
+        self.assertEqual(cell(mask, 4, 1), "H")   # far side: never explored
+        self.assertEqual(cell(mask, 5, 1), "H")   # wall facing only unseen cells
+        self.assertNotIn((4, 1), visible_cells(g, SAFE_VIS_POS))
+        # Oracle cross-check (door-aware LOS now sees the safe door):
+        self.assertEqual(visible_cells(g, SAFE_VIS_POS),
+                         oracle_visible(g, SAFE_VIS_POS))
+
+    def test_closed_safe_door_face_is_s_via_wall_face_rule(self):
+        # D5: a closed safe door's own cell is revealed by the SAME S2
+        # wall-face rule walls use — (3,1) is NOT walkable (closed), so it
+        # cannot be revealed by (S1); it is in the S-set only because its
+        # walkable near-side neighbour (2,1) has line of sight.
+        g = safe_grid_vis(SAFE_VIS_ROWS, {"3,1": "C"})
+        from app.pathfinding import walkable
+        vis = visible_cells(g, SAFE_VIS_POS)
+        self.assertIn((3, 1), vis)
+        self.assertFalse(walkable(g, 3, 1))  # closed door: not S1-reachable
+
+    def test_open_safe_door_reveals_far_side_as_s(self):
+        g = safe_grid_vis(SAFE_VIS_ROWS, {"3,1": "O"})
+        mask = build_visibility_mask(g, set(), SAFE_VIS_POS)
+        self.assertEqual(cell(mask, 4, 1), "S")  # seen through the open door
+        self.assertEqual(cell(mask, 5, 1), "S")  # wall face past the door
+        self.assertEqual(cell(mask, 3, 1), "S")  # the open door (S1, walkable)
+        self.assertEqual(visible_cells(g, SAFE_VIS_POS),
+                         oracle_visible(g, SAFE_VIS_POS))
+
+    def test_explored_before_is_e_not_h(self):
+        # I9/AC8: a cell seen while the door was OPEN, then the door CLOSED
+        # → E (greyed memory), NOT H; monotonic within the map.
+        g = safe_grid_vis(SAFE_VIS_ROWS, {"3,1": "O"})
+        explored = visible_cells(g, SAFE_VIS_POS)
+        g.set_safe_door(3, 1, "C")  # the GM closes it
+        mask = build_visibility_mask(g, explored, SAFE_VIS_POS)
+        self.assertEqual(cell(mask, 4, 1), "E")  # explored before, not H
+        self.assertEqual(cell(mask, 3, 1), "S")  # face still S (facing seen)
+        # Monotonic: nothing previously S/E is now H.
+        ever_se = {(x, y) for y, row in enumerate(
+            build_visibility_mask(
+                safe_grid_vis(SAFE_VIS_ROWS, {"3,1": "O"}),
+                set(), SAFE_VIS_POS)) for x, ch in enumerate(row)
+            if ch in "SE"}
+        h_now = {(x, y) for y, row in enumerate(mask)
+                 for x, ch in enumerate(row) if ch == "H"}
+        self.assertFalse(ever_se & h_now)
+
+    def test_safeless_regression_mask_byte_identical(self):
+        # AC16 pin: a safe-LESS grid (no safe key at all) produces the exact
+        # same mask as the pre-feature code path (oracle from plain LOS).
+        g = make_grid(SAFE_VIS_ROWS)  # the (3,1) doorway is a normal door
+        mask_a = build_visibility_mask(g, set(), SAFE_VIS_POS)
+        # With the normal door all-locked (the default) the far side is H —
+        # identical to the closed-safe-door mask (AC4 equivalence).
+        g_closed_safe = safe_grid_vis(SAFE_VIS_ROWS, {"3,1": "C"})
+        mask_b = build_visibility_mask(g_closed_safe, set(), SAFE_VIS_POS)
+        self.assertEqual(mask_a, mask_b)
+        self.assertEqual(visible_cells(g, SAFE_VIS_POS),
+                         visible_cells(g_closed_safe, SAFE_VIS_POS))
+        # Oracle (which is safe-aware via _closed_doors) agrees with both:
+        self.assertEqual(visible_cells(g, SAFE_VIS_POS),
+                         oracle_visible(g, SAFE_VIS_POS))
+        self.assertEqual(visible_cells(g_closed_safe, SAFE_VIS_POS),
+                         oracle_visible(g_closed_safe, SAFE_VIS_POS))
+
+    def test_safe_door_is_entity_agnostic_for_visibility(self):
+        # AC8: the mask does NOT depend on the team of any entity — the S/
+        # E/H logic is purely geometric + door-state. An open safe door is
+        # transparent in the mask regardless of who is on the far side.
+        g = safe_grid_vis(SAFE_VIS_ROWS, {"3,1": "O"})
+        mask = build_visibility_mask(g, set(), SAFE_VIS_POS)
+        self.assertEqual(cell(mask, 4, 1), "S")
+        # The closed variant hides it — the ONLY difference is the door state.
+        g2 = safe_grid_vis(SAFE_VIS_ROWS, {"3,1": "C"})
+        mask2 = build_visibility_mask(g2, set(), SAFE_VIS_POS)
+        self.assertEqual(cell(mask2, 4, 1), "H")
+
+
 if __name__ == "__main__":
     unittest.main()

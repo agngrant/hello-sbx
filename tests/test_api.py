@@ -17,6 +17,7 @@ os.environ.setdefault("LITTLEDUNGEONS_QUIET_LOGS", "1")
 
 from app.grid import build_sample_map
 from app.imaging import encode_png
+from app.models import Grid
 from app.server import ThreadingHTTPServer
 
 
@@ -466,6 +467,95 @@ class TestGenerateMap(ServerTestCase):
         self.assertIn(second["id"], self._map_ids())
         # Same seed + size → identical cells regardless of which id.
         self.assertEqual(second["cells"], data["cells"])
+
+
+class TestSafeDoorRest(ServerTestCase):
+    """AC10(b): the additive `safe` object in REST map objects — present
+    (disjoint from `doors`) only when safe doors exist; absent (byte-
+    identical to today) for a map with none. No new REST route.
+
+    A fresh ``sample-dungeon`` grid has NO safe doors, so its detail is
+    byte-identical to the pre-feature build (no ``safe`` key, ``doors``
+    unchanged — the existing exact key-set assertions keep passing). To prove
+    the additive path we register a FRESH grid (unique id) with a safe door
+    and assert the detail carries ``safe`` disjoint from ``doors`` — without
+    mutating the shared sample-dungeon grid that other tests pin."""
+
+    def test_sample_map_detail_has_no_safe_key(self):
+        # Regression: the shared sample dungeon has no safe doors → the
+        # ``safe`` key is ABSENT (byte-identical to the frozen shape), and
+        # ``doors`` is unchanged (all three L by default — or whatever a
+        # prior WS test left; the point is NO safe key, disjoint from doors).
+        _, _, data = self.get_json("/api/maps/sample-dungeon")
+        self.assertNotIn("safe", data)
+        self.assertIn("doors", data)
+        # whatever doors exist, none of the safe door cells can overlap:
+        # (there are no safe cells, so all doorway keys are in doors)
+        self.assertIsInstance(data["doors"], dict)
+
+    def test_fresh_upload_and_generate_have_no_safe_key(self):
+        # AC10(b): fresh upload/generate responses are unchanged (no safe
+        # key) — safe doors are GM-authored, never detected/generated.
+        status, data = self.post_json("/api/maps/generate", {
+            "name": "Safe-less Gen", "cols": 10, "rows": 10, "seed": 7,
+        })
+        self.assertEqual(status, 200)
+        self.assertNotIn("safe", data)
+        self.assertIn("doors", data)
+
+    def test_registered_grid_with_safe_door_carrirs_safe_disjoint(self):
+        from app.main import maps_registry
+        # Register a fresh 3x3 grid with one doorway; mark it a safe door.
+        g = Grid(name="SafeRest", width=3, height=3,
+                 cells=[["wall"] * 3,
+                        ["wall", "floor", "doorway"],
+                        ["wall"] * 3],
+                 safe={"2,1": "C"})
+        map_id = "safe-rest-proof"
+        maps_registry[map_id] = {
+            "grid": g, "entities": {}, "players": {}}
+        try:
+            status, _, data = self.get_json(f"/api/maps/{map_id}")
+            self.assertEqual(status, 200)
+            # The additive `safe` object is present with the safe door's
+            # state, and `doors` SKIPS the safe cell (disjoint, jointly
+            # covering the doorway cells).
+            self.assertEqual(data.get("safe"), {"2,1": "C"})
+            # the single doorway is the safe door → doors has no entry for
+            # it (it is covered by `safe` instead).
+            self.assertEqual(data.get("doors"), {})
+            self.assertNotIn("2,1", data.get("doors", {}))
+        finally:
+            maps_registry.pop(map_id, None)
+
+    def test_rest_paint_over_safe_door_deletes_safe(self):
+        # AC10/§8.2: painting floor/wall over a safe door deletes the safe
+        # record server-side (shared sync point); a subsequent GET reflects
+        # it. The REST paint response shape is unchanged (frozen).
+        from app.main import maps_registry
+        g = Grid(name="SafePaint", width=3, height=3,
+                 cells=[["wall"] * 3,
+                        ["wall", "floor", "doorway"],
+                        ["wall"] * 3],
+                 safe={"2,1": "O"})
+        map_id = "safe-paint-proof"
+        maps_registry[map_id] = {
+            "grid": g, "entities": {}, "players": {}}
+        try:
+            # paint the safe doorway back to floor → the safe record is gone
+            status, data = self.post_json(
+                f"/api/maps/{map_id}/paint",
+                {"x": 2, "y": 1, "cell_type": "floor"})
+            self.assertEqual(status, 200)
+            # the response shape is FROZEN (no safe echo):
+            self.assertEqual(
+                set(data.keys()), {"ok", "x", "y", "cell_type"})
+            status, _, detail = self.get_json(f"/api/maps/{map_id}")
+            self.assertEqual(status, 200)
+            self.assertNotIn("safe", detail)  # no safe doors → key omitted
+            self.assertEqual(detail["cells"][1][2], "floor")
+        finally:
+            maps_registry.pop(map_id, None)
 
 
 if __name__ == "__main__":

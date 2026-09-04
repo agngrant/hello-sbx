@@ -144,6 +144,22 @@ way they do through walls (the far side greys out / hides). The three states
 are colour-distinct in the legend: **locked = red + padlock**, **closed-
 unlocked = amber + bar**, **open = amber + arch**.
 
+### Safe room doors (GM)
+
+The GM can mark any doorway as a **safe room door** (bottom-bar **🛡 Safe
+door** tool with **Mark / Unmark / Open / Close**). A safe room door is
+**always unlocked**, **starts closed**, and is **GM-controlled end-to-end**
+— players cannot open, close, or mark it (a player tap on it is a no-op).
+The core rule: **only player characters (party) and neutral NPCs may step
+onto / stand on a safe room door** — a **hostile** enemy can never path
+onto, stand on, or be placed on the cell, **even while the door is open**
+and **even under the GM's *Ignore walls* override** (the safety rule; party
+and neutral keep their normal ignore-walls behavior). Like a normal door, a
+**closed** safe room door blocks sight and movement like a wall; an **open**
+one is walkable and sight-transparent for party/neutral. It renders as a
+**green cross** (closed = cross + bar) — distinct from normal doors' red
+padlock / amber bar / amber arch — and appears in the legend.
+
 ---
 
 ## Upload & automatic wall/doorway detection

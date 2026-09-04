@@ -239,6 +239,7 @@ function buildApi() {
     "join, connectWs, setConn, scheduleReconnect, showView, wsSend, wsUrl," +
     "uploadMap, generateMap, showUploadPreview, resetUploadForm, setSourceTab, syncTabStyles, syncGenerateButton, setGenerateBusy, setUploadBusy, syncUploadButton," +
     "doorStateAt, validateDoors, doorColor, drawDoorGlyph, sendDoor, setTool, setDoorAction," +
+    "isSafeDoor, safeDoorStateAt, validateSafe, safeDoorColor, drawSafeDoorGlyph, sendSafeDoor, setSafeAction," +
     "_timer: timer, _send: __SEND, _fetch: __FETCH }";
   // eslint-disable-next-line no-eval
   eval(src + EXPORTS);

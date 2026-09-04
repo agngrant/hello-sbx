@@ -554,5 +554,260 @@ class TestDoorFindPath(unittest.TestCase):
         self.assertIsNone(find_path(grid, (0, 1), (2, 1)))
 
 
+# ---------------------------------------------------------------------------
+# Safe-room doors (safe-room spec §5 / AC4, AC5): a closed safe door is a
+# wall for movement + LOS (entity-agnostic); an open safe door is
+# walkable/transparent for party/neutral/team=None but a WALL to a hostile
+# (the entity restriction, SAFE-3). `team=None` (and every safe-less grid)
+# stays byte-for-byte the pre-feature behaviour.
+# ---------------------------------------------------------------------------
+
+
+def safe_grid(rows, safe, name="safe-test"):
+    """A :class:`Grid` with the given ``safe`` ("<x>,<y>" -> "C"|"O") set."""
+    g = make_grid(rows, name=name)
+    for key, st in safe.items():
+        x, y = (int(p) for p in key.split(","))
+        g.set_safe_door(x, y, st)
+    return g
+
+
+class TestSafeDoorWalkable(unittest.TestCase):
+    """AC5: closed safe door not walkable for ANY team (incl. team=None);
+    open safe door walkable for party/neutral/None, NOT for hostile."""
+
+    ROWS = [["floor", "doorway", "floor"]]
+
+    def test_closed_safe_door_blocks_every_team(self):
+        g = safe_grid(self.ROWS, {"1,0": "C"})
+        for team in (None, "party", "neutral", "hostile"):
+            with self.subTest(team=team):
+                self.assertFalse(walkable(g, 1, 0, team=team))
+
+    def test_open_safe_door_walkable_for_party_neutral_none(self):
+        g = safe_grid(self.ROWS, {"1,0": "O"})
+        for team in (None, "party", "neutral"):
+            with self.subTest(team=team):
+                self.assertTrue(walkable(g, 1, 0, team=team))
+
+    def test_open_safe_door_not_walkable_for_hostile(self):
+        g = safe_grid(self.ROWS, {"1,0": "O"})
+        self.assertFalse(walkable(g, 1, 0, team="hostile"))
+
+    def test_closed_safe_door_blocks_like_a_wall_geometry(self):
+        # Identical geometry: a wall cell vs a closed safe door → both
+        # unwalkable for every team; identical for LOS (team-agnostic).
+        wall = make_grid(self.ROWS)
+        wall.cells[0][1] = "wall"
+        closed = safe_grid(self.ROWS, {"1,0": "C"})
+        for team in (None, "party", "neutral", "hostile"):
+            self.assertEqual(walkable(wall, 1, 0, team=team),
+                             walkable(closed, 1, 0, team=team),
+                             f"walkable mismatch for {team}")
+        self.assertEqual(has_line_of_sight(wall, (0, 0), (2, 0)),
+                         has_line_of_sight(closed, (0, 0), (2, 0)),
+                         False)
+
+    def test_floor_unaffected_by_safe_doors(self):
+        g = safe_grid(self.ROWS, {"1,0": "C"})
+        self.assertTrue(walkable(g, 0, 0, team="hostile"))
+        self.assertTrue(walkable(g, 2, 0, team="hostile"))
+
+
+class TestSafeDoorStep(unittest.TestCase):
+    """AC5: diagonal into/around an open safe door is blocked for a hostile
+    (no slip-through) and legal for party/neutral; no-corner-cut preserved."""
+
+    def test_diagonal_into_open_safe_door_blocked_for_hostile_only(self):
+        g = safe_grid(
+            [["floor", "doorway", "floor"],
+             ["floor", "floor", "floor"]],
+            {"1,0": "O"},
+        )
+        # (0,1) -> (1,0): orthogonal step onto the open safe door.
+        for team in ("party", "neutral", None):
+            with self.subTest(team=team):
+                self.assertTrue(is_valid_step(g, (0, 1), (1, 0), team=team))
+        self.assertFalse(is_valid_step(g, (0, 1), (1, 0), team="hostile"))
+
+    def test_diagonal_with_open_safe_door_elbow_blocked_for_hostile(self):
+        # (0,0) -> (1,1): elbow (1,0) is the OPEN safe door — walkable for
+        # party/neutral (and the elbow (0,1) is floor), blocked for a
+        # hostile (elbow not walkable for its team → no slip-through).
+        g = safe_grid(
+            [["floor", "doorway", "floor"],
+             ["floor", "floor", "floor"]],
+            {"1,0": "O"},
+        )
+        for team in ("party", "neutral", None):
+            with self.subTest(team=team):
+                self.assertTrue(is_valid_step(g, (0, 0), (1, 1), team=team))
+        self.assertFalse(is_valid_step(g, (0, 0), (1, 1), team="hostile"))
+
+    def test_diagonal_with_closed_safe_door_elbow_blocked_for_all(self):
+        g = safe_grid(
+            [["floor", "doorway", "floor"],
+             ["floor", "floor", "floor"]],
+            {"1,0": "C"},
+        )
+        for team in (None, "party", "neutral", "hostile"):
+            with self.subTest(team=team):
+                self.assertFalse(is_valid_step(g, (0, 0), (1, 1), team=team))
+
+
+class TestSafeDoorLineOfSight(unittest.TestCase):
+    """AC4: a closed safe door blocks LOS exactly like a wall (incl.
+    corner-cut); an open safe door is transparent. LOS has NO team — the
+    behaviour is identical for all teams by construction (no team param)."""
+
+    def test_closed_safe_door_blocks_sight_open_transparent(self):
+        closed = safe_grid([["floor", "doorway", "floor"]], {"1,0": "C"})
+        open_ = safe_grid([["floor", "doorway", "floor"]], {"1,0": "O"})
+        self.assertFalse(has_line_of_sight(closed, (0, 0), (2, 0)))
+        self.assertTrue(has_line_of_sight(open_, (0, 0), (2, 0)))
+
+    def test_closed_safe_door_blocks_like_a_wall(self):
+        wall = make_grid([["floor", "wall", "floor"]])
+        door = safe_grid([["floor", "doorway", "floor"]], {"1,0": "C"})
+        self.assertEqual(
+            has_line_of_sight(wall, (0, 0), (2, 0)),
+            has_line_of_sight(door, (0, 0), (2, 0)),
+            False,
+        )
+
+    def test_diagonal_both_elbows_closed_safe_doors_blocked(self):
+        # A diagonal whose both elbows are closed safe doors is a
+        # corner-cut (identical to the closed-normal-door rule).
+        g = safe_grid(
+            [["floor", "doorway", "floor"],
+             ["doorway", "floor", "floor"],
+             ["floor", "floor", "floor"]],
+            {"1,0": "C", "0,1": "C"},
+        )
+        self.assertFalse(has_line_of_sight(g, (0, 0), (1, 1)))
+        self.assertFalse(has_line_of_sight(g, (0, 0), (2, 2)))
+        # One elbow open → the line passes (a single closed corner grazes).
+        g_one = safe_grid(
+            [["floor", "doorway", "floor"],
+             ["doorway", "floor", "floor"],
+             ["floor", "floor", "floor"]],
+            {"1,0": "C", "0,1": "O"},
+        )
+        self.assertTrue(has_line_of_sight(g_one, (0, 0), (1, 1)))
+
+    def test_open_safe_door_is_sight_transparent_for_a_hostile_too(self):
+        # Sight is team-agnostic: a hostile behind an open safe door is
+        # SEEN (the restriction is occupancy/movement, not sight — E14).
+        g = safe_grid([["floor", "doorway", "floor"]], {"1,0": "O"})
+        self.assertTrue(has_line_of_sight(g, (0, 0), (2, 0)))
+
+
+class TestSafeDoorFindPath(unittest.TestCase):
+    """AC5/AC6: find_path(team=...) — hostile routes AROUND an open safe
+    door (None when sealed), party/neutral route THROUGH it; the team=None
+    (entity-agnostic) regression stays identical for safe-less grids."""
+
+    WALL_WITH_DOOR = [
+        ["floor", "wall", "floor"],
+        ["floor", "doorway", "floor"],
+        ["floor", "wall", "floor"],
+    ]
+
+    def test_sealed_open_safe_door_none_for_hostile(self):
+        # The ONLY route across the wall column is the open safe door: a
+        # hostile cannot use it → None; party/neutral/team=None can.
+        g = safe_grid(self.WALL_WITH_DOOR, {"1,1": "O"})
+        self.assertIsNone(find_path(g, (0, 1), (2, 1), team="hostile"))
+        for team in (None, "party", "neutral"):
+            with self.subTest(team=team):
+                path = find_path(g, (0, 1), (2, 1), team=team)
+                self.assertIsNotNone(path, f"team={team} sealed?!")
+                self.assertIn((1, 1), path)
+
+    def test_closed_safe_door_seals_for_every_team(self):
+        g = safe_grid(self.WALL_WITH_DOOR, {"1,1": "C"})
+        for team in (None, "party", "neutral", "hostile"):
+            with self.subTest(team=team):
+                self.assertIsNone(find_path(g, (0, 1), (2, 1), team=team))
+
+    def test_hostile_routes_around_open_safe_door(self):
+        # A detour exists (bottom row): the hostile A* must take it and
+        # never visit the open safe door cell; party takes the direct line.
+        g = safe_grid(
+            [["floor", "wall", "floor"],
+             ["floor", "doorway", "floor"],
+             ["floor", "floor", "floor"]],
+            {"1,1": "O"},
+        )
+        hostile = find_path(g, (0, 0), (2, 0), team="hostile")
+        self.assertIsNotNone(hostile)
+        self.assertNotIn((1, 1), hostile)
+        party = find_path(g, (0, 0), (2, 0), team="party")
+        self.assertIsNotNone(party)
+        self.assertIn((1, 1), party)  # the straight door-gap route is legal
+
+    def test_open_safe_door_is_a_wall_to_a_hostile(self):
+        # The core no-slip claim: to a hostile an OPEN safe door blocks
+        # movement exactly like a WALL. Compare hostile A* reachability with
+        # the door open vs. with a wall at the same cell — identical.
+        rows = [
+            ["floor", "wall", "floor"],
+            ["floor", "doorway", "floor"],
+            ["floor", "wall", "floor"],
+        ]
+        g_open = safe_grid(rows, {"1,1": "O"})
+        g_wall = make_grid(rows)
+        g_wall.cells[1][1] = "wall"
+        # The only gap in the wall column is (1,1): hostile sealed either way.
+        self.assertIsNone(find_path(g_open, (0, 1), (2, 1), team="hostile"))
+        self.assertIsNone(find_path(g_wall, (0, 1), (2, 1)))
+        # ...but party routes through the open door (and the wallless case
+        # shows the door cell is otherwise a normal open doorway).
+        self.assertIsNotNone(find_path(g_open, (0, 1), (2, 1), team="party"))
+
+    def test_diagonal_elbow_around_open_safe_door_blocked_for_hostile(self):
+        # A hostile cannot diagonal AROUND the open safe door: the door
+        # cell is a walkable elbow for party/neutral but NOT for a hostile,
+        # so a diagonal whose elbow is the open safe door is illegal only
+        # for the hostile (no slip-through), exactly the wall case.
+        g = safe_grid(
+            [["floor", "doorway", "floor"],
+             ["floor", "floor", "floor"],
+             ["floor", "floor", "floor"]],
+            {"1,0": "O"},
+        )
+        g_wall = make_grid(
+            [["floor", "wall", "floor"],
+             ["floor", "floor", "floor"],
+             ["floor", "floor", "floor"]])
+        # (0,0)->(1,1) diagonal: elbow (1,0) is the open safe door / wall.
+        for team in ("party", "neutral", None):
+            self.assertTrue(is_valid_step(g, (0, 0), (1, 1), team=team))
+        self.assertFalse(is_valid_step(g, (0, 0), (1, 1), team="hostile"))
+        # identical to the wall geometry for a hostile:
+        self.assertFalse(is_valid_step(g_wall, (0, 0), (1, 1)))
+
+    def test_safeless_grid_team_param_is_a_noop_regression(self):
+        # AC5 regression: on a grid with NO safe doors, team=... produces
+        # byte-identical results to the no-team call (the open-safe term is
+        # empty and SAFE_DOOR_TEAMS never applies).
+        g = make_grid(self.WALL_WITH_DOOR)
+        for team in ("party", "neutral", "hostile"):
+            with self.subTest(team=team):
+                self.assertEqual(
+                    find_path(g, (0, 1), (2, 1), team=team),
+                    find_path(g, (0, 1), (2, 1)),
+                )
+                self.assertEqual(walkable(g, 1, 1, team=team),
+                                 walkable(g, 1, 1))
+
+    def test_team_none_is_entity_agnostic_on_safe_grid(self):
+        # team=None: the open safe door is walkable (LOS/visibility/QA
+        # callers are entity-agnostic) — identical to a plain open doorway.
+        g = safe_grid(self.WALL_WITH_DOOR, {"1,1": "O"})
+        self.assertTrue(walkable(g, 1, 1, team=None))
+        self.assertIsNotNone(find_path(g, (0, 1), (2, 1), team=None))
+
+
 if __name__ == "__main__":
     unittest.main()

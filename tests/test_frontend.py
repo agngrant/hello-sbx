@@ -2488,6 +2488,9 @@ class TestDoorHints(FrontendBase):
         self.assertIn("Click a door to lock", out)
 
     def test_player_hint_mentions_doors(self):
+        # The player hint keeps the door copy; safe doors are GM-managed
+        # (spec §7.7) so the hint stays as-is for players (tapping a safe
+        # door is a no-op, covered in TestPlayerSafeDoorTap).
         out = js(
             "(()=>{api.state.joined=true;api.state.role='player';"
             "api.state.you={id:'p2',name:'Alice',role:'player',"
@@ -2498,6 +2501,755 @@ class TestDoorHints(FrontendBase):
         self.assertIn("tap a door", out)
         self.assertIn("open/close", out)
         self.assertIn("Tap a tile to move", out)
+
+
+# ══════════════════════════════════════════════════════════════════════
+# Safe-room doors (docs/design/safe-room-doors.md §7 — AC10/AC11 frontend)
+# ══════════════════════════════════════════════════════════════════════
+# A safe-room door is a `doorway` cell recorded in `map.safe` (an additive
+# wire object "<x>,<y>" -> "C"|"O" that partitions the doorway cells with
+# `map.doors`). It renders as a GREEN CROSS over the floor base — bright
+# mint #3ddc84 full-tier (S / GM / preview), desaturated sage #8fae9c in
+# the explored (E) tier — with a horizontal BAR when closed (the "bar =
+# closed" idiom, green instead of amber). The GM gets a 🛡 Safe door tool
+# with Mark/Unmark/Open/Close sub-buttons (the Door-tool idiom); clicking a
+# doorway cell sends {type:"safe_door", x, y, action} (GM-only). A PLAYER
+# tap on a safe-door cell is a NO-OP (no door frame, no move) — safe doors
+# are GM-controlled; they never emit a normal `door` frame.
+
+class TestSafeDoorStatic(FrontendBase):
+    """AC10d — the real index.html / style.css carry the GM Safe door tool +
+    4 `data-safe-action` sub-buttons, the `legend-safe` chip (visible to BOTH
+    roles — no body.is-gm gate), and the palette tokens mirroring T."""
+
+    def setUp(self):
+        with open(INDEX, encoding="utf-8") as fh:
+            self.html = fh.read()
+        css_path = os.path.join(os.path.dirname(INDEX), "style.css")
+        with open(css_path, encoding="utf-8") as fh:
+            self.css = fh.read()
+
+    def test_paint_group_has_safe_door_tool_and_four_sub_buttons(self):
+        self.assertIn(
+            '<button class="tool-btn" data-tool="safeDoor" '
+            'aria-pressed="false">🛡 Safe door</button>',
+            self.html)
+        self.assertIn('id="safe-action-row"', self.html)
+        for action in ("mark", "unmark", "open", "close"):
+            self.assertIn(f'data-safe-action="{action}"', self.html,
+                          f"missing safe-action {action}")
+        # the existing tools are unchanged (regression guard)
+        for tool in ('data-tool="select"', 'data-tool="floor"',
+                     'data-tool="wall"', 'data-tool="doorway"',
+                     'data-tool="door"'):
+            self.assertIn(tool, self.html)
+
+    def test_legend_safe_chip_present_and_ungated(self):
+        self.assertIn('<span class="legend-sep legend-safe">|</span>',
+                      self.html)
+        self.assertIn(
+            '<span class="legend-chip legend-safe">'
+            '<i class="swatch safe-door"></i>safe door (green cross)'
+            '</span>', self.html)
+        self.assertEqual(self.html.count("legend-chip legend-safe"), 1)
+        # the pre-existing chips are unchanged
+        for chip in (
+            '<i class="swatch door-open"></i>open door',
+            '<i class="swatch door-locked"></i>locked',
+            '<i class="swatch doorway"></i>doorway',
+        ):
+            self.assertIn(chip, self.html)
+
+    def test_legend_safe_chip_is_not_gm_gated(self):
+        # The chip must be visible to BOTH GM and players (like the door
+        # chips): no body.is-gm rule may hide `.legend-safe`, and the CSS
+        # that hides the player-only explored chips from the GM stays.
+        self.assertIn("body.is-gm .legend-explored { display: none; }",
+                      self.css)
+        self.assertNotIn(".legend-safe", self.css)
+
+    def test_css_safe_tokens_and_swatch_styles(self):
+        for token in ("--safe-open: #3ddc84",
+                      "--explored-safe-open: #8fae9c"):
+            self.assertIn(token, self.css)
+        self.assertIn(".swatch.safe-door", self.css)
+        # the swatch draws the CROSS, not just a green box (spec §7.4)
+        self.assertIn(".swatch.safe-door::before", self.css)
+        self.assertIn(".swatch.safe-door::after", self.css)
+        # the safe-door cursor mode is wired, and the pre-existing tokens
+        # are kept
+        self.assertIn("mode-paint-safeDoor", self.css)
+        self.assertIn("--door-open: #d97706", self.css)
+
+
+class TestSafeDoorPaletteTokens(FrontendBase):
+    """AC10c — the T palette carries the spec-pinned safe-door greens, all
+    distinct from floor/wall, from the party token green (#2f9e44, the
+    entity the player must never confuse the cross with), and from the
+    normal-door red/amber family."""
+
+    def test_full_and_explored_safe_colors(self):
+        out = js(
+            "(()=>({open:api.T.safeOpen, closed:api.T.safeClosed,"
+            "eOpen:api.T.exploredSafeOpen, eClosed:api.T.exploredSafeClosed,"
+            "floor:api.T.floor, wall:api.T.wallFill, eFloor:api.T.exploredFloor,"
+            "ally:api.T.ally,"
+            "doorOpen:api.T.doorOpen, doorUnlocked:api.T.doorUnlocked,"
+            "doorLocked:api.T.doorLocked}))()"
+        )
+        d = json.loads(out)
+        # spec-pinned hexes (spec §7.3)
+        self.assertEqual(d["open"], "#3ddc84")
+        self.assertEqual(d["closed"], "#3ddc84")
+        self.assertEqual(d["eOpen"], "#8fae9c")
+        self.assertEqual(d["eClosed"], "#8fae9c")
+        # open vs closed are distinguished by the BAR (same green), but the
+        # greens must still not collide with anything else on the board
+        for c in (d["open"], d["eOpen"]):
+            self.assertNotEqual(c.lower(), d["floor"].lower())
+            self.assertNotEqual(c.lower(), d["wall"].lower())
+            self.assertNotEqual(c.lower(), d["eFloor"].lower())
+            # distinct from the PARTY token green (A7: shape differs too)
+            self.assertNotEqual(c.lower(), d["ally"].lower())
+            # distinct from every normal-door color
+            for nd in (d["doorOpen"], d["doorUnlocked"], d["doorLocked"]):
+                self.assertNotEqual(c.lower(), nd.lower())
+
+
+class TestSafeDoorStateModel(FrontendBase):
+    """AC11b — state.safe is set from msg.map.safe in applyState ({} when
+    absent), and MALFORMED safe payloads (wrong type / bad keys / bad state
+    chars) are treated as {} (no safe doors) — never crash, following the
+    validateDoors / validateVisibilityMatrix defensive pattern."""
+
+    _MAP = ({"name": "m", "width": 5, "height": 4,
+             "cells": [["floor"] * 5 for _ in range(4)]})
+
+    def _welcome_safe(self, safe_js: str) -> str:
+        # map.safe is the wire location (spec §8.1): the field rides inside
+        # the "map" object of the welcome/state payload, additive.
+        return (
+            "(()=>{const map=" + json.dumps(self._MAP) + ";"
+            "map.safe=" + safe_js + ";"
+            "api.onWelcome({type:'welcome',"
+            "you:{id:'p2',name:'Alice',role:'player',entity_id:'e2'},"
+            "map,entities:[],"
+            "you_entity:{id:'e2',name:'Alice',kind:'player',team:'party',"
+            "x:1,y:1},players:[],awareness:[],fog:false});"
+            "return api.state.safe;})()"
+        )
+
+    def test_absent_safe_defaults_to_empty_object(self):
+        # No "safe" key at all => {} (no safe doors; every doorway is a
+        # normal door).
+        self.assertEqual(json.loads(js(self._welcome_safe("undefined"))), {})
+
+    def test_null_safe_defaults_to_empty_object(self):
+        self.assertEqual(json.loads(js(self._welcome_safe("null"))), {})
+
+    def test_valid_safe_object_stored(self):
+        out = js(self._welcome_safe("{'1,2':'C','3,0':'O','0,3':'O'}"))
+        self.assertEqual(json.loads(out),
+                         {"1,2": "C", "3,0": "O", "0,3": "O"})
+
+    def test_malformed_safe_treated_as_empty(self):
+        for bad in ("[]", "'C'", "5", "{'1x':'C'}", "{'1,2':'X'}",
+                    "{'1,2':'L'}", "true"):
+            with self.subTest(bad=bad):
+                self.assertEqual(json.loads(js(self._welcome_safe(bad))),
+                                 {}, bad)
+
+    def test_state_broadcast_replaces_safe(self):
+        # A safe door painted away (its key deleted server-side) must not
+        # linger in a stale client copy — applyState replaces the object
+        # wholesale (mirrors the doors behavior).
+        out = js(
+            "(()=>{const map=" + json.dumps(self._MAP) + ";"
+            "map.safe={'2,2':'O'};"
+            "api.onWelcome({type:'welcome',"
+            "you:{id:'p2',name:'Alice',role:'player',entity_id:'e2'},"
+            "map,entities:[],"
+            "you_entity:{id:'e2',name:'Alice',kind:'player',team:'party',"
+            "x:1,y:1},players:[],awareness:[],fog:false});"
+            "api.state.grid.cells[2][2]='doorway';"
+            "const hadOpen=api.isSafeDoor(2,2);"
+            "const m2=Object.assign({},map);m2.safe={};"
+            "api.onState({type:'state',map:m2,entities:[],"
+            "you_entity:{id:'e2',name:'Alice',kind:'player',team:'party',"
+            "x:1,y:1},players:[],awareness:[],fog:false});"
+            "return {hadOpen, now:api.isSafeDoor(2,2),"
+            "all:api.state.safe};})()"
+        )
+        d = json.loads(out)
+        self.assertTrue(d["hadOpen"])
+        self.assertFalse(d["now"])
+        self.assertEqual(d["all"], {})
+
+
+class TestSafeDoorStateAt(FrontendBase):
+    """AC11b — isSafeDoor / safeDoorStateAt: a safe door is a `doorway` cell
+    recorded in state.safe (state "C"|"O", default "C"); non-doorway and
+    non-recorded cells are not safe doors (null), even with a stale key."""
+
+    _SETUP = (
+        "api.state.grid={width:4,height:3,cells:["
+        "['floor','doorway','floor','floor'],"
+        "['wall','doorway','wall','floor'],"
+        "['floor','floor','doorway','floor']]}"
+    )
+
+    def test_recorded_states_win(self):
+        out = js("(()=>{" + self._SETUP + ";"
+                 ';api.state.safe={"1,0":"O","2,2":"C"};'
+                 'return {o:api.safeDoorStateAt(1,0), c:api.safeDoorStateAt(2,2),'
+                 'is10:api.isSafeDoor(1,0), is22:api.isSafeDoor(2,2)};})()')
+        d = json.loads(out)
+        self.assertEqual(d["o"], "O")
+        self.assertEqual(d["c"], "C")
+        self.assertTrue(d["is10"])
+        self.assertTrue(d["is22"])
+
+    def test_non_recorded_doorway_is_not_safe(self):
+        # A doorway with no state.safe key is a NORMAL door, not a safe
+        # door (the map.safe ∩ map.doors partition is one-sided per cell).
+        out = js("(()=>{" + self._SETUP + ";"
+                 'api.state.safe={"1,0":"O"};'
+                 'return {st:api.safeDoorStateAt(1,1), is:api.isSafeDoor(1,1)};})()')
+        d = json.loads(out)
+        self.assertIsNone(d["st"])
+        self.assertFalse(d["is"])
+
+    def test_non_doorway_cell_has_no_safe_door(self):
+        out = js("(()=>{" + self._SETUP + ";"
+                 ';api.state.safe={"0,0":"O","0,1":"C","3,9":"C"};'
+                 'return {f:api.isSafeDoor(0,0), w:api.isSafeDoor(0,1),'
+                 'oob:api.isSafeDoor(3,9)};})()')
+        d = json.loads(out)
+        self.assertFalse(d["f"])    # floor cell — even with a stale key
+        self.assertFalse(d["w"])    # wall cell
+        self.assertFalse(d["oob"])  # out of bounds
+
+
+class TestSafeDoorRender(FrontendBase):
+    """AC11a — drawGridOnCanvas renders a safe door as a GREEN CROSS: open
+    -> cross only, closed -> cross + bar, in the correct full-tier green
+    #3ddc84 (S / GM / no-matrix pass) and the explored-tier sage #8fae9c
+    (E). A safe door cell is floor-based (no wall hatch); H cells stay
+    undrawn; and a NORMAL door still renders its red/amber art
+    (byte-identical regression — a non-safe doorway never takes the safe
+    branch). The test grid (same as the normal-door render tests) has
+    THREE doorways (x=2, y=1..3); each test records only the SAFE one(s)
+    in state.safe, and the assertions scope to those cells' bboxes so the
+    normal doors' art is excluded."""
+
+    # 5x5: wall ring, a doorway column at x=2 (y=1..3), floors elsewhere —
+    # same geometry as the normal-door render tests.
+    _GRID = [
+        ["wall", "wall", "wall", "wall", "wall"],
+        ["wall", "floor", "doorway", "floor", "wall"],
+        ["wall", "floor", "doorway", "floor", "wall"],
+        ["wall", "floor", "doorway", "floor", "wall"],
+        ["wall", "wall", "wall", "wall", "wall"],
+    ]
+    _MAP_JS = json.dumps({"name": "m", "width": 5, "height": 5,
+                          "cells": _GRID})
+
+    def _safe_border_styles(self, safe_js: str, vis_js="null"):
+        """The safe-door BORDER strokeRect colors, tagged by the recorded
+        state of each SAFE doorway cell (non-safe doorways are skipped —
+        they render the normal-door art)."""
+        expr = (
+            "(()=>{const map=" + self._MAP_JS + ";"
+            "api.state.role='gm';api.state.grid=map;"
+            "api.state.doors={};"
+            "api.state.safe=" + safe_js + ";"
+            "api.els.canvas.width=800;api.els.canvas.height=600;"
+            "const c=api.els.canvas.getContext('2d');"
+            "c._rects.length=0;c._strokes.length=0;"
+            "api.drawGridOnCanvas(api.els.canvas,c," + vis_js + ");"
+            "const doors={O:[],C:[]};"
+            "for(const r of c._rects){if(r.w!==117)continue;"
+            "const yCell=Math.round((r.y-1.5)/120);"
+            "if(!api.isSafeDoor(2,yCell))continue;"
+            "doors[api.safeDoorStateAt(2,yCell)||'C'].push(r.style);}"
+            "return doors;})()"
+        )
+        return json.loads(js(expr))
+
+    def _safe_cell_segments(self, safe_js: str, vis_js="null"):
+        """The non-rect stroke segments (glyph art) whose BOTH endpoints
+        fall inside a SAFE door cell's bbox (s=120, ox=100, oy=0 ->
+        cell (2,y): px=340..460, py=120*y..120*y+120), color-tagged. Grid
+        lines, wall hatch/borders, and the NORMAL doors' glyphs all fall
+        outside those bboxes, so only the safe doors' crosses (and bars,
+        when closed) show. Segment key: style|x|y|dx|dy (min corner +
+        absolute deltas)."""
+        expr = (
+            "(()=>{const map=" + self._MAP_JS + ";"
+            "api.state.role='gm';api.state.grid=map;"
+            "api.state.doors={};"
+            "api.state.safe=" + safe_js + ";"
+            "api.els.canvas.width=800;api.els.canvas.height=600;"
+            "const c=api.els.canvas.getContext('2d');"
+            "c._rects.length=0;c._strokes.length=0;"
+            "api.drawGridOnCanvas(api.els.canvas,c," + vis_js + ");"
+            "const inSafeCell=(p)=>p&&p[0]>=340&&p[0]<=460&&"
+            "Math.floor(p[1]/120)>=1&&Math.floor(p[1]/120)<=3&&"
+            "api.isSafeDoor(2,Math.floor(p[1]/120));"
+            "const segs=[];"
+            "for(const s of c._strokes){"
+            "for(const seg of s.path){"
+            "if(seg.r||!seg.m||!seg.l)continue;"
+            "if(!(inSafeCell(seg.m)&&inSafeCell(seg.l)))continue;"
+            "const a=seg.m,b=seg.l;"
+            "const f=(v)=>Math.round(v*1000)/1000;"
+            "segs.push(s.style+'|'+f(Math.min(a[0],b[0]))+'|'"
+            "+f(Math.min(a[1],b[1]))+'|'+f(Math.abs(a[0]-b[0]))+'|'"
+            "+f(Math.abs(a[1]-b[1])));}}"
+            "return segs;})()"
+        )
+        return json.loads(js(expr))
+
+    def test_open_safe_renders_green_cross_without_bar(self):
+        # GM pass (no matrix => full tier): an OPEN safe door gets a green
+        # #3ddc84 border + cross (two segments) and NO bar — the open vs
+        # closed discriminator.
+        safe = '{"2,2":"O"}'
+        borders = self._safe_border_styles(safe)
+        self.assertEqual(borders["O"], ["#3ddc84"])
+        self.assertEqual(borders["C"], [])
+        segs = self._safe_cell_segments(safe)
+        # cell (2,2): px=340, py=240, s=120 -> cx=400, cy=300, r=33.6
+        self.assertIn("#3ddc84|366.4|300|67.2|0", segs)   # cross horiz
+        self.assertIn("#3ddc84|400|266.4|0|67.2", segs)   # cross vert
+        # no bar (the closed-only third segment)
+        self.assertNotIn("#3ddc84|366.4|326.88|67.2|0", segs)
+        # exactly the two cross segments — no other safe art in the cell
+        self.assertEqual(segs, ["#3ddc84|366.4|300|67.2|0",
+                                "#3ddc84|400|266.4|0|67.2"])
+
+    def test_closed_safe_renders_cross_plus_bar(self):
+        # A CLOSED safe door: same green border, the cross PLUS the
+        # horizontal bar (the "closed" mark) — three segments total, the
+        # bar at the same position/length as the normal "U" door bar.
+        safe = '{"2,2":"C"}'
+        borders = self._safe_border_styles(safe)
+        self.assertEqual(borders["C"], ["#3ddc84"])
+        segs = self._safe_cell_segments(safe)
+        self.assertIn("#3ddc84|366.4|300|67.2|0", segs)   # cross horiz
+        self.assertIn("#3ddc84|400|266.4|0|67.2", segs)   # cross vert
+        self.assertIn("#3ddc84|366.4|326.88|67.2|0", segs)  # the BAR
+        # exactly cross + bar — no extra art
+        self.assertEqual(len(segs), 3)
+
+    def test_explored_tier_renders_sage(self):
+        # A player matrix tiering the safe door "E": border + cross + bar
+        # in the desaturated sage #8fae9c, and NO full-tier green appears
+        # on the cell.
+        vis = "['EEEEE','EEEEE','EEEEE','EEEEE','EEEEE']"
+        borders = self._safe_border_styles('{"2,2":"C"}', vis)
+        self.assertEqual(borders["C"], ["#8fae9c"])
+        e_segs = self._safe_cell_segments('{"2,2":"C"}', vis)
+        self.assertIn("#8fae9c|366.4|300|67.2|0", e_segs)   # sage cross
+        self.assertIn("#8fae9c|400|266.4|0|67.2", e_segs)   # sage vert
+        self.assertIn("#8fae9c|366.4|326.88|67.2|0", e_segs)  # sage bar
+        for s in e_segs:
+            self.assertNotIn("#3ddc84", s)
+
+    def test_s_e_tier_mixed(self):
+        # In-sight safe doors (S rows) render the full green; explored
+        # ones (E rows) render the sage — the tier of the CELL decides,
+        # not the state (mirrors the normal-door S/E test).
+        vis = json.dumps(["SSSSS", "SSSSS", "EEEEE", "EEEEE", "EEEEE"])
+        borders = self._safe_border_styles('{"2,1":"O","2,2":"C"}', vis)
+        self.assertEqual(borders["O"], ["#3ddc84"])   # (2,1) — S tier
+        self.assertEqual(borders["C"], ["#8fae9c"])   # (2,2) — E tier
+
+    def test_hidden_safe_not_drawn(self):
+        # An all-H matrix: the safe door contributes no border, no glyph,
+        # no fill — nothing is drawn (consistent with the hidden tier).
+        vis = json.dumps(["HHHHH"] * 5)
+        expr = (
+            "(()=>{const map=" + self._MAP_JS + ";"
+            "api.state.role='player';api.state.grid=map;"
+            'api.state.doors={};api.state.safe={"2,1":"O"};'
+            "api.els.canvas.width=800;api.els.canvas.height=600;"
+            "const c=api.els.canvas.getContext('2d');"
+            "c._rects.length=0;c._strokes.length=0;c._fills.length=0;"
+            "api.drawGridOnCanvas(api.els.canvas,c," + vis + ");"
+            "return {doorRects:c._rects.length, strokes:c._strokes.length,"
+            "fills:c._fills.length};})()"
+        )
+        d = json.loads(js(expr))
+        self.assertEqual(d["doorRects"], 0)
+        self.assertEqual(d["strokes"], 0)
+        self.assertEqual(d["fills"], 0)
+
+    def test_safe_cell_keeps_floor_base_and_no_wall_hatch(self):
+        # The safe-door cell (2,2) must be FLOOR-based: the whole-grid
+        # floor base fill covers it and NO wall hatch segment falls on it
+        # (a safe door is a door, not a wall — spec §7.1).
+        expr = (
+            "(()=>{const map=" + self._MAP_JS + ";"
+            "api.state.role='gm';api.state.grid=map;"
+            'api.state.doors={};api.state.safe={"2,2":"O"};'
+            "api.els.canvas.width=800;api.els.canvas.height=600;"
+            "const c=api.els.canvas.getContext('2d');"
+            "c._rects.length=0;c._strokes.length=0;"
+            "api.drawGridOnCanvas(api.els.canvas,c,null);"
+            "const inSafe=(p)=>p&&p[0]>=340&&p[0]<=460&&p[1]>=240&&"
+            "p[1]<=360;"
+            "const hatch=c._strokes.some(s=>s.path.some(seg=>{"
+            "if(!seg.m||!seg.l)return false;"
+            "const dx=Math.abs(seg.m[0]-seg.l[0]);"
+            "const dy=Math.abs(seg.m[1]-seg.l[1]);"
+            "return dx>0&&dy>0&&(inSafe(seg.m)||inSafe(seg.l));}));"
+            "const floorBase=c._fills.find(f=>f.style==='#efe9dc'&&"
+            "f.w===600&&f.h===600);"
+            "return {hatch, floorBase:!!floorBase};})()"
+        )
+        d = json.loads(js(expr))
+        self.assertTrue(d["floorBase"], "safe cell sits on the floor base")
+        self.assertFalse(d["hatch"], "a safe door must not get a wall hatch")
+
+    def test_normal_door_unchanged_regression(self):
+        # A NON-safe doorway (no map.safe) still renders the normal red/
+        # amber art — the safe branch never fires for it (byte-for-byte
+        # regression guard on the normal-door pass).
+        expr = (
+            "(()=>{const map=" + self._MAP_JS + ";"
+            "api.state.role='gm';api.state.grid=map;"
+            'api.state.doors={"2,1":"O","2,2":"U","2,3":"L"};'
+            "api.state.safe={};"
+            "api.els.canvas.width=800;api.els.canvas.height=600;"
+            "const c=api.els.canvas.getContext('2d');"
+            "c._rects.length=0;c._strokes.length=0;"
+            "api.drawGridOnCanvas(api.els.canvas,c,null);"
+            "const borders={O:[],U:[],L:[]};"
+            "for(const r of c._rects){if(r.w!==117)continue;"
+            "const yCell=Math.round((r.y-1.5)/120);"
+            "const st=api.state.doors['2,'+String(yCell)]||'L';"
+            "borders[st].push(r.style);}"
+            "const colors=new Set();"
+            "for(const s of c._strokes){if(s.path.some(seg=>seg.r))continue;"
+            "colors.add(s.style)}"
+            "return {borders, colors:[...colors],"
+            "green:colors.has('#3ddc84')};})()"
+        )
+        d = json.loads(js(expr))
+        self.assertEqual(d["borders"]["O"], ["#d97706"])
+        self.assertEqual(d["borders"]["U"], ["#f59f00"])
+        self.assertEqual(d["borders"]["L"], ["#e03131"])
+        self.assertIn("#d97706", d["colors"])
+        self.assertIn("#f59f00", d["colors"])
+        self.assertIn("#e03131", d["colors"])
+        self.assertFalse(d["green"], "no safe green on normal doors")
+
+    def test_safe_and_normal_partition_render(self):
+        # map.safe and map.doors partition the doorway cells: with (2,2)
+        # SAFE and the other two NORMAL, each renders its own art — one
+        # green border + two amber/red borders (cell order y=1,2,3),
+        # nothing else.
+        expr = (
+            "(()=>{const map=" + self._MAP_JS + ";"
+            "api.state.role='gm';api.state.grid=map;"
+            'api.state.doors={"2,1":"O","2,3":"L"};'
+            'api.state.safe={"2,2":"C"};'
+            "api.els.canvas.width=800;api.els.canvas.height=600;"
+            "const c=api.els.canvas.getContext('2d');"
+            "c._rects.length=0;c._strokes.length=0;"
+            "api.drawGridOnCanvas(api.els.canvas,c,null);"
+            "const styles=[];"
+            "for(const r of c._rects){if(r.w===117)styles.push(r.style);}"
+            "return styles;})()"
+        )
+        got = json.loads(js(expr))
+        self.assertEqual(got, ["#d97706", "#3ddc84", "#e03131"])
+
+
+class TestSafeDoorGmTool(FrontendBase):
+    """AC11c — GM Safe door tool, driven through the REAL #paint-group click
+    listener (per the generate-button incident: never call setTool /
+    setSafeAction directly): selecting the tool + an action, then clicking a
+    doorway cell, sends {type:"safe_door", x, y, action}. Clicking a
+    non-doorway cell sends nothing (the server says "not a doorway"); the
+    render state is never optimistic-mutated. The action sub-row is only
+    visible while the tool is armed; the control hint follows the armed
+    action."""
+
+    _GRID = [
+        ["wall", "wall", "wall", "wall", "wall"],
+        ["wall", "floor", "doorway", "floor", "wall"],
+        ["wall", "floor", "doorway", "floor", "wall"],
+        ["wall", "floor", "doorway", "floor", "wall"],
+        ["wall", "wall", "wall", "wall", "wall"],
+    ]
+    _MAP_JS = json.dumps({"name": "m", "width": 5, "height": 5,
+                          "cells": _GRID})
+
+    def _gm_ctx(self):
+        return (
+            "(()=>{const map=" + self._MAP_JS + ";"
+            "api.onWelcome({type:'welcome',"
+            "you:{id:'p1',name:'Gamer',role:'gm',entity_id:null},"
+            "map,entities:[],players:[],awareness:[],fog:false});"
+            "api.els.canvas.width=800;api.els.canvas.height=600;"
+            "api.state.cell=120;api.state.offsetX=100;api.state.offsetY=0;"
+        )
+
+    def test_safe_tool_select_action_and_dispatch(self):
+        for action in ("mark", "unmark", "open", "close"):
+            with self.subTest(action=action):
+                expr = (
+                    self._gm_ctx() +
+                    "const pg=api.document.querySelector('#paint-group');"
+                    "pg.dispatchEvent({type:'click',target:{closest:(s)=>"
+                    "s==='.tool-btn'?{dataset:{tool:'safeDoor'}}:null}});"
+                    "pg.dispatchEvent({type:'click',target:{closest:(s)=>"
+                    "s==='.safe-action'?{dataset:{safeAction:'" + action + "'}}"
+                    ":null}});"
+                    "const tool=api.state.tool, act=api.state.safeAction,"
+                    "hint=api.els.controlHint.textContent,"
+                    "rowHidden=api.els.safeActionRow.hidden,"
+                    "doorRowHidden=api.els.doorActionRow.hidden;"
+                    "api._send.reset();"
+                    "api.els.canvas.dispatchEvent({type:'click',"
+                    "clientX:400,clientY:180});"           # door (2,1)
+                    "const sent=api._send.sent.slice();"
+                    "api._send.reset();"
+                    "api.els.canvas.dispatchEvent({type:'click',"
+                    "clientX:220,clientY:180});"           # floor (1,1)
+                    "const sentFloor=api._send.sent;"
+                    "return {tool,act,hint,rowHidden,doorRowHidden,sent,"
+                    "sentFloor, safe:api.state.safe};})()"
+                )
+                d = json.loads(js(expr))
+                self.assertEqual(d["tool"], "safeDoor")
+                self.assertEqual(d["act"], action)
+                self.assertEqual(d["hint"], f"Click a doorway to {action}")
+                self.assertFalse(d["rowHidden"],
+                                 "safe sub-row visible while armed")
+                self.assertTrue(d["doorRowHidden"],
+                                "door sub-row hidden under the safe tool")
+                self.assertEqual(
+                    d["sent"],
+                    [{"type": "safe_door", "x": 2, "y": 1,
+                      "action": action}])
+                self.assertEqual(d["sentFloor"], [],
+                                 "a non-doorway cell click sends nothing")
+                # no optimistic safe-door mutation: the render state only
+                # ever changes from the state broadcast.
+                self.assertEqual(d["safe"], {})
+
+    def test_sub_row_hidden_when_not_on_safe_tool(self):
+        # Switching away from the Safe door tool hides its action sub-row
+        # and the hint reverts (regression guard on the tool flow).
+        expr = (
+            self._gm_ctx() +
+            "const pg=api.document.querySelector('#paint-group');"
+            "pg.dispatchEvent({type:'click',target:{closest:(s)=>"
+            "s==='.tool-btn'?{dataset:{tool:'safeDoor'}}:null}});"
+            "const on=api.els.safeActionRow.hidden;"
+            "pg.dispatchEvent({type:'click',target:{closest:(s)=>"
+            "s==='.tool-btn'?{dataset:{tool:'wall'}}:null}});"
+            "const off=api.els.safeActionRow.hidden;"
+            "const hint=api.els.controlHint.textContent;"
+            "return {on,off,hint};})()"
+        )
+        d = json.loads(js(expr))
+        self.assertFalse(d["on"])
+        self.assertTrue(d["off"])
+        self.assertEqual(d["hint"], "Drag on the map to paint wall")
+
+    def test_default_action_is_mark(self):
+        # Arming the tool without touching a sub-button keeps the default
+        # action (Mark) armed and hinted.
+        expr = (
+            self._gm_ctx() +
+            "const pg=api.document.querySelector('#paint-group');"
+            "pg.dispatchEvent({type:'click',target:{closest:(s)=>"
+            "s==='.tool-btn'?{dataset:{tool:'safeDoor'}}:null}});"
+            "return {act:api.state.safeAction,"
+            "hint:api.els.controlHint.textContent};})()"
+        )
+        d = json.loads(js(expr))
+        self.assertEqual(d["act"], "mark")
+        self.assertEqual(d["hint"], "Click a doorway to mark")
+
+    def test_player_has_no_safe_tool(self):
+        # The Safe door tool is GM-only: a player (no UI, forced tool) never
+        # sends a safe_door frame from the tool.
+        expr = (
+            "(()=>{const map=" + self._MAP_JS + ";"
+            "api.onWelcome({type:'welcome',"
+            "you:{id:'p2',name:'Alice',role:'player',entity_id:'e2'},"
+            "map,entities:[],"
+            "you_entity:{id:'e2',name:'Alice',kind:'player',team:'party',"
+            "x:1,y:1},players:[],awareness:[],fog:false});"
+            "api.els.canvas.width=800;api.els.canvas.height=600;"
+            "api.state.cell=120;api.state.offsetX=100;api.state.offsetY=0;"
+            "api.state.tool='safeDoor';"                    # forced (no UI)
+            "api._send.reset();"
+            "api.els.canvas.dispatchEvent({type:'click',"
+            "clientX:400,clientY:180});"
+            "return {sent:api._send.sent};})()"
+        )
+        d = json.loads(js(expr))
+        self.assertEqual(d["sent"], [],
+                         "a player must never send a safe_door frame")
+
+
+class TestPlayerSafeDoorTap(FrontendBase):
+    """AC11d — a player (select tool) taps a SAFE-door cell: NO-OP (no
+    door frame, no move, no safe_door frame — safe doors are GM-
+    controlled). Tapping their OWN token standing on an open safe door
+    still re-asserts selection; tapping a NORMAL door still sends the
+    inverse `door` action (regression)."""
+
+    _GRID = [
+        ["wall", "wall", "wall", "wall", "wall"],
+        ["wall", "floor", "doorway", "floor", "wall"],
+        ["wall", "floor", "doorway", "floor", "wall"],
+        ["wall", "floor", "doorway", "floor", "wall"],
+        ["wall", "wall", "wall", "wall", "wall"],
+    ]
+    _MAP_JS = json.dumps({"name": "m", "width": 5, "height": 5,
+                          "cells": _GRID})
+
+    def _player_ctx(self):
+        return (
+            "(()=>{const map=" + self._MAP_JS + ";"
+            "api.onWelcome({type:'welcome',"
+            "you:{id:'p2',name:'Alice',role:'player',entity_id:'e2'},"
+            "map,entities:[],"
+            "you_entity:{id:'e2',name:'Alice',kind:'player',team:'party',"
+            "x:1,y:2},players:[],awareness:[],fog:false});"
+            "api.els.canvas.width=800;api.els.canvas.height=600;"
+            "api.state.cell=120;api.state.offsetX=100;api.state.offsetY=0;"
+        )
+
+    def test_tap_closed_safe_door_sends_nothing(self):
+        # The player's pre-selection state has selectedEntityId == own
+        # token (set by onWelcome); a tap that is a no-op must not fall
+        # through into the two-tap movement path either.
+        d = json.loads(js(self._player_ctx() +
+                          'api.state.safe={"2,2":"C"};'
+                          "api._send.reset();"
+                          "api.els.canvas.dispatchEvent({type:'click',"
+                          "clientX:400,clientY:300});"      # safe (2,2)
+                          "return {sent:api._send.sent};})()"))
+        self.assertEqual(d["sent"], [])
+
+    def test_tap_open_safe_door_sends_nothing(self):
+        d = json.loads(js(self._player_ctx() +
+                          'api.state.safe={"2,2":"O"};'
+                          "api._send.reset();"
+                          "api.els.canvas.dispatchEvent({type:'click',"
+                          "clientX:400,clientY:300});"      # safe (2,2)
+                          "return {sent:api._send.sent};})()"))
+        self.assertEqual(d["sent"], [])
+
+    def test_tap_safe_cell_with_own_token_reasserts_selection(self):
+        # The player's own token standing on an (open) safe door: the tap
+        # is still a no-op door-wise, and the selection is re-asserted —
+        # the safe check must not swallow the selection handling.
+        d = json.loads(js(self._player_ctx() +
+                          'api.state.safe={"2,2":"O"};'
+                          "api.state.youEntity.x=2;api.state.youEntity.y=2;"
+                          "api._send.reset();"
+                          "api.els.canvas.dispatchEvent({type:'click',"
+                          "clientX:400,clientY:300});"
+                          "return {sent:api._send.sent,"
+                          "sel:api.state.selectedEntityId};})()"))
+        self.assertEqual(d["sent"], [])
+        self.assertEqual(d["sel"], "e2")
+
+    def test_tap_normal_door_still_sends_inverse_action(self):
+        # Regression: a NON-safe doorway cell still sends the inverse
+        # normal-door action (the normal-door tap path is untouched).
+        d = json.loads(js(self._player_ctx() +
+                          'api.state.safe={};'
+                          'api.state.doors={"2,2":"O"};'
+                          "api._send.reset();"
+                          "api.els.canvas.dispatchEvent({type:'click',"
+                          "clientX:400,clientY:300});"
+                          "return {sent:api._send.sent};})()"))
+        self.assertEqual(d["sent"],
+                         [{"type": "door", "x": 2, "y": 2,
+                           "action": "close"}])
+
+
+class TestSafeDoorPaintInteraction(FrontendBase):
+    """§9 — the Safe door tool is a paint-MODE tool like the Door tool:
+    paintCell under tool="safeDoor" is a no-op (safe state is only ever
+    changed by {type:'safe_door'} frames or the broadcast), and painting
+    floor/wall over a safe door (via the paint tools) removes the safe
+    art once the broadcast lands."""
+
+    _MAP_JS = json.dumps({"name": "m", "width": 4, "height": 3,
+                          "cells": [["floor"] * 4 for _ in range(3)]})
+
+    def _gm_ctx(self):
+        return (
+            "(()=>{const map=" + self._MAP_JS + ";"
+            "api.onWelcome({type:'welcome',"
+            "you:{id:'p1',name:'Gamer',role:'gm',entity_id:null},"
+            "map,entities:[],players:[],awareness:[],fog:false});"
+        )
+
+    def test_safe_tool_does_not_emit_paint_frames(self):
+        expr = (
+            self._gm_ctx() +
+            "const pg=api.document.querySelector('#paint-group');"
+            "pg.dispatchEvent({type:'click',target:{closest:(s)=>"
+            "s==='.tool-btn'?{dataset:{tool:'safeDoor'}}:null}});"
+            "api.state.grid.cells[1][1]='doorway';"
+            "api.state.safe={'1,1':'O'};"
+            "api._send.reset();"
+            "api.paintCell(1,1);"
+            "return {sent:api._send.sent,"
+            "cell:api.state.grid.cells[1][1],"
+            "isSafe:api.isSafeDoor(1,1)};})()"
+        )
+        d = json.loads(js(expr))
+        self.assertEqual(d["sent"], [])
+        self.assertEqual(d["cell"], "doorway")   # untouched
+        self.assertTrue(d["isSafe"])             # untouched
+
+    def test_floor_paint_over_safe_door_removes_safe_art(self):
+        # After the GM paints a floor over a safe door and the server's
+        # state broadcast arrives (cell=floor, the safe key gone from
+        # map.safe), the safe art is gone: isSafeDoor reports false.
+        expr = (
+            self._gm_ctx() +
+            "api.state.grid.cells[1][1]='doorway';"
+            "api.state.safe={'1,1':'O'};"
+            "const had=api.isSafeDoor(1,1);"
+            "api.onState({type:'state',map:" + self._MAP_JS + "});"
+            "api.state.grid.cells[1][1]='floor';"
+            "return {had, safe:api.isSafeDoor(1,1),"
+            "all:api.state.safe};})()"
+        )
+        d = json.loads(js(expr))
+        self.assertTrue(d["had"])
+        self.assertFalse(d["safe"])
+        self.assertEqual(d["all"], {})
+
+
+class TestSafeDoorHints(FrontendBase):
+    """§7.7 — the control-hint copy: the GM with the Safe door tool armed
+    sees "Click a doorway to <action>"."""
+
+    def test_gm_safe_tool_hint(self):
+        out = js(
+            "(()=>{api.state.joined=true;api.state.role='gm';"
+            "api.state.you={id:'p1',name:'G',role:'gm',entity_id:null};"
+            "api.state.selectedEntityId=null;api.state.entities=[];"
+            "api.state.tool='safeDoor';api.state.safeAction='unmark';"
+            "api.updateControlHint();"
+            "return api.els.controlHint.textContent;})()"
+        )
+        self.assertIn("Click a doorway to unmark", out)
 
 
 if __name__ == "__main__":
