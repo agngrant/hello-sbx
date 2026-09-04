@@ -6,7 +6,7 @@ _Kept current by the orchestrator. Branch: `feat/safe-room-doors`._
 
 | Item | Value |
 |---|---|
-| Branch / HEAD | `feat/safe-room-doors` @ safe-room-doors feature commit (branched from `main` @ `d4a1cd5`) |
+| Branch / HEAD | `feat/safe-room-doors` @ `fa0b4d6` (safe-room-doors feature commit, branched from `main` @ `d4a1cd5`) |
 | `main` | `d4a1cd5` — fast-forward-merged from `feat/explored-map` **this session** (local; `origin/main` still `5ad236f` — push is owner's call) |
 | `feat/explored-map` | `d4a1cd5` (now equal to `main`) |
 | `feat/safe-room-doors` | feature commit on top of `d4a1cd5` (unpushed; no `origin/feat/safe-room-doors` yet) |
@@ -42,7 +42,9 @@ Doors, and now **GM Safe-Room Doors** (shipped this session, QA PASS).
 
 ## In progress
 
-- [ ] Nothing in flight.
+- [ ] Server **RUNNING** for branch `feat/safe-room-doors` on **0.0.0.0:8000**
+      (PID **81453**, log `/tmp/little-dungeons-server.log`, health ✓, UI 200 ✓).
+      Started this session at owner request; stop with `kill 81453` (or by port).
 
 ## Open items (backlog)
 

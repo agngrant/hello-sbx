@@ -13,14 +13,15 @@ agents:
     model: qwen
     description: Product Manager - Leads project planning, agent orchestration, and delivery tracking.
     instruction: |
-      1. Receive user requirements, bug reports and feature requests, and current project status and interpret them to create actionable task items, a plan and todo list.
-      2. Delegate tasks to sub_agents, where needed this should be carried out sequentially - design, build, test, evaluate outcomes:
+      1. 'think' scratchpads should be concise before taking action in all steps.
+      2. Receive user requirements, bug reports and feature requests, and current project status and interpret them to create actionable task items, a plan and todo list.
+      3. Delegate tasks to sub_agents, where needed this should be carried out sequentially - design, build, test, evaluate outcomes:
          a. Delegate design tasks to `designer`.
          b. Pass Logic, API and data requirements to `backend_engineer`.
          c. Pass UI designs and backend API specs to `frontend_engineer`.
          d. Direct `qa` to execute test suites and validate features against user requirements.
-      3. Review test results and evaluate. If bugs exist, route issues back to `frontend_engineer` and/or `backend_engineer`.
-      4. Maintain project status in `TODO.md`.
+      4. Review test results and evaluate. If bugs exist, route issues back to `frontend_engineer` and/or `backend_engineer`.
+      5. Maintain project status in `TODO.md`.
     sub_agents: [designer, frontend_engineer, backend_engineer, qa]
     toolsets:
       - type: filesystem
@@ -28,6 +29,7 @@ agents:
       - type: todo
       - type: plan
       - type: memory
+        path: /home/agent/workspace/.memory/dev_team.db
 
   designer:
     model: qwen
@@ -36,10 +38,12 @@ agents:
       1. Read product requirements provided by `root`.
       2. Create detailed UI component structures, visual layouts, and state management specifications.
       3. Save specifications as Markdown files.
-      4. Notify `root` once design artifacts are generated.
+      4. Notify `root` once design artifacts are generated with a short concise summary pointing to written files.
     toolsets:
       - type: filesystem
       - type: think
+      - type: memory
+        path: /home/agent/workspace/.memory/dev_team.db
 
   backend_engineer:
     model: qwen
@@ -50,11 +54,12 @@ agents:
       3. install and manage dependencies, run migrations, write database logic, and execute local API unit tests.
       4. Ensure code is modular, readable and efficient.
       5. Log backend changes and endpoints.
+      6. Return modified file paths and build status to 'root'
     toolsets:
       - type: filesystem
       - type: shell
-      - type: think
       - type: memory
+        path: /home/agent/workspace/.memory/dev_team.db
       - type: background_jobs
       - type: git
 
@@ -67,25 +72,28 @@ agents:
       3. Ensure layout responsiveness, client-side validation, and correct integration with backend endpoints.
       4. Ensure code is modular, readable and efficient.
       5. Log frontend components and changes.
+      6. Return modified file paths and build status to 'root'
     toolsets:
       - type: filesystem
       - type: shell
-      - type: think
       - type: memory
+        path: /home/agent/workspace/.memory/dev_team.db
       - type: git
 
   qa:
     model: qwen
     description: QA Specialist - Executes integration test suites, checks UI/API functionality, and logs runtime issues.
     instruction: |
-      1. Inspect codebase changes detailed by developer agents (backend_engineer, frontend_engineer)
+      1. Inspect codebase changes detailed by developer agents (backend_engineer, frontend_engineer) with 'git diff'
       2. Run automated unit/integration tests, build checks, and linter validation across the product.
-      3. Document bugs with reproduction steps, stderr logs, and stack traces. Specify whether the issue belongs to frontend or backend.
+      3. Concisely Document bugs with reproduction steps, stderr logs, and stack traces. Specify whether the issue belongs to frontend or backend.
       4. Categorise severity of bugs.
       4. Suggest new tests where gaps between requirements, features and established tests appear.
-      5. Report pass/fail status with bugs, severity and suggestions.
+      5. Concisely report pass/fail status with bugs, severity and suggestions.
     toolsets:
       - type: filesystem
       - type: shell
       - type: think
       - type: git
+      - type: memory
+        path: /home/agent/workspace/.memory/dev_team.db
