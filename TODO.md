@@ -2,6 +2,21 @@
 
 _Kept current by the orchestrator. Branch: **`main`** @ `4462f62` (feat/pan-zoom fast-forward-merged + pushed this session; QA re-run on main PASS; feature branch deleted local + remote)._ 
 
+## IN PROGRESS — Save / Load Map State (session persistence)
+
+**Owner spec:** save the current map state to disk + reload a map with its existing state; GM load menu;
+players rejoin with the **same names** to get their characters back (ownership rebound by name).
+Shared plan: `save-load` (rev 1+).
+
+| Item | Status |
+|---|---|
+| Branch `feat/save-load` from main @ `1bb8326` | ✅ done |
+| Design spec `docs/design/save-load.md` | ✅ done — 18 ACs (AC1–AC18); GM menu = sidebar "Saves" panel + "Saved maps" lobby tab |
+| Backend: saves.py + REST routes + name rebinding + tests | ✅ done — 4 additive REST routes, `owner_name` rebind, 730 green, e2e all-✓ |
+| Frontend: GM save/load menu + tests | ✅ done — 2 GM surfaces, rejoin note, GM gating, 763 green |
+| QA verification + sign-off `docs/qa/qa-signoff-save-load.md` | ✅ PASS — 18/18 AC, live restart smoke 74/74 (3 server runs), 0 P1; BUG-014 (P2 dead toast) fixed via additive `you.rebound` welcome flag + e2e re-verified all-✓; BUG-015 (P3) documented as spec-compliant. Final suites: **766 pytest / 766 unittest / 206 frontend / e2e all-✓** |
+| Commit + merge cycle | ⏳ pending (on owner's go) — `feat/save-load` uncommitted, unpushed |
+
 ## Completed — Pan & Zoom (map viewport navigation) — **shipped on `main`** ✅
 
 **Owner spec:** maps bigger than the viewport; pan via clickable arrows (right-hand control
@@ -88,8 +103,7 @@ byte-identical (AC17).
 
 ### Carried over (still true this session)
 
-- [ ] Server **STOPPED** (killed PID 64752 during the pan/zoom release; port 8000 free, no
-      `app.main` processes). Working branch: `main` @ `4462f62`. Restart with:
+- [ ] Server **STOPPED** (killed PID 167535; port 8000 free, no `app.main` processes). Working branch: `feat/save-load` (uncommitted working tree). Restart with:
       `cd /Users/agrant3/agentteam && nohup .venv/bin/python -m app.main --host 0.0.0.0 --port 8000 > /tmp/little-dungeons-server.log 2>&1 &`
 
 ### Committed + pushed this session
