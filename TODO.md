@@ -1,19 +1,19 @@
 # LittleDungeons — Team TODO
 
-_Kept current by the orchestrator. Branch: `feat/safe-room-doors`._
+_Kept current by the orchestrator. Branch: **`main`** @ `753dfcb` (feat/safe-room-doors fast-forward-merged + pushed this session; QA re-run on main PASS)._ 
 
 ## Branch baseline (verified this session)
 
 | Item | Value |
 |---|---|
-| Branch / HEAD | `feat/safe-room-doors` @ `7190b3f` (safe-room feature `fa0b4d6` + config/TODO commit), **pushed** to `origin/feat/safe-room-doors` |
-| `main` | `d4a1cd5` — fast-forward-merged from `feat/explored-map` (local; **`origin/main` still `5ad236f` — push is owner's call**) |
-| `feat/explored-map` | `d4a1cd5` (now equal to `main`) |
-| `feat/safe-room-doors` | `7190b3f`, pushed, tracking `origin/feat/safe-room-doors` (**NOT merged to main** — more changes planned next session) |
+| Branch / HEAD | **`main`** @ `753dfcb` (local + `origin/main` in sync) — the only branch, local + remote |
+| Tag | `safe-doors-v1` @ `7190b3f` (pre-door-iconography baseline; local + remote) |
+| Branches deleted this session | `feat/safe-room-doors` (merged @ `753dfcb`), `feat/explored-map` (merged @ `d4a1cd5`) |
+| Uncommitted (local only) | `TODO.md`, `docker-agent.yaml` (team config, deliberately uncommitted) |
 
-**Features enabled on this branch:** core v3.0, awareness ring + per-player radius,
-GM-generated BSP maps, explored map (S/E/H fog with memory), Openable/Closable
-Doors, and now **GM Safe-Room Doors** (shipped this session, QA PASS).
+**Features on `main`:** core v3.0, awareness ring + per-player radius, GM-generated BSP maps,
+explored map (S/E/H fog with memory), Openable/Closable Doors, **GM Safe-Room Doors with lock state
+(L/U/O)**, and the **pictorial door iconography** (6 states) — all QA-verified on main.
 
 ## Completed
 
@@ -40,14 +40,14 @@ Doors, and now **GM Safe-Room Doors** (shipped this session, QA PASS).
 - [x] Contract docs: PROJECT.md §4/§5/§6/§8/§9 + README Safe room doors
       section (additive)
 
-## Door Iconography Redesign + Safe-Door Lock State — **QA PASS ✅ (uncommitted)**
+## Door Iconography Redesign + Safe-Door Lock State — **shipped on `main`** ✅ (committed `753dfcb`, merged, QA re-run PASS)
 
 **Why:** owner says current door iconography is obscure. Shared plan: `door-iconography` (status: done).
 
 | Item | Value |
 |---|---|
-| Branch / HEAD | `feat/safe-room-doors` @ `7190b3f` (changes **uncommitted** in working tree) |
-| Tag baseline | **`safe-doors-v1`** @ `7190b3f` (pushed this session; spaces are invalid in git refs) |
+| Branch / HEAD | **`main`** @ `753dfcb` (fast-forward-merged from `feat/safe-room-doors`, pushed; branch since deleted) |
+| Tag baseline | **`safe-doors-v1`** @ `7190b3f` (pre-feature baseline, local + remote; spaces are invalid in git refs) |
 | Spec | `docs/design/door-iconography.md` (AC1–AC17, E1–E14) |
 | Sign-off | `docs/qa/qa-signoff-door-iconography.md` → **PASS (17/17 AC, 0 bugs)** |
 
@@ -73,11 +73,16 @@ byte-identical (AC17).
 
 ### Carried over (still true this session)
 
-- [ ] Server **RUNNING** on **0.0.0.0:8000** (PID **101412**, **fixed code** with join-bug fix +
-      door-iconography feature); log `/tmp/little-dungeons-server.log`; health ✓, UI 200 ✓,
-      served `app.js` byte-identical to working tree (SHA-256 verified) and **no load-time
-      `renderLegendDoorSwatches()` call** (join fix confirmed live). Live join smoke: GM +
-      player both joined over real WS ✓. Stop with `kill 101412` (or `lsof -ti:8000 | xargs kill`).
+- [ ] Server **STOPPED** (killed PID 101412; `lsof -nP -iTCP:8000 -sTCP:LISTEN` empty, no `app.main`
+      processes remain). Restart with:
+      `cd /Users/agrant3/agentteam && nohup .venv/bin/python -m app.main --host 0.0.0.0 --port 8000 > /tmp/little-dungeons-server.log 2>&1 &`
+
+### Committed + pushed this session
+
+- [x] **Commit `753dfcb`** on `feat/safe-room-doors` — `feat: door iconography redesign + safe-door lock state (L/U/O); fix P1 join-blocking TDZ` — 18 files (+3751/−1170): `app/models.py`, `app/session.py`, `app/static/{app.js,index.html,style.css}`, `docs/design/door-iconography.md` (new), `docs/qa/qa-signoff-door-iconography.md` (new), `scripts/{e2e_proof.py,qa_safe_doors.py}`, `tests/js/harness.js`, 7 test files, `TODO.md`. **`docker-agent.yaml` deliberately left uncommitted** (local team config) — the only remaining working-tree change (plus the `TODO.md` status line updated after the
+push — a trivial doc tweak, not yet committed).
+- [x] **Pushed** `7190b3f..753dfcb` → `origin/feat/safe-room-doors`; `git ls-remote` matches local HEAD. Tag `safe-doors-v1` untouched at `7190b3f`.
+- [x] **Housekeeping:** removed the broken loose tag file `.git/refs/tags/working sight` (invalid ref, spaces; pointed at `b1ff47e4`); `git tag -l` now shows only `safe-doors-v1`; `git fsck` clean.
 
 ### P1 join-blocking bug (fixed + regression-guarded this session)
 
@@ -110,22 +115,27 @@ byte-identical (AC17).
   both Join buttons, and a GM + a player actually joined a live session (role=gm /
   role=player with token; GM saw 2 players / 1 token / map + doors). Port 8000 free at
   end of the run. No door-art / state-model changes (bootstrap fix only).
-- **Commit status:** this fix is in the working tree, **not committed** (same as the
-  rest of the door-iconography work).
-- [ ] **Git not requested:** all feature changes are **uncommitted** in the working tree on
-      `feat/safe-room-doors`. `safe-doors-v1` tag is the last pushed commit (`7190b3f`). Commit/push/merge
-      (→ `main`) is the owner's call — see backlog.
+- **Commit status:** committed in **`753dfcb`** and **merged into `main`** (see below); `main`
+      (local + `origin/main`) @ `753dfcb`.
+- [x] **Git — done:** feature committed (`753dfcb`), fast-forward-merged → `main`, pushed, branch
+      `feat/safe-room-doors` + `feat/explored-map` both deleted. Tag `safe-doors-v1` retained.
+      Only `TODO.md` + `docker-agent.yaml` remain uncommitted (local-only).
 
 ## Open items (backlog)
 
-- [ ] **Owner sign-off on A1** (safe doors gain a lock state — the behavioral change in this feature);
-      and a decision on **commit/push** the door-iconography work + whether to merge `feat/safe-room-doors` → `main`
-      (merge is still explicitly deferred per earlier owner note; `origin/main` still `5ad236f`).
-- [ ] Housekeeping: leftover broken loose tag `.git/refs/tags/working sight` (spaces → invalid
-      ref; git warns on tag ops; points at `b1ff47e4`). Clean up: `rm '.git/refs/tags/working sight'`.
-- [ ] **Merge `feat/safe-room-doors` → `main` is explicitly deferred** — owner said not yet; `main` and `origin/main` intentionally untouched this session.
-- [ ] `origin/main` still at `5ad236f` — decide when (if) to push `main` (`d4a1cd5`) to remote.
-- [ ] What to do with `feat/explored-map` (fully merged into `main`, could be deleted).
+- [x] **Merged `feat/safe-room-doors` → `main`** (fast-forward `d4a1cd5` → `753dfcb`, pushed —
+      `origin/main` now `753dfcb`). Checkout is on `main` @ `753dfcb`. **QA re-run on main: PASS**
+      (649 pytest / 649 unittest / 139 frontend incl. TestLobbyBootRegression / e2e 11 steps / qa_safe_doors
+      54/54 / live GM+player join smoke). Working tree: only `TODO.md` + `docker-agent.yaml` uncommitted (local).
+- [x] **Deleted `feat/safe-room-doors`** (local + remote) after the merge — nothing lost (branch tip ==
+      `main` @ `753dfcb`). Tag `safe-doors-v1` (@ `7190b3f`) survived, local + remote.
+- [x] **`feat/explored-map` deleted** (local + remote, @ `d4a1cd5`) — confirmed fully merged into `main`
+      before the safe `git branch -d`; nothing lost. Remote now has only `refs/heads/main`.
+      Tag `safe-doors-v1` (@ `7190b3f`) intact local + remote. **Repo is now single-branch `main`.**
+- [x] **Owner sign-off on A1 (safe doors gain a lock state)** — **SIGNED OFF AND
+      ACCEPTED BY THE OWNER** (this session). The behavioral change is confirmed:
+      GM must unlock a safe door before it can be walked through; fresh `mark`→`L`;
+      legacy `"C"`→`"U"` on load. Recorded in `docs/design/door-iconography.md` §1.2/§11.
 - [ ] `docs/design/explored-map.md` §3.2 W4 literal erratum (superseded by
       corrected test fixture — spec-only fix)
 - [ ] BUG-DOORS-001 structural option: per-session grid copy for unregistered

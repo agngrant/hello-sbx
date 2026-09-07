@@ -14,10 +14,9 @@ Mark / Unmark / Open / Close.
 The two changes are inseparable: the owner's icon spec (a locked safe door
 with a padlock, and an unlocked closed safe door without one) **requires**
 safe doors to carry a lock state. Section 1.1 flags this as the centerpiece
-and pins it as assumption **A1** (owner confirmation requested — it is the
-single deliberate behavioral change in this feature; the hostile restriction,
-the closed=wall / open=sight-transparent behavior, and the pathfinding / LOS
-code are all **unchanged** and byte-for-byte compatible).
+and pins it as assumption **A1** (the single deliberate behavioral change in this
+feature). **A1 has been signed off and accepted by the owner** — safe doors
+gaining a lock state is the confirmed, final behavior.
 
 **Source of truth:** `PROJECT.md`. Where this doc and `PROJECT.md` diverge,
 `PROJECT.md` wins. Where the *owner's icon spec* (quoted in §1.1) is ambiguous,
@@ -59,7 +58,7 @@ swatches), `tests/`, `scripts/`.
 > | Safe room | unlocked, closed | green wooden door, no padlock |
 > | Safe room | unlocked, open | an open door with a soft green light |
 
-### 1.2 The centerpiece decision — safe doors gain a lock state (A1, **owner confirmation requested**)
+### 1.2 The centerpiece decision — safe doors gain a lock state (A1 — **SIGNED OFF AND ACCEPTED BY THE OWNER**)
 
 The icon spec is written for **six** states — three per door kind — and
 distinguishes, for the **safe** door, a **locked (closed)** state (green slab
@@ -92,13 +91,12 @@ fresh GM `mark` ⇒ **`"L"`** (locked — the safe/secure default, mirroring how
 a normal door defaults to locked). `unmark` reversion **preserves** the state
 (`L`→`L`, `U`→`U`, `O`→`O`) instead of the old `C`→`U`/`O`→`O`.
 
-> ⚠️ **This is the single behavioral change in the feature and it needs owner
-> sign-off (A1, §11).** Concretely it means: a GM now has to *unlock* a safe
-> door before anyone (including party/neutral) can walk through it (a locked
-> safe door is a wall to everyone, like a locked normal door); and the wire
-> value of an existing `map.safe` entry changes from `C` to `U` on load.
-> Every gameplay invariant that was true before remains true (§12) — only the
-> *lock* dimension is added.
+> ✅ **SIGNED OFF AND ACCEPTED BY THE OWNER (A1, §11).** Concretely it means:
+> a GM now has to *unlock* a safe door before anyone (including party/neutral)
+> can walk through it (a locked safe door is a wall to everyone, like a locked
+> normal door); and the wire value of an existing `map.safe` entry changes from
+> `C` to `U` on load. Every gameplay invariant that was true before remains
+> true (§12) — only the *lock* dimension is added.
 
 **What this supersedes (explicit list):**
 
@@ -1346,7 +1344,7 @@ deterministic.
 Every ambiguous point is resolved here and pinned by an AC.
 
 - **A1 — Safe doors gain a lock state (`L`/`U`/`O`), supersedng "always
-  unlocked" (the centerpiece; owner confirmation requested).** The owner's
+  unlocked" (the centerpiece) — SIGNED OFF AND ACCEPTED BY THE OWNER.** The owner's
   six-state icon spec requires a *locked closed* safe door (padlock) distinct
   from an *unlocked closed* safe door (no padlock), which the shipped
   `C`/`O` (always-unlocked) model cannot express. **Resolution:** safe doors
