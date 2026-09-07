@@ -53,7 +53,7 @@ explored map (S/E/H fog with memory), Openable/Closable Doors, **GM Safe-Room Do
 
 New owner spec (6 states, all render at S+E tiers): normal = brown wood door (+ padlock TR when locked) /
 open w/ soft-yellow light; safe = green wood door (+ padlock TR when locked) / open w/ soft-green light.
-**Flagged decision A1 (needs owner sign-off):** safe doors move from "always unlocked (C/O)" to a full
+**Flagged decision A1 (SIGNED OFF AND ACCEPTED BY THE OWNER — see backlog):** safe doors move from "always unlocked (C/O)" to a full
 **L/U/O** model (GM-only Lock/Unlock); legacy `"C"`→`"U"`, fresh `mark`→`"L"`. Hostile-restriction +
 closed=wall / open=transparent behavior **unchanged**; `app/pathfinding.py`+`awareness.py`+`visibility.py`+`grid.py`
 byte-identical (AC17).
@@ -135,7 +135,8 @@ push — a trivial doc tweak, not yet committed).
 - [x] **Owner sign-off on A1 (safe doors gain a lock state)** — **SIGNED OFF AND
       ACCEPTED BY THE OWNER** (this session). The behavioral change is confirmed:
       GM must unlock a safe door before it can be walked through; fresh `mark`→`L`;
-      legacy `"C"`→`"U"` on load. Recorded in `docs/design/door-iconography.md` §1.2/§11.
+      legacy `"C"`→`"U"` on load. Recorded in `docs/design/door-iconography.md` §1.2/§11, and
+      committed + pushed as `2b81059` on `main` (`docs: A1 owner sign-off...`).
 - [ ] `docs/design/explored-map.md` §3.2 W4 literal erratum (superseded by
       corrected test fixture — spec-only fix)
 - [ ] BUG-DOORS-001 structural option: per-session grid copy for unregistered
