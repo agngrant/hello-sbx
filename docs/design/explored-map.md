@@ -324,7 +324,7 @@ its actual coordinates — see `app/grid.py`).
   y=3:  SSSSSSHHHHHHHHHH
   y=4:  SSSSSSHHHHHHHHHH
   y=5:  SSSSSSHHHHHHHHHH
-  y=6:  SSSSSSSHHHHHHHHH
+  y=6:  SSSSSSHHHHHHHHHH
   y=7:  SSSSSSHHHHHHHHHH
   y=8:  SSSSSSHHHHHHHHHH
   y=9:  SSSSSSHHHHHHHHHH
@@ -332,19 +332,25 @@ its actual coordinates — see `app/grid.py`).
   y=11: HSSSSHHHHHHHHHHH
   ```
 
-  - **S = 69 cells:** the left region's **40 floors** (all in clear LOS —
+  - **S = 68 cells:** the left region's **40 floors** (all in clear LOS —
     spot: (1,1)→(4,10) samples (2,3), (3,6), (4,9), all floor); the
-    doorway **(5,5)**; the single middle-room floor **(6,6)** (the
-    diagonal through the door, W3); the **9 col-5 wall faces** (5,1)–(5,4)
-    and (5,6)–(5,10) (each faces a seen col-4 floor); the **10 left-border
-    faces** (0,1)–(0,10) (each faces a seen col-1 floor — (0,7) counts,
-    since (1,7) is floor and seen); the **4 top-border faces** (1,0)–(4,0)
-    and **4 bottom-border faces** (1,11)–(4,11). Count: 40 + 1 + 1 + 9 +
-    10 + 4 + 4 = 69. ✓
+    doorway **(5,5)** (its face revealed by (S2)); the **9 col-5 wall
+    faces** (5,1)–(5,4) and (5,6)–(5,10) (each faces a seen col-4 floor);
+    the **10 left-border faces** (0,1)–(0,10) (each faces a seen col-1
+    floor — (0,7) counts, since (1,7) is floor and seen); the **4
+    top-border faces** (1,0)–(4,0) and **4 bottom-border faces**
+    (1,11)–(4,11). Count: 40 + 1 + 9 + 10 + 4 + 4 = 68. ✓
   - **E = 0** (the explored set is empty before the first recompute).
-    **H = 123.**
+    **H = 124.**
+  - **Erratum (door-default change):** doors are now closed+locked by
+    default, so the (5,5) doorway no longer transmits sight and **(6,6)**
+    — previously the single S middle-room floor — is now **H**; the literal
+    and counts above match the corrected fixture in
+    `tests/test_visibility.py` (`W4_MASK`, 68 S / 0 E / 124 H), which
+    defines correctness.
   - Qualitative facts QA must see (independent of the string): the entire
-    left region is S; **exactly one** middle-room cell is S — (6,6); the
+    left region is S; **no** middle-room cell is S (the whole room sits
+    behind the closed (5,5) door — (6,6) is H); the
     famous trap **(6,5), directly past the door on the same row, is H**
     ((1,1)→(6,5) samples the wall (5,4) before reaching the door); (6,7)
     is H ((1,1)→(6,7) samples wall (5,6)); the corner wall (7,7) is H;
@@ -352,7 +358,7 @@ its actual coordinates — see `app/grid.py`).
     whole right room and the bottom band are H (every line crosses col-5
     wall cells); the top/bottom borders are H except above/below the left
     region (so (0,0), (0,11), (5,0), (5,11), (6,0) are H).
-  - **AC2 asserts** this 12-row literal verbatim, the counts 69/0/123, a
+  - **AC2 asserts** this 12-row literal verbatim, the counts 68/0/124, a
     battery of spot cells (all the S/E/H cells listed above), and an
     **independent re-derivation** of the S-set straight from the real
     `has_line_of_sight` + the spec's wall-face rule (§12). The
