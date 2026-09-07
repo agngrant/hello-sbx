@@ -476,6 +476,24 @@ function canvasHint(message) {
   hintTimer = setTimeout(() => { els.canvasHint.hidden = true; }, 2000);
 }
 
+/* UX guard (post-mortem, door-report mitigation): a map-canvas tap that
+   resolves to NOTHING — a letterbox / out-of-window pixel, or a no-op
+   target cell — previously vanished silently ("doors do nothing"). These
+   hints toast via the standard #toasts path (same mechanism as the
+   join/rebind toasts; the container is pointer-events:none, so the toast
+   can never swallow a follow-up click). DEBOUNCED: at most one hint toast
+   per 2.5 s, so a rapid-fire of mis-clicks (or a held-drag's final click)
+   never stacks them. Only called from the click handler's NO-OP exit
+   paths — a click that performed its action (door open/close, GM door /
+   safe-door tool applied, entity selected, move/spawn, paint) never toasts. */
+let _tapHintAt = 0;
+function tapHint(message) {
+  const now = Date.now();
+  if (now - _tapHintAt < 2500) return;
+  _tapHintAt = now;
+  toast(message);
+}
+
 // GM first-run hint (one-time, gm-controller spec §3.2): reuses #canvas-hint
 // for 5 s — or until the GM selects or creates a token, whichever comes
 // first. Decorative (kept outside aria-live to avoid double-announcing).
@@ -1930,7 +1948,15 @@ els.canvas.addEventListener("pointerup", () => { state.painting = false; });
 
 els.canvas.addEventListener("click", (ev) => {
   const c = cellFromEvent(ev);
-  if (!c || !state.joined || !state.grid) return;
+  if (!state.joined || !state.grid) return;
+  if (!c) {
+    // UX guard (door-report post-mortem mitigation): a tap in the letterbox
+    // bars or beyond the visible window resolves to NO cell. Previously a
+    // silent no-op — exactly what read as "doors do nothing". Debounced in
+    // tapHint so a mis-click flurry toasts at most once per 2.5 s.
+    tapHint("Nothing there — outside the visible map");
+    return;
+  }
   const t = state.grid.cells[c.y][c.x];
 
   const gm = state.role === "gm";
@@ -1943,17 +1969,25 @@ els.canvas.addEventListener("click", (ev) => {
   if (state.tool !== "select") {
     if (state.tool === "door") {
       if (!gm) return;                          // players have no door tool
-      if (t !== "doorway") return;              // no client gating: a bad
-                                                 // cell gets the server's
-                                                 // "not a doorway" toast
+      if (t !== "doorway") {
+        // UX guard: the armed door action has no target on a non-doorway
+        // cell. No frame is sent here (the server toast can't fire), so the
+        // miss would otherwise vanish silently — hint instead (debounced).
+        tapHint("Nothing to select here — not a doorway");
+        return;
+      }
       sendDoor(c.x, c.y, state.doorAction);
     } else if (state.tool === "safeDoor") {
       // GM Safe door tool (safe-room doors spec §7.5): apply the armed
       // action (Mark/Unmark/Open/Close) on click. GM-only (the button is
-      // GM-only in the UI; the guard mirrors the Door tool). A non-doorway
-      // cell gets the server's "not a doorway" toast — no client gating.
+      // GM-only in the UI; the guard mirrors the Door tool).
       if (!gm) return;
-      if (t !== "doorway") return;
+      if (t !== "doorway") {
+        // UX guard: same as the Door tool — a non-doorway miss is a silent
+        // no-op without a hint (debounced in tapHint).
+        tapHint("Nothing to select here — not a doorway");
+        return;
+      }
       sendSafeDoor(c.x, c.y, state.safeAction);
     }
     return;

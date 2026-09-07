@@ -3850,6 +3850,135 @@ class TestPanZoom(FrontendBase):
                          [{"type": "safe_door", "x": 10, "y": 8,
                            "action": "unlock"}])
 
+    # ── Door-report mitigation: player door taps + the "nothing there" hint
+    #    toast, driven through the REAL cellFromEvent under a real view
+    #    transform (TestPlayerDoorTap predates pan-zoom and sets
+    #    state.cell/offsetX/offsetY by hand with no state._view). Setup for
+    #    all of these: 20×17 map, L4 (16×13), pan(2,3), avail 800×400 →
+    #    cell 30, offsets (100,-85), window x[2,18)×y[3,16); door at (10,8).
+    def _player_door_ctx(self):
+        return (
+            "(()=>{const map=" + _floor_map_js(20, 17) + ";"
+            + "api.onWelcome({type:'welcome',"
+            + "you:{id:'p2',name:'Alice',role:'player',entity_id:'e2'},"
+            + "map,entities:[],you_entity:{id:'e2',name:'Alice',"
+            + "kind:'player',team:'party',x:6,y:6},"
+            + "players:[{id:'p2',entity_id:'e2',awareness_radius:4}],"
+            + "awareness:[],fog:false});"
+            + "api.state.grid.cells[8][10]='doorway';"
+            + self._vset(4, 2, 3)
+            + "const c=api.state.cell,ox=api.state.offsetX,"
+            + "oy=api.state.offsetY;")
+
+    def test_player_door_tap_under_transform_unlocked_and_open(self):
+        # UNLOCKED closed door ("U") → {door, open}; OPEN door ("O") →
+        # {door, close}, at the correct (10,8) under the panned transform.
+        # Both taps SUCCEED → no hint toast: the only toast in #toasts is
+        # the welcome one (pinning "never toast on a success").
+        out = json.loads(js(
+            self._player_door_ctx()
+            + "api.state.doors={'10,8':'U'};"
+            + "api._send.reset();"
+            + "api.els.canvas.dispatchEvent({type:'click',"
+            + "clientX:ox+10*c+c/2,clientY:oy+8*c+c/2});"
+            + "const open=api._send.sent.slice();"
+            + "api.state.doors={'10,8':'O'};"
+            + "api._send.reset();"
+            + "api.els.canvas.dispatchEvent({type:'click',"
+            + "clientX:ox+10*c+c/2,clientY:oy+8*c+c/2});"
+            + "return {win:[api.state._view.x0,api.state._view.x1,"
+            + "api.state._view.y0,api.state._view.y1],"
+            + "open,close:api._send.sent,"
+            + "toasts:api.els.toasts.children.length};})()"))
+        self.assertEqual(out["win"], [2, 18, 3, 16])
+        self.assertEqual(out["open"],
+                         [{"type": "door", "x": 10, "y": 8,
+                           "action": "open"}])
+        self.assertEqual(out["close"],
+                         [{"type": "door", "x": 10, "y": 8,
+                           "action": "close"}])
+        self.assertEqual(out["toasts"], 1,
+                         "no hint toast on a successful tap — only the "
+                         "welcome toast is in #toasts")
+
+    def test_player_tap_locked_door_under_transform_sends_open_attempt(self):
+        # LOCKED door ("L") tapped by a player — PINNED current behavior
+        # (identical to TestPlayerDoorTap.test_tap_locked_door_sends_open,
+        # but under a real transform): the client sends the "open" ATTEMPT
+        # — {type:'door', action:'open'} — and the server rejects it with
+        # "door is locked", which surfaces via the normal {type:'error'}
+        # toast path (covered by test_locked_door_error_toast_path). So a
+        # door frame IS sent (the attempt), but the client adds no hint
+        # toast of its own (only the welcome one remains in #toasts).
+        out = json.loads(js(
+            self._player_door_ctx()
+            + "api.state.doors={'10,8':'L'};"
+            + "api._send.reset();"
+            + "api.els.canvas.dispatchEvent({type:'click',"
+            + "clientX:ox+10*c+c/2,clientY:oy+8*c+c/2});"
+            + "return {sent:api._send.sent,"
+            + "toasts:api.els.toasts.children.map(t=>"
+            + "t.children[0]?t.children[0].textContent:null)};})()"))
+        self.assertEqual(out["sent"],
+                         [{"type": "door", "x": 10, "y": 8,
+                           "action": "open"}],
+                         "locked-door tap = an open ATTEMPT the server "
+                         "rejects (pinned, as TestPlayerDoorTap pins it)")
+        self.assertEqual(out["toasts"], ["Welcome, Alice."],
+                         "no client-side hint toast for a locked-door tap")
+
+    def test_letterbox_tap_sends_nothing_and_toasts_hint_once(self):
+        # 20×17 map at L5 (20×17) fit: cell 23, offsets (170,4) — the window
+        # fills the map, so the letterbox is the 170px side bars / 4px top
+        # bar. GM with the Door tool armed taps the TOP letterbox bar twice
+        # (rapid double-click): cellFromEvent resolves null → ZERO wire
+        # frames (no door/safe_door/move/paint), and the new hint toast
+        # fires ONCE (the 2.5 s debounce swallows the second tap).
+        out = json.loads(js(
+            self._gm_welcome(20, 17) + self._vset(5, 0, 0)
+            + "api.state.grid.cells[8][10]='doorway';"
+            + "api.setTool('door');"
+            + "const c=api.state.cell,ox=api.state.offsetX,"
+            + "oy=api.state.offsetY;"
+            + "api._send.reset();"
+            + "api.els.toasts.children.length=0;"
+            + "api.els.canvas.dispatchEvent({type:'click',"
+            + "clientX:ox+c/2,clientY:oy-5});"
+            + "api.els.canvas.dispatchEvent({type:'click',"
+            + "clientX:ox+c/2,clientY:oy-5});"
+            + "return {sent:api._send.sent,ox,oy,c,"
+            + "toasts:api.els.toasts.children.map(t=>"
+            + "t.children[0]?t.children[0].textContent:null)};})()"))
+        self.assertEqual((out["ox"], out["oy"], out["c"]), (170, 4, 23),
+                         "L5 fit letterbox geometry")
+        self.assertEqual(out["sent"], [],
+                         "a letterbox tap must send no wire frame")
+        self.assertEqual(out["toasts"],
+                         ["Nothing there — outside the visible map"],
+                         "one hint toast, debounced across the double-tap")
+
+    def test_gm_door_tool_non_doorway_miss_toasts_hint(self):
+        # GM Door tool armed, tap a FLOOR cell inside the window: the armed
+        # action has no target → no frame, and the new hint toasts (the
+        # pre-guard behavior was a silent no-op — the "nothing happens"
+        # complaint). Paint tools are unaffected by the guard (their
+        # no-ops are tested under the existing paint tests).
+        out = json.loads(js(
+            self._gm_welcome(20, 17) + self._vset(5, 0, 0)
+            + "api.setTool('door');"
+            + "const c=api.state.cell,ox=api.state.offsetX,"
+            + "oy=api.state.offsetY;"
+            + "api._send.reset();"
+            + "api.els.toasts.children.length=0;"
+            + "api.els.canvas.dispatchEvent({type:'click',"
+            + "clientX:ox+5*c+c/2,clientY:oy+8*c+c/2});"
+            + "return {sent:api._send.sent,"
+            + "toasts:api.els.toasts.children.map(t=>"
+            + "t.children[0]?t.children[0].textContent:null)};})()"))
+        self.assertEqual(out["sent"], [], "a floor tap sends no door frame")
+        self.assertEqual(out["toasts"],
+                         ["Nothing to select here — not a doorway"])
+
     # ── AC17: movement + spawn under the transform ─────────────────────────
     def test_ac17_player_tap_to_move_under_transform(self):
         out = json.loads(js(
