@@ -2,14 +2,28 @@
 
 _Kept current by the orchestrator. Branch: **`main`** @ `753dfcb` (feat/safe-room-doors fast-forward-merged + pushed this session; QA re-run on main PASS)._ 
 
+## IN PROGRESS — Pan & Zoom (map viewport navigation)
+
+**Owner spec:** maps bigger than the viewport; pan via clickable arrows (right-hand control
+panel) + cursor keys; zoom via control-panel buttons + `+`/`-` keys; max zoom = 6×5 grid
+squares visible, min zoom = 60×50. Shared plan: `pan-zoom` (rev 1+).
+
+| Item | Status |
+|---|---|
+| Branch `feat/pan-zoom` from main | ✅ done @ `61e30ac6` (main had 2 docs-only commits past the 753dfcb baseline) |
+| Design spec `docs/design/pan-zoom.md` | ✅ done — 22 ACs (AC1–AC22), `#nav-panel` in right sidebar, 3 control states |
+| Frontend build (view state, transform, controls, tests) | ✅ done — 8 files, 170 frontend / 680 pytest green. Flags for QA: **A2 arrow keys now pan (token nudge retired)**; `cellFromEvent` in-bounds = visible window (per ACs); spec AC1 example off-by-one corrected to pan(54,55) |
+| QA verification + sign-off `docs/qa/qa-signoff-pan-zoom.md` | ✅ done — pytest **680 passed** / unittest **680 OK** / e2e **all ✓** / live smoke (ephemeral port 8771, released) **21/21 ✓** / `TestPanZoom` **31 OK**; AC1–AC22 all PASS; **0 bugs** (BUG-012/013 are retracted placeholders); **VERDICT PASS** |
+| Commit on `feat/pan-zoom` | ✅ `7233e83` (12 files, +2164/−106) + fix `51200a6` (zoom buttons/keys were inverted — `−` now zooms OUT=see more, `+` zooms IN=more detail; regression test added). **Not merged, not pushed; awaiting owner decision** |
+
 ## Branch baseline (verified this session)
 
 | Item | Value |
 |---|---|
-| Branch / HEAD | **`main`** @ `753dfcb` (local + `origin/main` in sync) — the only branch, local + remote |
+| Branch / HEAD | **`feat/pan-zoom`** @ `7233e83` (pan/zoom feature commit on top of `main` @ `61e30ac6`). `main` @ `61e30ac6` — 2 docs-only commits ahead of `753dfcb`; local + remote in sync |
 | Tag | `safe-doors-v1` @ `7190b3f` (pre-door-iconography baseline; local + remote) |
 | Branches deleted this session | `feat/safe-room-doors` (merged @ `753dfcb`), `feat/explored-map` (merged @ `d4a1cd5`) |
-| Uncommitted (local only) | `TODO.md`, `docker-agent.yaml` (team config, deliberately uncommitted) |
+| Uncommitted (local only) | `TODO.md`, `docker-agent.yaml` (team config, deliberately uncommitted), `docs/websearch-investigation.md` (untracked) |
 
 **Features on `main`:** core v3.0, awareness ring + per-player radius, GM-generated BSP maps,
 explored map (S/E/H fog with memory), Openable/Closable Doors, **GM Safe-Room Doors with lock state
@@ -73,8 +87,7 @@ byte-identical (AC17).
 
 ### Carried over (still true this session)
 
-- [ ] Server **STOPPED** (killed PID 101412; `lsof -nP -iTCP:8000 -sTCP:LISTEN` empty, no `app.main`
-      processes remain). Restart with:
+- [ ] Server **RUNNING** on `feat/pan-zoom` @ `51200a6` (pan/zoom + zoom fix build): PID **64752**, bound **0.0.0.0:8000**, `/health` ok, log `/tmp/little-dungeons-server.log` (restarted after zoom fix). Stop with: `kill 64752`. Restart later with:
       `cd /Users/agrant3/agentteam && nohup .venv/bin/python -m app.main --host 0.0.0.0 --port 8000 > /tmp/little-dungeons-server.log 2>&1 &`
 
 ### Committed + pushed this session

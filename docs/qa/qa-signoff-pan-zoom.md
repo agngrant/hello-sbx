@@ -165,3 +165,52 @@ no dead code. **No bugs were found** (the two BUG-012/013 placeholders were retr
 review; neither is a real defect).
 
 **The Pan & Zoom feature is ready to merge.**
+
+---
+
+## 10. Post-sign-off fix
+
+**Commit:** `51200a6` (`fix: zoom buttons reversed — minus now zooms out (see more), plus zooms in (more detail)`)
+**Reviewer:** independent QA. **Date:** session for the owner-reported zoom-direction fix.
+
+**Bug (owner report, frontend-only):** the Map view panel's zoom buttons behaved
+opposite to their symbols. `zoomBy()` treated its argument as a raw level offset
+(`level + delta`), so `+` → `zoomBy(1)` drove the level **toward L10** (60×50,
+smaller cells / more squares) and `−` toward L0 — the reverse of the symbols; the
+disabled states inherited the same inversion (`−` dimmed at L0, `+` dimmed at L10).
+
+**Fix verified:**
+
+- `zoomBy(delta)` sign convention is now **zoom-in steps**: `nl = level − delta`, so
+  `zoomBy(+1)` zooms IN toward L0 (6×5, more detail) and `zoomBy(−1)` zooms OUT
+  toward L10 (60×50, see more). Level model (L0 most zoomed-in … L10 most
+  zoomed-out) unchanged.
+- Disabled states realigned to the new convention: `−` (zoom out) disabled at
+  **L10** (`"Fully zoomed out (60×50)"`), `+` (zoom in) disabled at **L0**
+  (`"Fully zoomed in (6×5)"`).
+- All four call sites agree: `els.zoomOut → zoomBy(−1)`, `els.zoomIn → zoomBy(1)`,
+  key `+`/`=` → `zoomBy(1)`, key `−` → `zoomBy(−1)` — buttons and keyboard keys are
+  the same direction.
+- `docs/design/pan-zoom.md` direction notes corrected (view-mutation table,
+  disable table, §keybindings table, AC4/AC6).
+- Regression test added: `TestPanZoom.test_zoom_buttons_increase_decrease_level_and_disable_at_extremes`
+  (`+` click ⇒ level 6→5, window 25×21→20×17, cell grows; `−` click ⇒ 5→6, cell
+  shrinks; `−` disabled at L10, `+` disabled at L0).
+- **No server/wire changes, no unrelated edits** — commit touches only
+  `app/static/app.js`, `docs/design/pan-zoom.md`, `tests/test_frontend.py`. No
+  `app/*.py` change. Old title strings ("Maximum zoom"/"Minimum zoom") fully
+  removed (grep clean across `app/`, `docs/`, `tests/`).
+
+**Test results (exact counts):**
+
+| Suite | Command | Result |
+|---|---|---|
+| Full (pytest) | `.venv/bin/python -m pytest` | **681 passed**, 78 warnings (pre-existing deprecations), 140 subtests — 0 failed/skipped/error |
+| Frontend harness | `tests.test_frontend` | **171 passed**, 31 subtests (was 170; +1 regression test) |
+
+**Verdict: ✅ PASS** — fix is correct, complete, and consistent (button symbols ↔
+handler signs ↔ keyboard keys ↔ docs); no new bugs introduced.
+
+*(Note: §5's pre-fix zoom-extreme titles "Maximum zoom (6×5)" / "Minimum zoom (60×50)"
+and the §6 AC4/AC5/AC6 descriptions reflect the state at original sign-off and are
+superseded by this section.)*
