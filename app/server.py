@@ -37,6 +37,7 @@ import os
 import socket
 import sys
 import threading
+import time
 import warnings
 from typing import Any
 
@@ -60,6 +61,7 @@ from starlette.types import Receive, Scope, Send
 
 from app.detection import detect_grid, grid_to_thumbnail_png
 from app.generation import GEN_MAX_EDGE, GEN_MIN_EDGE, generate_grid
+from app import saves as save_store
 from app.main import (
     BASE_DIR,
     MAX_BODY,
@@ -92,6 +94,39 @@ def _error_json(status: int, message: str) -> JSONResponse:
         content={"error": message},
         headers={"Cache-Control": "no-store"},
     )
+
+
+def _save_role_state() -> str:
+    """The role source for the save routes (save-load spec A8).
+
+    REST has no per-request identity: the GM is the GM of the current
+    in-memory default session. Returns:
+
+    * "gm" — a default session exists AND has a GM (the save routes act as GM)
+    * "player" — a default session exists but has NO GM (401 for save/load/
+      delete: a player-only session exists, A8)
+    * "none" — no default session at all (save 409s "no active map session";
+      load/delete are permitted — a GM may load before any client joins, and
+      players cannot reach these UIs pre-join)
+    """
+    from app.main import sessions
+
+    session = sessions.get("default")
+    if session is None:
+        return "none"
+    with session._lock:
+        roles = [p.role for p in session.players.values()]
+    if "gm" in roles:
+        return "gm"
+    if not roles:
+        # An EMPTY session (no players yet) is not an active map session:
+        # the GM hasn't joined/opened a map -> treat like "no session"
+        # (save 409s; load/delete allowed — a GM may load before
+        # players arrive, A8/E9).
+        return "none"
+    # A PLAYER-ONLY session (players present, NO GM) -> 401 for
+    # save/load/delete (A8: "a player-only session exists").
+    return "player"
 
 
 def not_found_handler(request: Any, exc: HTTPException) -> PlainTextResponse:
@@ -261,6 +296,140 @@ def build_app() -> FastAPI:
         finally:
             session.detach(websocket)
 
+
+    # -- saves (save-load spec section 5 — ADDITIVE routes; NO wire change) --
+
+    @app.get("/api/saves")
+    async def saves_list() -> JSONResponse:
+        # Any role, no join required: the list comes from the saves/ dir
+        # scan (spec 4.1/E1/A12), newest first; corrupt bundles are listed
+        # with "corrupt": true (row shows warning + Delete only).
+        return JSONResponse(
+            {"saves": save_store.list_saves()},
+            headers={"Cache-Control": "no-store"},
+        )
+
+    @app.post("/api/saves")
+    async def saves_create(request: Request) -> JSONResponse:
+        # GM only (spec 5.2, A8). Body: {"name": str? , "id": str?} — the
+        # user label (absent/blank => the current map's name; a string of
+        # at most 40 chars when present) and an OPTIONAL explicit save id to
+        # overwrite (E2 "Overwrite"; must be a valid id string).
+        # Validation order (spec 5.2): role (401) -> no active session (409)
+        # -> body object (400) -> name (400) -> write (200 record).
+        state = _save_role_state()
+        if state == "player":
+            return _error_json(401, "only the GM can save")
+        from app.main import sessions
+        session = sessions.get("default")
+        if state == "none":
+            # A8/E9: no live (or empty) session yet (no GM has joined/
+            # opened a map in this server run) — clear, actionable.
+            return _error_json(
+                409,
+                "no active map session — join as GM and open a map first",
+            )
+        body, err = await _read_body_checked(request)
+        if err is not None:
+            return err
+        payload = None
+        if body:
+            payload, err = await _parse_json_body(body)
+            if err is not None:
+                return err
+            if not isinstance(payload, dict):
+                return _error_json(400, "request body must be a JSON object")
+        label = (payload or {}).get("name")
+        if label is not None:
+            if not isinstance(label, str) or len(label.strip()) > 40:
+                return _error_json(400, "'name' must be a string")
+        explicit_id = (payload or {}).get("id")
+        if explicit_id is not None:
+            if not isinstance(explicit_id, str) or not explicit_id:
+                return _error_json(400, "'id' must be a non-empty string")
+            try:
+                save_store._validate_id(explicit_id)
+            except ValueError:
+                return _error_json(400, "'id' must be a valid save id")
+        # Snapshot under the session lock (E11: a frozen copy — subsequent
+        # moves never affect the save). owner_name = the controlling
+        # player's NAME (null for GM-controlled tokens / stale player ids),
+        # spec 4.3.
+        with session._lock:
+            grid = session.grid
+            entity_dicts = []
+            for e in session.entities.values():
+                d = e.to_dict()
+                owner_player = session.players.get(e.owner) if e.owner else None
+                d["owner_name"] = owner_player.name if owner_player else None
+                entity_dicts.append(d)
+            label_val = (
+                label.strip() if isinstance(label, str) and label.strip()
+                else grid.name
+            )
+            record = {
+                "id": explicit_id,  # None => save_bundle mints a fresh id
+                "name": label_val,
+                "map_name": grid.name,
+                "width": grid.width,
+                "height": grid.height,
+                "created_at": save_store._now_iso(),
+                "entity_count": len(entity_dicts),
+            }
+        actual_id = save_store.save_bundle(record, grid, entity_dicts)
+        record["id"] = actual_id  # the id actually written (fresh or explicit)
+        return JSONResponse(
+            {"ok": True, **record}, headers={"Cache-Control": "no-store"})
+
+    @app.post("/api/saves/{save_id}/load")
+    async def saves_load(save_id: str) -> JSONResponse:
+        # GM only (spec 5.3, A8). Reads + validates saves/<id>.json (4.3),
+        # registers it in maps_registry under a FRESH id (smap-<ts>,
+        # A10/A13 — every load is an independent copy); the entry's
+        # "loaded_entities" carries the per-entity owner_name list for the
+        # use_map rebind step (session._on_use_map). NO live-session change
+        # here — the GM opens it via the existing use_map WS flow (F1).
+        # Missing/corrupt => 404 "save not found: <id>" (E3/A12: one shape
+        # for both; file untouched, no crash); no session at all => allowed
+        # (a GM may load before players arrive, A8).
+        if _save_role_state() == "player":
+            return _error_json(401, "only the GM can load")
+        try:
+            grid, entities = save_store.load_bundle(save_id)
+        except (ValueError, OSError):
+            return _error_json(404, f"save not found: {save_id}")
+        map_id = _unique_map_id(f"smap-{int(time.time())}")
+        _register_map(map_id, grid)
+        maps_registry[map_id]["loaded_entities"] = entities
+        return JSONResponse(
+            {
+                "ok": True,
+                "id": map_id,
+                "save_id": save_id,
+                "name": grid.name,
+                "width": grid.width,
+                "height": grid.height,
+                "entity_count": len(entities),
+            },
+            headers={"Cache-Control": "no-store"},
+        )
+
+    @app.delete("/api/saves/{save_id}")
+    async def saves_delete(save_id: str) -> JSONResponse:
+        # GM only (spec 5.4, A8). Removes only saves/<id>.json; a map
+        # already loaded from the save is an independent copy and is
+        # unaffected (AC18). 401 non-GM, 404 missing, 200 {"ok": true}.
+        if _save_role_state() == "player":
+            return _error_json(401, "only the GM can delete")
+        try:
+            save_store.delete_save(save_id)
+        except FileNotFoundError:
+            return _error_json(404, f"save not found: {save_id}")
+        except ValueError:
+            # Unsafe id (traversal/charset) — treated as not found (A12).
+            return _error_json(404, f"save not found: {save_id}")
+        return JSONResponse(
+            {"ok": True}, headers={"Cache-Control": "no-store"})
     # -- static frontend (mounted LAST: /api, /health, /ws win) -----------------
 
     # "/" → index.html (StaticFiles(html=False) 404s on a bare "/").
@@ -271,6 +440,8 @@ def build_app() -> FastAPI:
         return FileResponse(os.path.join(STATIC_DIR, "index.html"))
 
     app.mount("/", StaticFiles(directory=STATIC_DIR, html=False), name="static")
+
+
     return app
 
 
@@ -595,7 +766,6 @@ async def _handle_paint(map_id: str, request: Any) -> JSONResponse:
         {"ok": True, "x": x, "y": y, "cell_type": cell_type},
         headers={"Cache-Control": "no-store"},
     )
-
 
 # Build the app once at import time (the test adapter + CLI share it).
 app = build_app()

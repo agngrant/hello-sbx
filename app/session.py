@@ -233,6 +233,7 @@ class GameSession:
                 if player.name == name and (role is None or player.role == role):
                     self._socks[pid] = sock
                     self._client_id_for(sock)
+                    player.rebound = False  # live re-attach, not a save rebind
                     return player, None
 
             gm_exists = any(p.role == "gm" for p in self.players.values())
@@ -259,20 +260,43 @@ class GameSession:
             self.players[pid] = player
 
             if effective_role == "player":
-                # Players only get a starting token (the GM is a pure
-                # controller — it never gets one).
-                x, y = self._find_free_floor()
-                n = len(self.entities)
-                eid = f"e{n + 1}"
-                while eid in self.entities:
-                    n += 1
-                    eid = f"e{n + 1}"
-                entity = Entity(
-                    id=eid, name=name, kind="player", team="party",
-                    x=x, y=y, owner=pid,
+                # Save/load (save-load spec §6.1, F2): a name-matching
+                # UNCLAIMED saved token is rebound to the joiner INSTEAD of
+                # spawning a fresh one. The re-attach pass above already
+                # returned for a name a CONNECTED player holds (so the two
+                # paths can never both run for one join), and this can only
+                # match an entity with owner=None — a GM-controlled token
+                # tagged with the saved player name when a save bundle was
+                # opened via use_map. First-join wins (bundle/dict order);
+                # the winner's owner_name tag is cleared (E7 — the badge
+                # disappears, and a later rejoin with the same name rebinds
+                # to the next unclaimed match, if any). The bound entity
+                # keeps its saved position, kind, team, color and name.
+                match = next(
+                    (e for e in self.entities.values()
+                     if e.owner is None and e.owner_name == name),
+                    None,
                 )
-                self.entities[eid] = entity
-                player.entity_id = eid
+                if match is not None:
+                    match.owner = pid
+                    match.owner_name = None
+                    player.entity_id = match.id
+                    player.rebound = True  # save-load name rebind (BUG-014)
+                else:
+                    # No match ⇒ exactly today's behavior (E6/AC8): a fresh
+                    # party token on a free floor cell.
+                    x, y = self._find_free_floor()
+                    n = len(self.entities)
+                    eid = f"e{n + 1}"
+                    while eid in self.entities:
+                        n += 1
+                        eid = f"e{n + 1}"
+                    entity = Entity(
+                        id=eid, name=name, kind="player", team="party",
+                        x=x, y=y, owner=pid,
+                    )
+                    self.entities[eid] = entity
+                    player.entity_id = eid
 
             self._socks[pid] = sock
             self._client_id_for(sock)
@@ -437,6 +461,14 @@ class GameSession:
             "role": viewer.role,
             "entity_id": viewer.entity_id,
         }
+        # BUG-014 / save-load spec §7.5: an ADDITIVE, welcome-only flag — set
+        # only on a save-load name REBIND (GameSession.join), never on a fresh
+        # spawn, a GM join, or a live same-name re-attach. It is carried ONLY
+        # on this welcome (not on `state` snapshots, so `you` on `state` stays
+        # frozen) so the client can fire the "your character has been
+        # restored." toast for a reclaimed character and nothing else; old
+        # clients ignore the unknown key.
+        state["you"]["rebound"] = bool(viewer.rebound)
         return state
 
     # ------------------------------------------------------------------
@@ -1085,22 +1117,89 @@ class GameSession:
         * broadcasts the new per-viewer ``state`` to everyone already
           connected (a late joiner's ``welcome`` picks the grid up from the
           session, so it gets the same map).
+
+        Save/load (save-load spec §5.3/§6.1): when the registry entry carries
+        a ``loaded_entities`` list (the marker of a map loaded from a save
+        bundle — deliberately a dedicated key so the ``GET /api/maps/{id}``
+        ``entities`` dict wire shape stays frozen), those entities REBUILD
+        the session's roster — fresh :class:`~app.models.Entity` objects,
+        every one GM-controlled (``owner=None``) and tagged with its saved
+        ``owner_name`` so a later join by that name rebinds it (§6.1; the
+        tag is cleared on the rebind). Tokens of still-connected players are
+        NOT dropped: they are re-placed onto the new grid below (existing
+        ``use_map`` semantics, A4/E10) — the GM manages the leftover/claimed
+        mix (R4).
         """
         map_id = msg.get("map_id")
         if not isinstance(map_id, str) or not map_id.strip():
             return {"type": "error", "message": "map_id required"}
         grid: Grid | None = None
+        saved_entities: list[dict[str, Any]] | None = None
         try:
             from app.main import maps_registry  # live registry (same process)
             entry = maps_registry.get(map_id.strip())
             if entry is not None:
                 grid = entry["grid"]
+                # Load-side tagging (spec §6.1): the registry entry carries
+                # the per-entity owner_name list in ``loaded_entities``
+                # (stored with the entry, not on the Grid object) — the
+                # marker of a save-loaded map.
+                raw_saved = entry.get("loaded_entities")
+                if isinstance(raw_saved, list) and raw_saved:
+                    saved_entities = raw_saved
         except Exception:
             grid = None  # registry unavailable — report below
         if grid is None:
             return {"type": "error", "message": f"unknown map: {map_id!s}"}
         with self._lock:
             self.grid = grid
+            if saved_entities is not None:
+                # A save-loaded map brings its OWN roster (spec 5.3 step 3):
+                # fresh entities, all GM-controlled, each tagged with the
+                # saved owner_name for the rebind step. Tokens of connected
+                # (or detached-but-not-left) players are kept FIRST, with
+                # their live ids (existing use_map semantics, A4/E10);
+                # a loaded entity whose id collides with a kept token is
+                # re-id'd (base, base-2, base-3, ...) — rebind is by NAME,
+                # never by id, so the cosmetic offset is safe (E10: the GM
+                # manages the leftover/claimed mix).
+                rebuilt: dict[str, Entity] = {}
+                taken: set[str] = set()
+                for p in self.players.values():
+                    if p.entity_id:
+                        kept = self.entities.get(p.entity_id)
+                        if kept is not None and kept.id not in taken:
+                            rebuilt[kept.id] = kept
+                            taken.add(kept.id)
+
+                def _next_eid(base: str) -> str:
+                    if base not in taken:
+                        return base
+                    n = 2
+                    while f"{base}-{n}" in taken:
+                        n += 1
+                    return f"{base}-{n}"
+
+                for d in saved_entities:
+                    if not isinstance(d, dict):
+                        continue
+                    base_id = d.get("id")
+                    if not isinstance(base_id, str) or not base_id:
+                        continue
+                    eid = _next_eid(base_id)
+                    rebuilt[eid] = Entity(
+                        id=eid,
+                        name=str(d.get("name") or "token"),
+                        kind=str(d.get("kind") or "npc"),
+                        team=str(d.get("team") or "neutral"),
+                        x=int(d.get("x", 0)),
+                        y=int(d.get("y", 0)),
+                        owner=None,
+                        color=d.get("color"),
+                        owner_name=d.get("owner_name"),
+                    )
+                    taken.add(eid)
+                self.entities = rebuilt
             # The new grid can be smaller: park anything out of bounds (or on
             # a newly painted wall) on a free floor/doorway cell.
             for e in self.entities.values():

@@ -440,6 +440,14 @@ class Entity:
     y: int
     owner: str | None = None  # player id that controls it (GM-controlled = None)
     color: str | None = None  # explicit override; else derived from team
+    # Save-bundle-only (save-load spec §4.3/§8, A5): the saved player NAME
+    # that controls this token — the stable identity across restarts
+    # (player ids are ephemeral). On save: the controlling player's name
+    # (None for GM-controlled entities). On load: carried onto the fresh
+    # Entity so a later join by that name can rebind it
+    # (GameSession.join). NEVER serialized by to_dict — the wire payloads
+    # stay frozen (A10). Additive/optional: to_dict/from_dict are unchanged.
+    owner_name: str | None = None
 
     def __post_init__(self) -> None:
         if self.kind not in ENTITY_KINDS:
@@ -491,6 +499,15 @@ class Player:
     # (app.awareness.AWARENESS_MIN/MAX); the default is the legacy fixed
     # APPROX_RADIUS (4). docs/design/awareness-ring.md §2.
     awareness_radius: int = 4
+    # BUG-014 / save-load spec §7.5: True when this player just REBOUND to a
+    # saved character on join (the join's name matched an unclaimed saved
+    # token, so the character came back rather than being freshly spawned).
+    # Consumed once by GameSession.welcome_for to emit the welcome-only
+    # ``you.rebound`` flag (the client's "has been restored." toast), then
+    # reset on any later live re-attach (see GameSession.join). NEVER
+    # serialized by to_dict — the wire payload shape stays frozen (the flag
+    # rides only on the additive welcome field).
+    rebound: bool = False
 
     def __post_init__(self) -> None:
         if self.role not in ROLES:

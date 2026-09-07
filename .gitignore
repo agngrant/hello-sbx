@@ -30,5 +30,8 @@ server.pid
 .ld_server.log
 .ld_server.pid
 
+# Save bundles (save-load spec S5: data, not code)
+saves/
+
 # Sandbox diagnostics dumps (user preference: always ignore)
 sbx-diagnostics-*

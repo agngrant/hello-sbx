@@ -685,9 +685,11 @@ class TestStateFor(SessionTestCase):
     def test_welcome_is_state_plus_you(self):
         w = self.session.welcome_for(self.p1)
         self.assertEqual(w["type"], "welcome")
+        # `you` gained the ADDITIVE welcome-only `rebound` flag (BUG-014 / §7.5);
+        # it is false on an ordinary (non rebind) join.
         self.assertEqual(w["you"], {
             "id": self.p1.id, "name": "Alice", "role": "player",
-            "entity_id": self.p1_ent,
+            "entity_id": self.p1_ent, "rebound": False,
         })
         self.assertIn("map", w)
         self.assertIn("entities", w)

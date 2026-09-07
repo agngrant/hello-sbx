@@ -376,6 +376,75 @@ input[type="file"] { color: var(--text-muted); }
 #awareness-input { flex: 0 0 auto; width: 72px; }
 #new-entity-name { width: 100%; }
 
+/* Saves (save-load spec §7): the GM save/load menu — the sidebar #saves-panel
+   (between GM Tools and Awareness) and the lobby "Saved maps" tab.
+   Reuses the existing panel/list vocabulary: 12px dense rows (cf.
+   .awareness-row), .btn-small actions, the existing palette only. */
+#saves-panel #save-name,
+#saves-tab #save-name { width: 100%; }
+.saves-save-row { margin: var(--s3) 0; }
+.saves-save-row .btn { width: 100%; }
+/* Inline name-conflict confirm (E2) under the save button. */
+.saves-confirm {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--s2);
+  margin: var(--s2) 0;
+  padding: var(--s2) var(--s3);
+  font-size: 12px;
+  background: rgba(245, 159, 0, 0.10);
+  border: 1px solid rgba(245, 159, 0, 0.4);
+  border-radius: var(--r-control);
+}
+.saves-confirm .btn { margin-left: auto; }
+.saves-confirm .btn + .btn { margin-left: var(--s1); }
+/* Both save lists: one shared fetch, two dense row layouts (12px, matching
+   #awareness-list's type). */
+.saves-list { margin: var(--s3) 0 0; }
+.save-row {
+  padding: var(--s2);
+  margin-bottom: var(--s1);
+  border-radius: var(--r-control);
+  background: rgba(23, 27, 38, 0.35);
+  border-left: 2px solid transparent;
+}
+.save-row:last-child { margin-bottom: 0; }
+.save-row-head {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+}
+.save-row-name { font-weight: 600; font-size: 12px; min-width: 0; }
+.save-row-actions { margin-left: auto; display: inline-flex; gap: var(--s1); flex: 0 0 auto; }
+.save-row-meta { display: block; font-size: 11px; margin-top: 2px; }
+.save-row.is-corrupt { border-left-color: var(--danger); }
+.save-row.is-corrupt .save-row-name { color: var(--danger); }
+/* Empty-state lines (E1) — muted, same copy style as the rest of the panel. */
+.saves-empty {
+  margin: var(--s3) 0 0;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+/* Persistent rejoin-by-name note (R4): a muted callout shown after a load —
+   the durable form of the one-shot toast, so the GM always knows players
+   must rejoin by name to reclaim their characters. */
+.saves-rejoin-note {
+  margin: var(--s3) 0 0;
+  padding: var(--s2) var(--s3);
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text-muted);
+  background: rgba(77, 171, 247, 0.10);
+  border: 1px solid rgba(77, 171, 247, 0.35);
+  border-radius: var(--r-control);
+}
+/* The Saved maps tab: a taller panel with the same row type; the row's
+   name sits on its own line and the meta line wraps under it. */
+#saves-tab .save-row-head { flex-direction: column; align-items: flex-start; }
+#saves-tab .save-row-actions { margin-left: 0; margin-top: var(--s2); }
+
+
 /* Awareness list (wireframes §5.2) */
 .awareness-list { list-style: none; margin: 0 0 var(--s2); padding: 0; }
 .awareness-row {
@@ -681,9 +750,18 @@ input[type="file"] { color: var(--text-muted); }
 .gm-only { display: none; }
 body.is-gm .gm-only { display: inline-flex; }
 #entity-tools.gm-only,
-#no-map.gm-only { display: none; }
+#no-map.gm-only {
+  display: none;
+}
 body.is-gm #entity-tools.gm-only,
 body.is-gm #no-map.gm-only { display: block; }
+/* Saves panels (save-load spec §7): block-level .panel gm-only sections —
+   kept `display:block` for the GM (mirroring #entity-tools), not the
+   generic .gm-only inline-flex, so the panel layout is preserved. */
+#saves-panel.gm-only,
+#saves-tab.gm-only { display: none; }
+body.is-gm #saves-panel.gm-only,
+body.is-gm #saves-tab.gm-only { display: block; }
 #controls-bar .gm-only,
 #paint-group.gm-only { display: none; }
 body.is-gm #controls-bar .gm-only,

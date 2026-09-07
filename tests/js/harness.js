@@ -162,7 +162,32 @@ function makeEl() {
     setAttribute() {}, getAttribute() { return null; },
     setAttribute() {}, getAttribute() { return null; },
     children: [],
-    appendChild(c) { this.children.push(c); this.firstChild = c; return c; }, removeChild() {}, remove() {},
+    parentNode: null,
+    appendChild(c) {
+      // Real-DOM modeling: re-parent, track parent, keep firstChild fresh
+      // (the app's toast capper loops on `firstChild.remove()`, which only
+      // terminates when remove() actually splices the child out).
+      if (c.parentNode && c.parentNode.children) {
+        const i = c.parentNode.children.indexOf(c);
+        if (i >= 0) c.parentNode.children.splice(i, 1);
+      }
+      this.children.push(c);
+      c.parentNode = this;
+      this.firstChild = this.children[0];
+      return c;
+    },
+    removeChild(c) {
+      const i = this.children.indexOf(c);
+      if (i >= 0) this.children.splice(i, 1);
+      if (c.parentNode === this) c.parentNode = null;
+      this.firstChild = this.children[0] || null;
+      return c;
+    },
+    remove() {
+      if (this.parentNode && this.parentNode.children) {
+        this.parentNode.removeChild(this);
+      }
+    },
     insertBefore() {}, querySelector() { return null; }, querySelectorAll() { return []; },
     getBoundingClientRect() { return { left: 0, top: 0, width: 800, height: 600 }; },
     setPointerCapture() {},
@@ -273,7 +298,18 @@ function buildApi() {
     dispatch(type, ev) {
       for (const fn of __DOC_LISTENERS[type] || []) fn(ev);
     },
-    body: { classList: { add() {}, remove() {}, toggle() {} } },
+    // document.body carries a REAL classList (state tracked) so the role
+    // flags onWelcome toggles (is-gm / is-player) are assertable — the CSS
+    // GM-only gating keys on body.is-gm.
+    body: { classList: { _s: new Set(),
+      add(...c) { for (const x of c) this._s.add(x); },
+      remove(...c) { for (const x of c) this._s.delete(x); },
+      toggle(c, force) {
+        const on = force === undefined ? !this._s.has(c) : !!force;
+        if (on) this._s.add(c); else this._s.delete(c);
+        return on;
+      },
+      contains(c) { return this._s.has(c); } } },
     title: "",
   };
   const window = {
@@ -313,14 +349,19 @@ function buildApi() {
   // captured in __FETCH.sent; the Promise resolves with __FETCH.response so
   // tests can drive generateMap() end-to-end. The old behavior (hard reject
   // of "no network in harness") is restored by __FETCH.hardReject = true.
-  const __FETCH = { sent: [], response: null, hardReject: false, reset() {
-    this.sent.length = 0; this.response = null; this.hardReject = false; } };
+  const __FETCH = { sent: [], response: null, responses: null, hardReject: false,
+    reset() {
+      this.sent.length = 0; this.response = null; this.responses = null;
+      this.hardReject = false; },
+    // json() helper: if a `responses` queue is set it pops the NEXT queued
+    // response (load→refresh sequences); else falls back to `response`.
+    next() { if (this.responses) return this.responses.shift(); return this.response; } };
   const fetch = (url, opts) => {
     __FETCH.sent.push({ url, opts });
     if (__FETCH.hardReject) {
       return Promise.reject(new Error("no network in harness"));
     }
-    return Promise.resolve(__FETCH.response);
+    return Promise.resolve(__FETCH.next());
   };
   const FileReader = class { readAsDataURL() {} };
   // Shadow the globals so app.js drives the controllable timer.
@@ -343,6 +384,8 @@ function buildApi() {
     "drawDoorCell, renderLegendDoorSwatches, drawDoorClosed, drawPadlock, drawDoorOpen," +
     "SAFE_STATES," +
     "isSafeDoor, safeDoorStateAt, validateSafe, sendSafeDoor, setSafeAction," +
+    // Save / Load menu (save-load spec §7): list + save + load + delete.
+    "refreshSaves, renderSaves, renderSavesTab, buildSaveRow, formatSaveDate, saveCurrentMap, loadSave, loadSaveFromTab, deleteSave, confirmDeleteSave, findSaveByName, showSaveConfirm, hideSaveConfirm, announceLoadedSaveRejoin, showRejoinNote, hideRejoinNote, showLoadedSavePreview, onSaveCurrentMapClick, syncSaveMapStateButton," +
     // Pan & Zoom (pan-zoom spec): view math + controls.
     "LEVELS, fitLevel, viewStep, viewBounds, applyView, applyViewNow, fitToMap," +
     "panBy, zoomBy, syncNavControls, focusInField, cellFromEvent," +

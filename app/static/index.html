@@ -51,6 +51,10 @@
       <div id="map-source-tabs" class="map-source-tabs" role="tablist">
         <button id="tab-upload" class="tab-btn is-active" aria-pressed="true">Upload map</button>
         <button id="tab-generate" class="tab-btn" aria-pressed="false">Generate map</button>
+        <!-- Saved maps (save-load spec §7.3): GM-only third tab — the
+             lobby-reachable load menu (post-restart restore). Reuses the
+             shared preview → "Open map in session" flow. -->
+        <button id="tab-saves" class="tab-btn gm-only" aria-pressed="false">Saved maps</button>
       </div>
       <div id="upload-form" class="panel">
         <h2 class="section-label">Upload map</h2>
@@ -103,6 +107,19 @@
           <button id="btn-generate" class="btn btn-primary" disabled>Generate map</button>
         </div>
       </div>
+      <!-- Saved maps (save-load spec §7.3): GM-only load list — one panel,
+           same list fetch as the map-view #saves-panel. Rows: name +
+           map name · W×H · N tokens · date + Load / Delete. Load = POST
+           /api/saves/<id>/load → GET /api/maps/<new id> → the shared
+           preview → "Open map in session" (use_map). -->
+      <div id="saves-tab" class="panel gm-only" hidden>
+        <h2 class="section-label">Saved maps</h2>
+        <div id="saves-tab-list" class="saves-list"></div>
+        <p id="saves-tab-rejoin-note" class="saves-rejoin-note" hidden></p>
+        <p id="saves-tab-empty" class="saves-empty">
+          No saves yet. Save one from the map view's Saves panel.
+        </p>
+      </div>
       <div id="upload-preview" class="panel" hidden>
         <h2 id="preview-title" class="section-label">Detected map</h2>
         <div class="upload-preview-panes">
@@ -124,6 +141,11 @@
           (Side-by-side before/after painting lands in Iteration 6.)
         </p>
         <div class="upload-actions">
+          <!-- Save map state (save-load spec §7.3): saves the CURRENT
+               session's state of this map (POST /api/saves) — enabled only
+               while a map is open in a live GM session. -->
+          <button id="btn-save-map-state" class="btn gm-only" disabled
+                  title="Save this map's current session state from the map view">Save map state</button>
           <button id="btn-back" class="btn">Start over</button>
           <button id="btn-start-map" class="btn btn-primary">Open map in session</button>
         </div>
@@ -262,6 +284,27 @@
             <button id="btn-new-entity" class="btn">Add</button>
           </div>
           <p class="muted small">Spawns on the last hovered tile (first free tile if none).</p>
+        </section>
+
+        <!-- SAVES (save-load spec §7.2): GM-only save/load menu, slotted
+             between GM Tools and Awareness (sidebar order: map → editing →
+             session state → awareness). Save = POST /api/saves (label or
+             the map name; name conflict → inline Save-as-new/Overwrite),
+             Load = POST /api/saves/<id>/load + use_map on the SAME socket,
+             Delete = inline confirm + DELETE. Players never see this
+             panel (.gm-only, same as #entity-tools). -->
+        <section id="saves-panel" class="panel gm-only">
+          <h2 class="section-label">Saves</h2>
+          <label class="field-label" for="save-name">Save name</label>
+          <input id="save-name" type="text" maxlength="40"
+                 placeholder="Save name (optional)" />
+          <div class="saves-save-row">
+            <button id="btn-save-current-map" class="btn">Save current map</button>
+          </div>
+          <p id="save-confirm" class="saves-confirm" hidden></p>
+          <div id="saves-list" class="saves-list"></div>
+          <p id="saves-rejoin-note" class="saves-rejoin-note" hidden></p>
+          <p id="saves-empty" class="saves-empty">No saves yet.</p>
         </section>
 
         <section id="awareness" class="panel">

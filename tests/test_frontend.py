@@ -71,6 +71,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import unittest
@@ -4062,6 +4063,676 @@ class TestPanZoom(FrontendBase):
                   "zoom-in", "zoom-out", "nav-readout"):
             self.assertIn('id="%s"' % b, html)
 
+
+# ══════════════════════════════════════════════════════════════════════
+#  Save / Load menu (docs/design/save-load.md §7 — frontend, AC13)
+# ══════════════════════════════════════════════════════════════════════
+#  Two GM-only surfaces sharing one list fetch: the map-view sidebar
+#  #saves-panel and the lobby "Saved maps" tab. All traffic is plain REST;
+#  a load POSTs then fires use_map on the SAME socket (BUG-002-safe).
+#  These tests execute the REAL app.js under the harness stub DOM.
+
+
+class SavesBase(FrontendBase):
+    """Shared helpers for the save/load menu tests."""
+
+    # A couple of representative save records (newest first) covering a
+    # normal save + a corrupt save (E3/A12).
+    _NORMAL = (
+        '{id:"act-1",name:"Act Three",map_name:"The Gilded Crypt",'
+        'width:24,height:16,created_at:"2025-01-01T12:00:00",'
+        'entity_count:4}'
+    )
+    _NORMAL2 = (
+        '{id:"old-1",name:"Opening Night",map_name:"The Gilded Crypt",'
+        'width:24,height:16,created_at:"2024-12-30T22:14:00",'
+        'entity_count:2}'
+    )
+    _CORRUPT = '{id:"bad-1",name:"Broken",corrupt:true}'
+
+    def _gm_welcome(self):
+        """A GM joined to a live map (welcome drives applyState). A JS
+        STATEMENT (no surrounding arrow) — compose it into a test expr with
+        ``self._gm(body)`` below."""
+        return (
+            "const map={name:'Crypt',width:6,height:4,cells:Array.from("
+            "{length:4},()=>Array(6).fill('floor'))};"
+            "api.onWelcome({type:'welcome',"
+            "you:{id:'p1',name:'G',role:'gm',entity_id:null},"
+            "map,entities:[],players:[],awareness:[],fog:false});"
+        )
+
+    def _gm(self, body):
+        """Wrap a GM-welcome + ``body`` (ending in a `return`) in one IIFE."""
+        return "(()=>{" + self._gm_welcome() + body + "})()"
+
+    @staticmethod
+    def _fetch_resp(payload):
+        """A recorded 200 fetch response (payload passed to resp.json())."""
+        return "{ok:true,status:200,json:async()=>(%s)}" % json.dumps(
+            payload if isinstance(payload, (dict, list)) else payload,
+            separators=(",", ":"))
+
+
+class TestSavesStaticHtml(SavesBase):
+    """AC13a — index.html carries the two GM-only surfaces + shared ids."""
+
+    def setUp(self):
+        with open(INDEX, encoding="utf-8") as fh:
+            self.html = fh.read()
+
+    def test_sidebar_saves_panel_ids_present(self):
+        for i in ('id="saves-panel"', 'id="save-name"',
+                  'id="btn-save-current-map"', 'id="save-confirm"',
+                  'id="saves-list"', 'id="saves-empty"',
+                  'id="saves-rejoin-note"'):
+            self.assertIn(i, self.html)
+
+    def test_sidebar_saves_panel_is_gm_only(self):
+        m = re.search(r'<section id="saves-panel"[^>]*>',
+                                    self.html)
+        self.assertIsNotNone(m, "#saves-panel must be a <section>")
+        self.assertIn("gm-only", m.group(0),
+                      "the Saves panel must be GM-only (spec §7.2)")
+
+    def test_saves_panel_slot_between_gm_tools_and_awareness(self):
+        # §7.1/AC13: #saves-panel sits between #entity-tools and #awareness.
+        self.assertIn('id="saves-panel"', self.html)
+        et = self.html.index('id="entity-tools"')
+        sp = self.html.index('id="saves-panel"')
+        aw = self.html.index('id="awareness"')
+        self.assertTrue(et < sp < aw,
+                        "Saves panel must sit between GM Tools and Awareness")
+
+    def test_saved_maps_tab_is_the_third_source_tab(self):
+        m = re.search(
+            r'<div id="map-source-tabs".*?</div>', self.html, re.DOTALL)
+        self.assertIsNotNone(m, "#map-source-tabs missing")
+        block = m.group(0)
+        tabs = re.findall(r'<button id="tab-([a-z]+)"', block)
+        self.assertEqual(tabs, ["upload", "generate", "saves"],
+                         "Saved maps must be the third source tab")
+
+    def test_tab_saves_is_gm_only(self):
+        m = re.search(r'<button id="tab-saves"[^>]*>', self.html)
+        self.assertIsNotNone(m, "#tab-saves missing")
+        self.assertIn("gm-only", m.group(0),
+                      "the Saved maps tab must be GM-only")
+
+    def test_saves_tab_panel_ids_present(self):
+        for i in ('id="saves-tab"', 'id="saves-tab-list"',
+                  'id="saves-tab-empty"', 'id="saves-tab-rejoin-note"'):
+            self.assertIn(i, self.html)
+
+    def test_save_name_input_bounded_40(self):
+        # The save-name label is ≤ 40 chars (matches the contract).
+        m = re.search(r'<input id="save-name"[^>]*>', self.html)
+        self.assertIsNotNone(m)
+        self.assertIn('maxlength="40"', m.group(0))
+
+    def test_save_map_state_button_in_preview(self):
+        m = re.search(r'<button id="btn-save-map-state"[^>]*>',
+                                    self.html)
+        self.assertIsNotNone(m, "#btn-save-map-state missing (spec §7.3)")
+        self.assertIn("gm-only", m.group(0))
+        self.assertIn("disabled", m.group(0),
+                      "Save map state must start disabled")
+
+
+class TestSavesGmGating(SavesBase):
+    """AC13g — GM-only gating: players see no save UI (CSS-driven)."""
+
+    def setUp(self):
+        css_path = os.path.join(os.path.dirname(INDEX), "style.css")
+        with open(css_path, encoding="utf-8") as fh:
+            self.css = fh.read()
+
+    def test_saves_panels_gated_gm_only(self):
+        # The block-level Saves panels are hidden by default and shown
+        # block (not inline-flex) for the GM — mirroring #entity-tools.
+        self.assertIn("#saves-panel.gm-only", self.css)
+        self.assertIn("body.is-gm #saves-panel.gm-only", self.css)
+        self.assertIn("#saves-tab.gm-only", self.css)
+        self.assertIn("body.is-gm #saves-tab.gm-only", self.css)
+
+    def test_player_welcome_hides_saves_ui(self):
+        # A player welcome: body is NOT .is-gm, so the .gm-only panels are
+        # display:none (the CSS rule above). The harness proves the body
+        # class is set to player (not gm), which is what the CSS keys on.
+        expr = (
+            "(()=>{const map={name:'m',width:6,height:4,cells:Array.from("
+            "{length:4},()=>Array(6).fill('floor'))};"
+            "api.onWelcome({type:'welcome',"
+            "you:{id:'p2',name:'Alice',role:'player',entity_id:'e2'},"
+            'map,entities:[],you_entity:{id:"e2",name:"Alice",kind:'
+            "'player',team:'party',x:1,y:1},players:[],awareness:[],"
+            "fog:false});"
+            "return {isGm:api.document.body.classList.contains('is-gm'),"
+            "isPlayer:api.document.body.classList.contains('is-player'),"
+            "role:api.state.role};})()"
+        )
+        d = json.loads(js(expr))
+        self.assertFalse(d["isGm"], "a player must not be flagged is-gm")
+        self.assertTrue(d["isPlayer"])
+        self.assertEqual(d["role"], "player")
+
+    def test_gm_welcome_sets_gm_flag(self):
+        # The GM welcome flags body.is-gm — the class the CSS keys on to
+        # reveal the Saves panel / tab.
+        expr = (
+            "(()=>{const map={name:'m',width:6,height:4,cells:Array.from("
+            "{length:4},()=>Array(6).fill('floor'))};"
+            "api.onWelcome({type:'welcome',"
+            "you:{id:'p1',name:'G',role:'gm',entity_id:null},"
+            'map,entities:[],players:[],awareness:[],fog:false});'
+            "return {isGm:api.document.body.classList.contains('is-gm')};"
+            "})()"
+        )
+        d = json.loads(js(expr))
+        self.assertTrue(d["isGm"], "the GM welcome must set body.is-gm")
+
+
+class TestSavesListRendering(SavesBase):
+    """AC13b — the shared list renders name / map name / W×H / tokens /
+    date + Load + Delete; corrupt rows show ⚠ + Delete only; empty state.
+    """
+
+    def _render(self, rows_js):
+        return (
+            "(()=>{api.state.saves=%s;"
+            "api.renderSaves();"
+            "const rows=api.els.savesList.children;"
+            "const info=[];"
+            "for(const r of rows){const head=r.children[0];"
+            "const actions=head.children[1];"
+            "const btns=[];for(const b of actions.children){"
+            "btns.push(b.textContent);}"
+            "const meta=r.children[1];"
+            "info.push({id:r.dataset.id,name:head.children[0].textContent,"
+            "meta:meta?meta.textContent:null,btns,"
+            "corrupt:r.className.indexOf('is-corrupt')>=0});}"
+            "return {rows:info,emptyHidden:api.els.savesEmpty.hidden};"
+            "})()" % rows_js
+        )
+
+    def test_rows_render_all_fields_and_buttons(self):
+        expr = self._render("[%s,%s]" % (self._NORMAL, self._NORMAL2))
+        d = json.loads(js(expr))
+        self.assertEqual(d["emptyHidden"], True,
+                         "a non-empty list hides the empty state")
+        self.assertEqual(len(d["rows"]), 2)
+        r0 = d["rows"][0]
+        self.assertEqual(r0["id"], "act-1")
+        self.assertEqual(r0["name"], "Act Three")
+        self.assertIn("The Gilded Crypt", r0["meta"])
+        self.assertIn("24×16", r0["meta"])
+        self.assertIn("4 tokens", r0["meta"])
+        self.assertEqual(r0["btns"], ["Load", "Delete"])
+        self.assertFalse(r0["corrupt"])
+
+    def test_empty_list_shows_empty_state(self):
+        d = json.loads(js(self._render("[]")))
+        self.assertEqual(d["rows"], [])
+        self.assertEqual(d["emptyHidden"], False,
+                         "an empty list shows 'No saves yet.'")
+
+    def test_corrupt_row_is_warning_and_delete_only(self):
+        d = json.loads(js(self._render("[%s]" % self._CORRUPT)))
+        r = d["rows"][0]
+        self.assertTrue(r["corrupt"], "corrupt rows are flagged")
+        self.assertIn("⚠", r["name"], "corrupt rows show the ⚠ marker")
+        self.assertIn("corrupt", r["name"])
+        self.assertEqual(r["btns"], ["Delete"],
+                         "a corrupt row offers Delete ONLY (no Load)")
+
+    def test_renders_newest_first_in_api_order(self):
+        # The list is rendered in the API's order (created_at desc); the
+        # first row is the newest save.
+        expr = self._render("[%s,%s]" % (self._NORMAL, self._NORMAL2))
+        d = json.loads(js(expr))
+        self.assertEqual([r["id"] for r in d["rows"]],
+                         ["act-1", "old-1"])
+
+    def test_empty_state_copy(self):
+        with open(INDEX, encoding="utf-8") as fh:
+            html = fh.read()
+        self.assertIn("No saves yet.", html, "sidebar empty-state copy")
+        self.assertIn("No saves yet. Save one from the map view's Saves panel.",
+                      html, "tab empty-state copy (E1)")
+
+
+class TestSavesAction(SavesBase):
+    """AC13 — the save action fires POST /api/saves with the name; the
+    overwrite path sends the explicit id; server errors toast verbatim.
+    """
+
+    def test_save_fires_post_with_name(self):
+        expr = self._gm(
+            "api._fetch.reset();"
+            "api._fetch.responses=["
+            + self._fetch_resp({"ok": True, "id": "act-1", "name": "My Label",
+                                "map_name": "Crypt", "width": 6, "height": 4,
+                                "created_at": "2025-01-01T12:00:00",
+                                "entity_count": 3}) + ","
+            + self._fetch_resp({"saves": [{"id": "act-1", "name": "My Label",
+                                            "map_name": "Crypt", "width": 6,
+                                            "height": 4,
+                                            "created_at": "2025-01-01T12:00:00",
+                                            "entity_count": 3}]}) + "]"
+            ";return api.saveCurrentMap('My Label').then(()=>{"
+            "const post=api._fetch.sent.find(s=>"
+            "s.url==='/api/saves'&&s.opts&&s.opts.method==='POST');"
+            "return {url:post?post.url:null,"
+            "body:post?JSON.parse(post.opts.body):null," 
+            "cleared:api.els.saveName.value===''};});"  # noqa: E501
+        )
+        d = json.loads(js(expr))
+        self.assertEqual(d["url"], "/api/saves")
+        self.assertEqual(d["body"], {"name": "My Label"},
+                         "a non-blank label is sent as {name}")
+
+    def test_save_blank_label_sends_no_name(self):
+        # Blank label ⇒ no `name` key (the server defaults to the map name).
+        expr = self._gm(
+            "api._fetch.reset();"
+            "api._fetch.responses=["
+            + self._fetch_resp({"ok": True, "id": "m-1", "name": "Crypt",
+                                "map_name": "Crypt", "width": 6, "height": 4,
+                                "created_at": "2025-01-01T12:00:00",
+                                "entity_count": 0}) + ","
+            + self._fetch_resp({"saves": []}) + "]"
+            ";return api.saveCurrentMap('').then(()=>{"
+            "const post=api._fetch.sent.find(s=>"
+            "s.url==='/api/saves'&&s.opts&&s.opts.method==='POST');"
+            "return {body:post?JSON.parse(post.opts.body):null};});"
+        )
+        d = json.loads(js(expr))
+        self.assertNotIn("name", d["body"],
+                         "a blank label must not send a name key")
+
+    def test_save_conflict_overwrite_sends_id(self):
+        # E2: an existing same-named save → Overwrite sends {name, id}.
+        expr = self._gm(
+            "api.state.saves=[%s];" % self._NORMAL +
+            "api._fetch.reset();"
+            "api._fetch.responses=["
+            + self._fetch_resp({"ok": True, "id": "act-1", "name": "Act Three",
+                                "map_name": "The Gilded Crypt", "width": 24,
+                                "height": 16, "created_at": "2025-01-01T12:00:00",
+                                "entity_count": 5}) + ","
+            + self._fetch_resp({"saves": []}) + "]"
+            ";return api.saveCurrentMap('Act Three',"
+            "{overwriteId:'act-1'}).then(()=>{"
+            "const post=api._fetch.sent.find(s=>"
+            "s.url==='/api/saves'&&s.opts&&s.opts.method==='POST');"
+            "return {body:post?JSON.parse(post.opts.body):null};});"
+        )
+        d = json.loads(js(expr))
+        self.assertEqual(d["body"], {"name": "Act Three", "id": "act-1"},
+                         "overwrite sends the explicit id")
+
+    def test_save_conflict_shows_inline_confirm(self):
+        # A matching label surfaces the inline Save-as-new / Overwrite
+        # confirm row (no window.confirm).
+        expr = self._gm(
+            "api.state.saves=[%s];" % self._NORMAL +
+            "api.els.saveName.value='Act Three';"
+            "api.onSaveCurrentMapClick();"
+            "const kids=api.els.saveConfirm.children.map(c=>c.textContent);"
+            "return {hidden:api.els.saveConfirm.hidden,msg:"
+            "api.els.saveConfirm.textContent,kids};"
+        )
+        d = json.loads(js(expr))
+        self.assertFalse(d["hidden"])
+        self.assertIn('A save named "Act Three" exists.', d["msg"])
+        self.assertIn("Save as new", d["kids"])
+        self.assertIn("Overwrite", d["kids"])
+
+    def test_save_error_toasts_server_message(self):
+        # 409 (no active session, E9) — the POST is still fired, and the
+        # server's error message is surfaced verbatim as an error toast.
+        expr = self._gm(
+            "api._fetch.reset();"
+            "api._fetch.response="
+            "{ok:false,status:409,json:async()=>({"
+            'error:"no active map session — join as GM and open a map first"'
+            "})};"
+            "api.els.toasts.children.length=0;"
+            "return api.saveCurrentMap('X').then(()=>{"
+            "const msgs=api.els.toasts.children.map(t=>"
+            "t.children[0]?t.children[0].textContent:null);"
+            "return {sentPost:api._fetch.sent.some(s=>"
+            "s.url==='/api/saves'&&s.opts&&s.opts.method==='POST'),"
+            "msgs};});"
+        )
+        d = json.loads(js(expr))
+        self.assertTrue(d["sentPost"], "the save POST is fired")
+        self.assertTrue(
+            any("no active map session" in (m or "") for m in d["msgs"]),
+            f"server 409 message must toast verbatim: {d['msgs']}")
+
+
+class TestSavesLoad(SavesBase):
+    """AC13/AC14 — load fires POST /api/saves/{id}/load then use_map on the
+    SAME socket; the rejoin note appears. 404 toasts + drops the row.
+    """
+
+    def test_load_fires_post_then_use_map(self):
+        expr = self._gm(
+            "api._send.reset();"
+            "api._fetch.reset();"
+            "api._fetch.responses=["
+            + self._fetch_resp({"ok": True, "id": "smap-99", "save_id": "act-1",
+                                "name": "The Gilded Crypt", "width": 24,
+                                "height": 16, "entity_count": 4}) + ","
+            + self._fetch_resp({"saves": []}) + "]"
+            ";return api.loadSave('act-1').then(()=>{"
+            "const load=api._fetch.sent.find(s=>"
+            "s.url==='/api/saves/act-1/load');"
+            "const use=api._send.sent.find(m=>m.type==='use_map');"
+            "return {loadUrl:load?load.url:null,"
+            "loadMethod:load?load.opts.method:null,"
+            "useMap:use||null,sockets:api._send.urls.length};});"
+        )
+        d = json.loads(js(expr))
+        self.assertEqual(d["loadUrl"], "/api/saves/act-1/load")
+        self.assertEqual(d["loadMethod"], "POST")
+        # use_map carries the FRESH registry id returned by the load, on the
+        # SAME socket (no new WebSocket constructed → BUG-002-safe).
+        self.assertEqual(d["useMap"], {"type": "use_map", "map_id": "smap-99"})
+
+    def test_load_shows_rejoin_note(self):
+        expr = self._gm(
+            "api._fetch.reset();"
+            "api._fetch.responses=["
+            + self._fetch_resp({"ok": True, "id": "smap-1", "save_id": "act-1",
+                                "name": "The Gilded Crypt", "width": 24,
+                                "height": 16, "entity_count": 4}) + ","
+            + self._fetch_resp({"saves": []}) + "]"
+            ";return api.loadSave('act-1').then(()=>({"
+            "noteHidden:api.els.savesRejoinNote.hidden," 
+            "noteText:api.els.savesRejoinNote.textContent,"
+            "tabNoteHidden:api.els.savesTabRejoinNote.hidden}));"
+        )
+        d = json.loads(js(expr))
+        self.assertFalse(d["noteHidden"], "a load with characters shows the note")
+        self.assertIn("join with the same names", d["noteText"],
+                      "the rejoin note must say join with the same names")
+        self.assertIn("reclaim", d["noteText"])
+        self.assertFalse(d["tabNoteHidden"],
+                         "the note also shows in the Saved maps tab")
+
+    def test_load_zero_entities_hides_note(self):
+        # A save with no player characters (entity_count 0) → no rejoin note.
+        expr = self._gm(
+            "api._fetch.reset();"
+            "api._fetch.responses=["
+            + self._fetch_resp({"ok": True, "id": "smap-1", "save_id": "act-1",
+                                "name": "Crypt", "width": 24, "height": 16,
+                                "entity_count": 0}) + ","
+            + self._fetch_resp({"saves": []}) + "]"
+            ";return api.loadSave('act-1').then(()=>({"
+            "noteHidden:api.els.savesRejoinNote.hidden}));"
+        )
+        d = json.loads(js(expr))
+        self.assertTrue(d["noteHidden"])
+
+    def test_load_404_toasts_and_drops_row(self):
+        # Missing/corrupt save → 404 → error toast with the server message
+        # and the row is dropped from the local list (re-GET).
+        expr = self._gm(
+            "api.state.saves=[%s];" % self._NORMAL +
+            "api._fetch.reset();"
+            "api._fetch.responses=["
+            "{ok:false,status:404,json:async()=>"
+            '({error:"save not found: act-1"})},'
+            + self._fetch_resp({"saves": []}) + "]"
+            ";return api.loadSave('act-1').then(()=>({"
+            "drops:api.state.saves.length}));"
+        )
+        d = json.loads(js(expr))
+        self.assertEqual(d["drops"], 0,
+                         "a 404 drops the save from the local list")
+
+
+class TestBug014PlayerRejoinToast(SavesBase):
+    """BUG-014 — the player's "your character … has been restored." rejoin
+    toast was dead code: in onWelcome, applyState ran BEFORE the block, so
+    for a name-rebound player state.youEntity was already truthy (the guard
+    !state.youEntity could never fire) AND state.entities was [] (a player's
+    roster), so .entities.find() could never match. Because a fresh spawn
+    and a save rebind produce byte-identical you/you_entity/players on the
+    frozen wire, no client-only signal can tell them apart — the server now
+    sets an ADDITIVE welcome-only flag you.rebound only on a save-load name
+    rebind (GameSession.join, off the owner_name match), and onWelcome keys
+    off it.
+
+    Two regression guards:
+    * a name-rebound welcome (you.rebound:true, you_entity:the saved
+      character, entities:[]) FIRES the spec §7.5 toast;
+    * a fresh-token join (no you.rebound) does NOT fire it — only the
+      standard "Welcome, <name>." toast.
+    """
+
+    _MAP = js_map_literal({
+        "name": "m", "width": 6, "height": 4,
+        "cells": [["floor"] * 6 for _ in range(4)],
+    })
+
+    @staticmethod
+    def _player_welcome_expr(you):
+        """An onWelcome for a PLAYER welcome (the frozen wire shape: entities
+        is [], own character rides along as you_entity), capturing every
+        span's textContent at creation time so the toasts are readable after
+        the render pass, then returning {toasts}. ``you`` is a JS object
+        literal."""
+        return (
+            "(()=>{"
+            "const doc=api.document;const toasts=[];"
+            "const realCreate=doc.createElement;"
+            "doc.createElement=(t)=>{const el=realCreate(t);"
+            "if(t==='span')toasts.push(()=>el.textContent);return el};"
+            "api.onWelcome({type:'welcome',you:{" + you + "},"
+            "map:" + TestBug014PlayerRejoinToast._MAP + ",entities:[],"
+            "you_entity:{id:'e1',name:'Alice',kind:'player',team:'party',"
+            "x:1,y:1},players:[],awareness:[],fog:false});"
+            "doc.createElement=realCreate;"
+            "return {toasts:toasts.map(f=>f())};})()"
+        )
+
+    @staticmethod
+    def _has(toasts, *needles):
+        """True if any captured toast string contains every needle. We search
+        the DECODED strings (not a json.dumps blob) so the em-dash and
+        nested double-quotes match verbatim."""
+        return any(all(n in t for n in needles) for t in toasts
+                   if isinstance(t, str))
+
+    def test_rebound_welcome_fires_restored_toast(self):
+        # A player joined with a name matching an unclaimed saved entity:
+        # the server set you.rebound on the welcome AND you_entity carries
+        # the reclaimed character — the spec §7.5 toast fires.
+        you = ("id:'p2',name:'Alice',role:'player',entity_id:'e1',"
+               "rebound:true")
+        d = json.loads(js(self._player_welcome_expr(you)))
+        msgs = [m for m in d["toasts"] if isinstance(m, str) and m]
+        self.assertTrue(
+            self._has(msgs, "Welcome back, Alice",
+                      "your character \"Alice\" has been restored."),
+            "the name-rebound rejoin toast must fire: %r" % msgs)
+        # … alongside the standard welcome (two toasts total).
+        self.assertTrue(self._has(msgs, "Welcome, Alice."),
+                        "the standard welcome toast must still fire: %r" % msgs)
+
+    def test_fresh_token_join_does_not_fire_restored_toast(self):
+        # A brand-new player (no you.rebound flag — the fresh-spawn join)
+        # gets only the standard welcome; the rejoin toast must NOT fire.
+        you = "id:'p2',name:'Alice',role:'player',entity_id:'e1'"
+        d = json.loads(js(self._player_welcome_expr(you)))
+        msgs = [m for m in d["toasts"] if isinstance(m, str) and m]
+        self.assertFalse(
+            self._has(msgs, "has been restored."),
+            "a fresh-token join must not get the rejoin toast: %r" % msgs)
+        self.assertFalse(self._has(msgs, "Welcome back"),
+                         "a fresh-token join must not get the rejoin toast: %r"
+                         % msgs)
+        self.assertTrue(
+            self._has(msgs, "Welcome, Alice."),
+            "a fresh join still gets the standard welcome toast: %r" % msgs)
+
+
+class TestSavesDelete(SavesBase):
+    """AC18 — delete fires DELETE /api/saves/{id}; 200 removes + toasts.
+    """
+
+    def test_delete_fires_delete(self):
+        expr = self._gm(
+            "api.state.saves=[%s];" % self._NORMAL +
+            "api._fetch.reset();"
+            "api._fetch.responses=["
+            + self._fetch_resp({"ok": True}) + ","
+            + self._fetch_resp({"saves": []}) + "]"
+            ";return api.deleteSave('act-1').then(()=>{"
+            "const del=api._fetch.sent.find(s=>"
+            "s.url==='/api/saves/act-1'&&"
+            "s.opts&&s.opts.method==='DELETE');"
+            "return {url:del?del.url:null,gone:api.state.saves.length};});"
+        )
+        d = json.loads(js(expr))
+        self.assertEqual(d["url"], "/api/saves/act-1")
+        self.assertEqual(d["gone"], 0)
+
+    def test_delete_404_toasts(self):
+        # Deleting an unknown id → 404 → the server's error toasts.
+        expr = self._gm(
+            "api._fetch.reset();"
+            "api._fetch.responses=["
+            "{ok:false,status:404,json:async()=>"
+            '({error:"save not found: nope"})},'
+            + self._fetch_resp({"saves": []}) + "]"
+            ";return api.deleteSave('nope').then(()=>({"
+            "fired:api._fetch.sent.some(s=>"
+            "s.url==='/api/saves/nope'&&s.opts&&"
+            "s.opts.method==='DELETE')}));"
+        )
+        d = json.loads(js(expr))
+        self.assertTrue(d["fired"])
+
+
+class TestSavesTabFlow(SavesBase):
+    """AC14 — the lobby 'Saved maps' tab: selecting it renders rows; Load
+    posts then shows the shared preview → 'Open map in session' (use_map).
+    """
+
+    def test_select_saves_tab_renders_rows(self):
+        expr = self._gm(
+            "api.state.saves=[%s,%s];" % (self._NORMAL, self._NORMAL2) +
+            "api.els.uploadView.dataset.state='idle';"
+            "api.renderSavesTab();"
+            "const rows=api.els.savesTabList.children;"
+            "return {count:rows.length,"
+            "emptyHidden:api.els.savesTabEmpty.hidden};"
+        )
+        d = json.loads(js(expr))
+        self.assertEqual(d["count"], 2)
+        self.assertTrue(d["emptyHidden"])
+
+    def test_tab_load_posts_then_previews(self):
+        # Load from the tab: POST …/load → GET /api/maps/<new id> → the
+        # shared preview (title 'Loaded map', source pane hidden, start
+        # enabled) → "Open map in session" later fires use_map.
+        cells = "Array.from({length:4},()=>Array(6).fill('floor'))"
+        expr = self._gm(
+            "api._send.reset();"
+            "api._fetch.reset();"
+            "api._fetch.responses=["
+            + self._fetch_resp({"ok": True, "id": "smap-55", "save_id": "act-1",
+                                "name": "The Gilded Crypt", "width": 6,
+                                "height": 4, "entity_count": 2}) + ","
+            "{ok:true,status:200,json:async()=>("
+            "{id:'smap-55',name:'The Gilded Crypt',width:6,height:4,"
+            "cells:" + cells + ",thumbnail:null})},"
+            + self._fetch_resp({"saves": []}) + "]"
+            ";return api.loadSaveFromTab('act-1').then(()=>{"
+            "const post=api._fetch.sent.find(s=>"
+            "s.url==='/api/saves/act-1/load');"
+            "const use=api._send.sent.find(m=>m.type==='use_map');"
+            "return {posted:!!post,previewState:"
+            "api.els.uploadView.dataset.state,"
+            "title:api.els.previewTitle.textContent,"
+            "paneSourceHidden:api.els.paneSource.hidden,"
+            "startEnabled:!api.els.btnStartMap.disabled,"
+            "noUseMapYet:!use,"
+            "uploadedIsSave:api.state.uploadedMap?"
+            "api.state.uploadedMap.isLoadedSave:null,"
+            "note:api.els.savesTabRejoinNote.hidden};});"
+        )
+        d = json.loads(js(expr))
+        self.assertTrue(d["posted"])
+        self.assertEqual(d["previewState"], "preview")
+        self.assertEqual(d["title"], "Loaded map")
+        self.assertTrue(d["paneSourceHidden"],
+                        "a loaded save has no source image (A7)")
+        self.assertTrue(d["startEnabled"])
+        self.assertTrue(d["noUseMapYet"],
+                        "use_map is NOT sent until 'Open map in session'")
+        self.assertTrue(d["uploadedIsSave"])
+        self.assertFalse(d["note"], "the rejoin note shows for a loaded save")
+
+    def test_tab_open_in_session_sends_use_map_same_socket(self):
+        # With a loaded save previewing, "Open map in session" sends exactly
+        # one use_map on the SAME socket and enters the map view.
+        cells = "Array.from({length:4},()=>Array(6).fill('floor'))"
+        expr = self._gm(
+            "api.state.uploadedMap={id:'smap-55',name:'The Gilded Crypt',"
+            "width:6,height:4,cells:" + cells + ",isLoadedSave:true};"
+            "api.els.uploadView.dataset.state='preview';"
+            "api._send.reset();"
+            "api.openUploadedMap();"
+            "const use=api._send.sent.find(m=>m.type==='use_map');"
+            "return {use:use||null,sockets:api._send.urls.length};"
+        )
+        d = json.loads(js(expr))
+        self.assertEqual(d["use"], {"type": "use_map", "map_id": "smap-55"})
+
+
+class TestSavesSaveMapState(SavesBase):
+    """AC13/E9 — the preview 'Save map state' button: enabled only while a
+    map is open in a live GM session; saves the map name; 409 toasts.
+    """
+
+    def test_button_enabled_when_gm_has_map(self):
+        expr = self._gm(
+            "api.els.uploadView.dataset.state='preview';"
+            "return {enabled:!api.els.btnSaveMapState.disabled};"
+        )
+        d = json.loads(js(expr))
+        self.assertTrue(d["enabled"],
+                        "GM with an open map ⇒ Save map state enabled")
+
+    def test_button_disabled_without_grid(self):
+        expr = self._gm(
+            "api.state.grid=null;"
+            "api.syncSaveMapStateButton();"
+            "return {disabled:api.els.btnSaveMapState.disabled};"
+        )
+        d = json.loads(js(expr))
+        self.assertTrue(d["disabled"],
+                        "no open grid ⇒ Save map state disabled")
+
+    def test_button_disabled_for_player(self):
+        expr = (
+            "(()=>{const map={name:'m',width:6,height:4,cells:Array.from("
+            "{length:4},()=>Array(6).fill('floor'))};"
+            "api.onWelcome({type:'welcome',"
+            "you:{id:'p2',name:'Alice',role:'player',entity_id:'e2'},"
+            "map,entities:[],you_entity:{id:'e2',name:'Alice',"
+            "kind:'player',team:'party',x:1,y:1},players:[],"
+            "awareness:[],fog:false});"
+            "return {disabled:api.els.btnSaveMapState.disabled};})()"
+        )
+        d = json.loads(js(expr))
+        self.assertTrue(d["disabled"], "players never get Save map state")
 
 
 if __name__ == '__main__':

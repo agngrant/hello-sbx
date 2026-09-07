@@ -582,5 +582,404 @@ class TestSafeDoorRest(ServerTestCase):
             maps_registry.pop(map_id, None)
 
 
+class TestSaves(ServerTestCase):
+    """Save-load spec §5: the additive REST routes (backend scope).
+
+    * ``GET /api/saves`` — any role, no join required (list from saves/ scan)
+    * ``POST /api/saves`` — GM only (401 player-only session, 409 no session,
+      400 bad body/name); 200 = the save record + the bundle written to disk
+    * ``POST /api/saves/{id}/load`` — GM only; missing/corrupt → 404; 200 =
+      a fresh registry map id (the GM opens it via the existing ``use_map``)
+    * ``DELETE /api/saves/{id}`` — GM only; missing → 404
+
+    Role source (spec A8): the GM of the in-memory ``default`` session. The
+    server runs in THIS process (the ThreadingHTTPServer adapter wraps the
+    FastAPI app in a background thread of the same process), so the tests
+    build the ``default`` session directly via ``app.main`` — deterministic
+    and independent of WS join ordering. ``sessions["default"]`` is cleared
+    after every test so no state leaks between tests.
+
+    ``app.saves.SAVES_DIR`` is redirected to a per-test temp dir (created
+    lazily by save_bundle; removed in teardown) so the repo-root saves/ is
+    never touched.
+    """
+
+    def setUp(self):
+        import app.saves as save_store
+        from app.main import get_session as _gs
+        from app.grid import build_sample_map
+        from app.models import Player
+
+        self._orig_dir = save_store.SAVES_DIR
+        self._tmp = f"/tmp/ld-saves-test-{os.getpid()}-{id(self)}"
+        save_store.SAVES_DIR = self._tmp
+        # A deterministic default session on a FRESH sample-dungeon grid,
+        # with a GM present (the save routes' role source, spec A8).
+        self._session = _gs("default")
+        self._session.grid = build_sample_map()
+        self._session.players.clear()
+        self._session.entities.clear()
+        self._gm = Player(id="gm-0", name="GM", role="gm")
+        self._session.players[self._gm.id] = self._gm
+
+    def tearDown(self):
+        import shutil
+        import app.saves as save_store
+        from app.main import sessions
+
+        save_store.SAVES_DIR = self._orig_dir
+        shutil.rmtree(self._tmp, ignore_errors=True)
+        # Leave the default session empty (its grid may now be a map loaded
+        # by a test; reset to a fresh sample so other consumers see a grid).
+        from app.grid import build_sample_map
+        if "default" in sessions:
+            sessions["default"].players.clear()
+            sessions["default"].entities.clear()
+            sessions["default"].grid = build_sample_map()
+
+    # -- helpers ------------------------------------------------------------
+
+    def _players(self):
+        from app.main import sessions
+        return sessions["default"].players
+
+    def _add_player(self, name: str, entity_id: str | None = None):
+        from app.models import Player
+
+        p = Player(id=f"pl-{name}", name=name, role="player")
+        p.entity_id = entity_id
+        self._players()[p.id] = p
+        return p
+
+    def _make_player_only(self):
+        # A8: a session that exists with players but NO GM (a player-only
+        # session) -> 401 for save/load/delete.
+        del self._players()[self._gm.id]
+        self._add_player("Loner")
+
+    def _list(self):
+        status, _, body = self.get_json("/api/saves")
+        self.assertEqual(status, 200)
+        return body
+
+    def _post_save(self, **body):
+        return self.post_json("/api/saves", body)
+
+    def _load(self, save_id: str):
+        status, _, data = self.request("POST", f"/api/saves/{save_id}/load")
+        return status, json.loads(data)
+
+    # -- GET /api/saves (any role, no join) ----------------------------------
+
+    def test_list_empty_when_no_dir(self):
+        # E1: no saves dir → {"saves": []}; no session/join needed at all.
+        self.assertEqual(self._list(), {"saves": []})
+
+    def test_list_shape_and_order(self):
+        status, d1 = self._post_save(name="First")
+        self.assertEqual(status, 200)
+        status, d2 = self._post_save(name="Second")
+        self.assertEqual(status, 200)
+        listing = self._list()["saves"]
+        self.assertEqual([r["id"] for r in listing], [d2["id"], d1["id"]])
+        self.assertEqual(
+            set(listing[0].keys()),
+            {"id", "name", "map_name", "width", "height",
+             "created_at", "entity_count"},
+        )
+        # Record reflects the live session (sample dungeon, 16x12).
+        self.assertEqual(listing[0]["map_name"], "Sample Dungeon")
+        self.assertEqual((listing[0]["width"], listing[0]["height"]), (16, 12))
+        self.assertEqual(listing[0]["name"], "Second")
+
+    def test_list_flags_corrupt_file(self):
+        # A12: a non-JSON file in saves/ is listed with "corrupt": true.
+        os.makedirs(self._tmp, exist_ok=True)
+        with open(os.path.join(self._tmp, "corrupt.json"), "w") as f:
+            f.write("{oops")
+        listing = self._list()["saves"]
+        self.assertEqual(len(listing), 1)
+        self.assertEqual(listing[0]["id"], "corrupt")
+        self.assertTrue(listing[0]["corrupt"])
+
+    # -- POST /api/saves ------------------------------------------------------
+
+    def test_gm_save_writes_bundle_to_disk(self):
+        # AC1: 200 record correct AND the file is on disk with the full
+        # state (grid + entities carrying owner_name = the player's NAME).
+        from app.models import Entity
+        from app.main import sessions
+
+        s = sessions["default"]
+        self._add_player("Alice", entity_id="e1")
+        s.entities["e1"] = Entity(id="e1", name="Alice", kind="player",
+                                  team="party", x=1, y=1, owner="pl-Alice")
+        status, data = self._post_save(name="Act One")
+        self.assertEqual(status, 200)
+        self.assertTrue(data["ok"])
+        self.assertEqual(data["name"], "Act One")
+        self.assertEqual(data["map_name"], "Sample Dungeon")
+        self.assertEqual((data["width"], data["height"]), (16, 12))
+        self.assertEqual(data["entity_count"], 1)
+        self.assertTrue(data["created_at"])
+        self.assertTrue(data["id"].startswith("act-one-"))
+        # Real persistence — the file exists and parses from disk:
+        path = os.path.join(self._tmp, f"{data['id']}.json")
+        self.assertTrue(os.path.isfile(path))
+        with open(path, "r", encoding="utf-8") as f:
+            bundle = json.load(f)
+        self.assertEqual(bundle["id"], data["id"])
+        self.assertEqual(bundle["name"], "Act One")
+        self.assertEqual(bundle["map_name"], "Sample Dungeon")
+        self.assertEqual(bundle["width"], 16)
+        self.assertEqual(bundle["height"], 12)
+        self.assertEqual(bundle["entity_count"], 1)
+        self.assertEqual(len(bundle["entities"]), 1)
+        ent = bundle["entities"][0]
+        self.assertEqual(ent["id"], "e1")
+        self.assertEqual(ent["x"], 1)
+        self.assertEqual(ent["y"], 1)
+        self.assertEqual(ent["kind"], "player")
+        self.assertEqual(ent["team"], "party")
+        self.assertEqual(ent["owner"], "pl-Alice")
+        # owner_name is the controlling player's NAME (not the id):
+        self.assertEqual(ent["owner_name"], "Alice")
+
+    def test_gm_save_captures_gm_controlled_entities_with_null_owner_name(self):
+        from app.models import Entity
+        from app.main import sessions
+
+        s = sessions["default"]
+        s.entities["g1"] = Entity(id="g1", name="Goblin", kind="enemy",
+                                  team="hostile", x=5, y=5, owner=None)
+        status, data = self._post_save()
+        self.assertEqual(status, 200)
+        with open(os.path.join(self._tmp, f"{data['id']}.json"),
+                  "r", encoding="utf-8") as f:
+            bundle = json.load(f)
+        ent = next(e for e in bundle["entities"] if e["id"] == "g1")
+        self.assertIsNone(ent["owner_name"])  # GM-controlled → null
+        # No label ⇒ the record's name falls back to the map name.
+        self.assertEqual(data["name"], "Sample Dungeon")
+
+    def test_gm_save_snapshot_is_frozen_copy(self):
+        # AC17: creating a save must not mutate the live session — the grid
+        # object is not swapped and the entity is not moved by the save.
+        from app.models import Entity
+        from app.main import sessions
+
+        s = sessions["default"]
+        self._add_player("Alice", entity_id="e1")
+        s.entities["e1"] = Entity(id="e1", name="Alice", kind="player",
+                                  team="party", x=1, y=1, owner="pl-Alice")
+        pos_before = (s.entities["e1"].x, s.entities["e1"].y)
+        grid_before = s.grid
+        status, _ = self._post_save(name="Frozen")
+        self.assertEqual(status, 200)
+        self.assertIs(s.grid, grid_before)          # grid not swapped
+        self.assertEqual((s.entities["e1"].x, s.entities["e1"].y),
+                         pos_before)                # entity not moved
+
+    def test_save_name_default_and_trim(self):
+        status, data = self._post_save(name="  Padded  ")
+        self.assertEqual(status, 200)
+        self.assertEqual(data["name"], "Padded")
+        self.assertTrue(data["id"].startswith("padded-"))
+
+    def test_save_overwrite_by_explicit_id(self):
+        # E2 "Overwrite": an explicit id replaces that file in place.
+        _, d1 = self._post_save(name="V1")
+        status, d2 = self._post_save(name="V2", id=d1["id"])
+        self.assertEqual(status, 200)
+        self.assertEqual(d2["id"], d1["id"])
+        listing = self._list()["saves"]
+        self.assertEqual(len(listing), 1)
+        self.assertEqual(listing[0]["id"], d1["id"])
+        self.assertEqual(listing[0]["name"], "V2")
+
+    def test_save_as_new_same_name_is_distinct(self):
+        # E2 "Save as new": same label twice → two distinct ids.
+        _, d1 = self._post_save(name="T1")
+        _, d2 = self._post_save(name="T1")
+        self.assertNotEqual(d1["id"], d2["id"])
+        self.assertEqual(
+            {r["id"] for r in self._list()["saves"]}, {d1["id"], d2["id"]})
+
+    def test_save_validation_errors(self):
+        # (body, want_status, want_data); a dict/list is JSON-encoded, a
+        # string is sent RAW as the body.
+        cases = [
+            ({"name": 42}, 400, {"error": "'name' must be a string"}),
+            ({"name": "x" * 41}, 400, {"error": "'name' must be a string"}),
+            ([1, 2, 3], 400, {"error": "request body must be a JSON object"}),
+            ({"name": "x", "id": 7}, 400, {"error": "'id' must be a non-empty string"}),
+            ({"name": "x", "id": "../etc"}, 400, {"error": "'id' must be a valid save id"}),
+        ]
+        for body, want_status, want_data in cases:
+            with self.subTest(body=body):
+                if isinstance(body, (dict, list)):
+                    status, data = self.post_json("/api/saves", body)
+                else:
+                    status, _, raw = self.request("POST", "/api/saves",
+                                                  body=body.encode(),
+                                                  headers={"Content-Type": "application/json"})
+                    data = json.loads(raw)
+                self.assertEqual(status, want_status)
+                self.assertEqual(data, want_data)
+
+    def test_save_malformed_json_400(self):
+        status, _, raw = self.request("POST", "/api/saves", body=b"{not json",
+                                      headers={"Content-Type": "application/json"})
+        self.assertEqual(status, 400)
+        self.assertEqual(json.loads(raw), {"error": "request body must be JSON"})
+
+    def test_save_no_session_409(self):
+        # A8/E9: no default session at all → 409, clear + actionable.
+        from app.main import sessions
+        sessions.pop("default", None)
+        status, data = self.post_json("/api/saves", {"name": "x"})
+        self.assertEqual(status, 409)
+        self.assertEqual(data, {"error":
+            "no active map session — join as GM and open a map first"})
+
+    # -- GM-only perms (AC11) -------------------------------------------------
+
+    def _player_only_session(self):
+        # A8: a session exists with NO GM (a player-only session) -> 401.
+        # Drop the GM that setUp added; keep a player so a session exists.
+        del self._players()[self._gm.id]
+        self._add_player("Loner")
+
+    def test_save_player_only_401(self):
+        self._player_only_session()
+        status, data = self.post_json("/api/saves", {"name": "x"})
+        self.assertEqual(status, 401)
+        self.assertEqual(data, {"error": "only the GM can save"})
+
+    def test_load_player_only_401(self):
+        self._player_only_session()
+        status, data = self._load("nope")
+        self.assertEqual(status, 401)
+        self.assertEqual(data, {"error": "only the GM can load"})
+
+    def test_delete_player_only_401(self):
+        self._player_only_session()
+        status, _, raw = self.request("DELETE", "/api/saves/nope")
+        self.assertEqual(status, 401)
+        self.assertEqual(json.loads(raw), {"error": "only the GM can delete"})
+
+    def test_load_and_delete_allowed_without_session(self):
+        # A8: with NO session at all, load/delete are permitted (a GM may
+        # load before players arrive). We make a save file directly and
+        # load it with no session present.
+        import app.saves as save_store
+        from app.grid import build_sample_map
+
+        sessions = __import__("app.main", fromlist=["sessions"]).sessions
+        sessions.pop("default", None)
+        sid = save_store.save_bundle(
+            {"name": "Pre", "created_at": "2025-01-01T00:00:00"},
+            build_sample_map(), [])
+        status, data = self._load(sid)
+        self.assertEqual(status, 200)
+        self.assertTrue(data["ok"])
+        self.assertEqual(data["save_id"], sid)
+        status, _, raw = self.request("DELETE", f"/api/saves/{sid}")
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(raw), {"ok": True})
+
+    # -- POST /api/saves/{id}/load -------------------------------------------
+
+    def test_load_missing_404(self):
+        # AC10(a): missing id → 404 clean shape.
+        status, data = self._load("nope")
+        self.assertEqual(status, 404)
+        self.assertEqual(data, {"error": "save not found: nope"})
+
+    def test_load_corrupt_404_and_healthy(self):
+        # AC10(b/c): unparseable + truncated → 404 (same shape as missing),
+        # no crash, server healthy, file untouched, list still works.
+        os.makedirs(self._tmp, exist_ok=True)
+        # (b) unparseable
+        with open(os.path.join(self._tmp, "bad.json"), "w") as f:
+            f.write("{not json")
+        status, data = self._load("bad")
+        self.assertEqual(status, 404)
+        self.assertEqual(data, {"error": "save not found: bad"})
+        self.assertEqual(open(os.path.join(self._tmp, "bad.json")).read(),
+                         "{not json")  # untouched
+        # (c) valid JSON, height mismatch
+        with open(os.path.join(self._tmp, "trunc.json"), "w") as f:
+            json.dump({"id": "trunc", "name": "t", "width": 2, "height": 1,
+                       "grid": {"name": "t", "width": 2, "height": 2,
+                                "cells": [["floor"] * 2, ["floor"] * 2]},
+                       "entities": []}, f)
+        status, data = self._load("trunc")
+        self.assertEqual(status, 404)
+        self.assertEqual(data, {"error": "save not found: trunc"})
+        # no partial registration (trunc produced no map)
+        status, _, maps = self.get_json("/api/maps")
+        self.assertNotIn("trunc", [m["id"] for m in maps["maps"]])
+        # server still healthy + list still works (corrupt flagged):
+        status, _, health = self.get_json("/health")
+        self.assertEqual(status, 200)
+        self.assertEqual(health, {"status": "ok"})
+        self.assertTrue(any(r.get("corrupt") for r in self._list()["saves"]))
+
+    def test_load_registers_fresh_independent_map(self):
+        # AC17/A10: load → fresh smap-* registry id; two loads of the same
+        # save → two DISTINCT maps; mutating one doesn't touch the other.
+        from app.main import maps_registry
+
+        _, s1 = self._post_save(name="RoundTrip")
+        status, d1 = self._load(s1["id"])
+        self.assertEqual(status, 200)
+        self.assertTrue(d1["ok"])
+        self.assertIn("smap-", d1["id"])
+        self.assertEqual(d1["save_id"], s1["id"])
+        self.assertEqual(d1["name"], "Sample Dungeon")
+        self.assertEqual((d1["width"], d1["height"]), (16, 12))
+        # Load again → a DIFFERENT fresh id (independent copy).
+        status, d2 = self._load(s1["id"])
+        self.assertEqual(status, 200)
+        self.assertNotEqual(d1["id"], d2["id"])
+        # The registered map serves the saved grid.
+        status, _, detail = self.get_json(f"/api/maps/{d1['id']}")
+        self.assertEqual(status, 200)
+        self.assertEqual(detail["name"], "Sample Dungeon")
+        # Independence: paint one copy, the other is untouched.
+        self.post_json(f"/api/maps/{d1['id']}/paint",
+                       {"x": 1, "y": 1, "cell_type": "wall"})
+        status, _, detail2 = self.get_json(f"/api/maps/{d2['id']}")
+        self.assertEqual(detail2["cells"][1][1], "floor")  # untouched
+        # The save file itself is untouched by the load + paint.
+        self.assertTrue(os.path.isfile(
+            os.path.join(self._tmp, f"{s1['id']}.json")))
+        # cleanup (avoid registry growth across tests)
+        maps_registry.pop(d1["id"], None)
+        maps_registry.pop(d2["id"], None)
+
+    # -- DELETE /api/saves/{id} ------------------------------------------------
+
+    def test_delete_removes_save(self):
+        # AC18: delete → 200, file gone, list omits it, re-delete → 404.
+        _, d = self._post_save(name="Doomed")
+        status, _, raw = self.request("DELETE", f"/api/saves/{d['id']}")
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(raw), {"ok": True})
+        self.assertFalse(os.path.exists(
+            os.path.join(self._tmp, f"{d['id']}.json")))
+        self.assertEqual(self._list()["saves"], [])
+        status, _, raw = self.request("DELETE", f"/api/saves/{d['id']}")
+        self.assertEqual(status, 404)
+        self.assertEqual(json.loads(raw),
+                         {"error": f"save not found: {d['id']}"})
+
+    def test_delete_missing_404(self):
+        status, _, raw = self.request("DELETE", "/api/saves/nope")
+        self.assertEqual(status, 404)
+        self.assertEqual(json.loads(raw), {"error": "save not found: nope"})
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -183,6 +183,38 @@ padlock / amber bar / amber arch — and appears in the legend.
 
 ---
 
+## Saving & loading the map (GM)
+
+The GM can snapshot the current map state to disk and reload it later — this
+is the fix for the old "no save/load" limitation. There are two GM-only
+surfaces that share one save list:
+
+- **Map view → right sidebar → `Saves` panel** (between GM Tools and
+  Awareness): the **Save current map** action (optional name, defaults to the
+  current map's name) plus a list of every save. Each row shows the name, map
+  name, W×H, token count, and date, with **Load** and **Delete**.
+- **New map view → `Saved maps` tab** (the third source tab, alongside Upload
+  and Generate): the lobby-reachable load menu — the natural place to restore
+  a save after a server restart, before players join.
+
+**Save** writes one self-contained JSON bundle (grid + doors + safe doors +
+every entity, each carrying its controlling player's **name**) to `saves/`.
+**Load** reads a save, registers it as a fresh, independent map, and the GM
+opens it the normal way — the sidebar sends `use_map` immediately; the Saved
+maps tab shows the standard preview with an **Open map in session** button.
+
+**Rejoining by name:** ownership is re-bound by player **name** (player ids
+are ephemeral). After a restart, when a player joins with a name matching a
+saved (GM-controlled) character, they reclaim that character at its saved
+position. Until then, saved characters wait as GM-controlled tokens, and the
+menu tells the GM that *players must join with the same names to reclaim
+their characters*. A corrupt save is listed with a ⚠ and a Delete-only action.
+
+This is REST-only (no new WebSocket messages); the save menu is GM-only and
+hidden from players.
+
+---
+
 ## Upload & automatic wall/doorway detection
 
 The GM uploads a **PNG or BMP** (the file picker offers only `.png, .bmp`). The
@@ -312,9 +344,16 @@ python -m unittest discover -s tests -t .   # also supported (suite is unittest-
 
 ## Limitations (v1)
 
-- **In-memory sessions.** Restarting the server starts fresh — there is **no
-  save/load of sessions or maps to disk** yet (the sample dungeon is re-registered at
-  startup; uploaded maps live in memory only).
+- **Sessions are in-memory; saves are a GM tool, not an auto-snapshot.**
+  A server restart clears the live session state, but the GM can **save the
+  current map to disk** (map view **Saves** panel or the New map **Saved maps**
+  tab) and **load** it back later (a fresh independent copy opened via the
+  normal map flow) — so a session's map state *can* persist across a restart
+  even though it is not snapshotted automatically. Saved maps live in the repo
+  root `saves/` dir (one JSON bundle per save; gitignored). Uploads and
+  generated maps that were never saved still live in memory only.
+  (GM-only; players rejoin by name to reclaim their saved characters —
+  see *Saving & loading* below.)
 - **Zoom / pan is discrete, not free-form.** The map is navigated with the
   "Map view" controls (sidebar) or the keyboard: 11 fixed zoom levels
   (**L0** = 6×5 cells … **L10** = 60×50) plus whole-cell panning (arrow
