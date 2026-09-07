@@ -23,7 +23,11 @@ All screens are single-page (no routing); views are shown/hidden via a
 5. **Paint tools live in the bottom control bar** (GM only), shared by the upload-preview
    and the live map.
 6. **Fog-of-war toggle in the top bar** is GM-operated; players see it as a read-only state.
-7. **No zoom/pan** in v1 — the grid always fits the available space (cell size is computed).
+7. **Pan & zoom** (added post-v1): the map may exceed the viewport — a **Map view** panel
+   in the right-hand `#sidebar` holds the arrow cluster (pan) and `−`/`+` (zoom) buttons, and
+   the same keys work (`←→↑↓` pan, `+`/`=` / `-` zoom). Discrete zoom levels run **6×5 (max)
+   → 60×50 (min)** visible cells; the view auto-fits the whole map on join / map swap
+   (see `docs/design/pan-zoom.md`).
 
 ---
 
@@ -429,8 +433,10 @@ above the awareness list or below — order in sidebar: **GM Tools → Awareness
 | Touch targets | 32px ok | **≥ 44px** on all buttons/toggles | **≥ 44px** |
 | Input | Mouse + keyboard | Tap (= click): select → tap destination; drag paints | Same |
 
-- **No zoom/pan** — canvas refits on `resize` (debounced 100 ms) and on
-  drawer open/close. This is the stated v1 trade-off (§0.7).
+- **Pan/zoom** (was the v1 trade-off, now added, §0.7): the canvas view refits to the whole
+  map only on join and map swap; on `resize` (debounced 100 ms) and on drawer open/close it
+  **keeps** the current zoom level and pan (re-clamped), never re-fitting. Pan/zoom itself is
+  driven by the right-hand Map view panel or the arrow / `+` / `−` keys (pan-zoom §2.5).
 - Drawer is not modal (canvas still visible behind scrim at 50% dim); `Esc` closes.
 - Portrait tablet: the fit-to-viewport math handles it; cell size shrinks,
   labels (GM name pills) hide below cell < 24px (dots/shape remain).
@@ -447,10 +453,12 @@ above the awareness list or below — order in sidebar: **GM Tools → Awareness
 - **Keyboard path** (canvas can't be tabbed, so the list is the a11y surface):
   - Awareness rows `tabindex="0"`; `Enter`/`Space` selects the entity
     (players: own row only selectable).
-  - With an entity selected, **arrow keys** send a one-cell `move` in that
-    direction (`{x±1|y±1}` with the other coordinate unchanged — server's A*
-    validates; one cell is always a legal move or a clean error).
-    `Shift+arrow` = move to the farthest reachable cell in that direction.
+  - ~~With an entity selected, arrow keys send a one-cell `move`…~~ **RETIRED
+    (pan-zoom spec A2):** the arrow keys no longer nudge the selected entity
+    (that was a wireframes §9 Iteration-0 behavior). They now **pan the map
+    view**; `+`/`=` and `-` **zoom** (see `docs/design/pan-zoom.md` §4).
+    Movement is by cell click/tap only (wireframes §4.5, unchanged), and the
+    awareness list keeps its `Tab`/`Enter`/`Space` keyboard surface.
   - `Esc` deselects / closes drawer / dismisses toast action.
 - **Focus:** 2px `#ffd43b` `:focus-visible` outline on every control.
 - **Live regions:** `#toasts` is `aria-live="polite"`; connection label changes
@@ -574,8 +582,10 @@ reconnect), `move` (click/keys), `paint` (drag), `create_entity` /
    rendering since `state` sends full `entities` to all clients.)
 4. **Paint over an occupied cell** is allowed; server keeps the entity in place
    (known limitation, fine for v1).
-5. **No zoom/pan** in v1 (fit-to-viewport only) — acceptable per the soft
-   requirements; grid caps at 60 cells so cells stay ≥ ~14px on tablet.
+5. **Pan & zoom** (added post-v1, superseding the original "no zoom/pan" trade-off):
+   discrete zoom levels 6×5 → 60×50 cells, right-hand Map view panel with an arrow cluster
+   (pan) and `−`/`+` buttons, arrow keys pan and `+`/`=` / `-` zoom; the view fits the whole
+   map on join / map swap and stays per-client (see `docs/design/pan-zoom.md`).
 6. `#toast-action` re-sends `override:true` **without** flipping
    `#override-toggle`.
 7. Keep a single cell-renderer function shared by `#map-canvas` and

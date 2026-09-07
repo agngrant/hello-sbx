@@ -203,6 +203,31 @@
       </div>
 
       <aside id="sidebar" aria-label="Sidebar">
+        <!-- Pan & Zoom (pan-zoom spec §3): "Map view" panel, FIRST sidebar
+             section — visible to BOTH roles (a player gets exactly one panel
+             here). 3×3 arrow cluster (pan) + zoom −/+ group + one-line
+             readout. <1024px it rides in the sidebar drawer via the existing
+             ☰ toggle (A13) — nothing is duplicated over the canvas. -->
+        <section id="nav-panel" class="panel">
+          <h2 class="section-label">Map view</h2>
+          <div class="nav-layout">
+            <div class="nav-arrows" role="group" aria-label="Pan the map">
+              <button id="nav-up"    class="nav-btn nav-up"    disabled aria-label="Pan up (ArrowUp)">↑</button>
+              <button id="nav-left"  class="nav-btn nav-left"  disabled aria-label="Pan left (ArrowLeft)">←</button>
+              <button id="nav-right" class="nav-btn nav-right" disabled aria-label="Pan right (ArrowRight)">→</button>
+              <button id="nav-down"  class="nav-btn nav-down"  disabled aria-label="Pan down (ArrowDown)">↓</button>
+            </div>
+            <div class="nav-zoom" role="group" aria-label="Zoom the map">
+              <div class="nav-zoom-row">
+                <button id="zoom-out" class="nav-btn" disabled aria-label="Zoom out (-)">−</button>
+                <button id="zoom-in"  class="nav-btn" disabled aria-label="Zoom in (+)">+</button>
+              </div>
+              <span class="nav-zoom-caption">zoom</span>
+            </div>
+          </div>
+          <p id="nav-readout" class="muted small">No map yet</p>
+        </section>
+
         <section id="entity-tools" class="panel gm-only">
           <h2 class="section-label">GM Tools</h2>
           <span class="muted small">Selected: <span id="sel-entity-name">None</span></span>

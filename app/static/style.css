@@ -312,6 +312,65 @@ input[type="file"] { color: var(--text-muted); }
 }
 .gm-field-row { display: flex; gap: var(--s2); align-items: center; margin: var(--s2) 0; }
 .gm-field-row select { flex: 1; min-width: 0; }
+/* Map view — pan & zoom nav panel (pan-zoom spec §3). Placed as the FIRST
+   sidebar section, visible to BOTH roles. Styling reuses the existing control
+   vocabulary: .tool-btn family fill on --chrome-bg, #39415a border, --r-control
+   radius, hover accent tint, 2px #ffd43b focus ring, :disabled { .45 opacity,
+   cursor: not-allowed }. */
+#nav-panel .nav-layout {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s4);
+}
+/* 3×3 arrow cluster — CSS grid, center cell empty (spatial anchor, matches
+   the on-map direction vocabulary). */
+.nav-arrows {
+  display: grid;
+  grid-template-columns: repeat(3, 32px);
+  grid-template-rows: repeat(3, 32px);
+  grid-template-areas: ". u ." "l . r" ". d .";
+  gap: 4px;
+  flex: 0 0 auto;
+}
+.nav-up { grid-area: u; }
+.nav-left { grid-area: l; }
+.nav-right { grid-area: r; }
+.nav-down { grid-area: d; }
+/* Zoom group: −/+ side by side at the TOP of the cluster height, with a 10px
+   "zoom" caption hanging below. */
+.nav-zoom {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  flex: 0 0 auto;
+}
+.nav-zoom-row { display: inline-flex; height: 32px; }
+.nav-zoom .nav-btn { margin: 0 4px; }
+.nav-zoom-caption { font-size: 10px; color: var(--text-muted); }
+.nav-btn {
+  font: inherit;
+  font-size: 16px;
+  line-height: 1;
+  color: var(--text);
+  background: var(--panel-bg);
+  border: 1px solid #39415a;
+  border-radius: var(--r-control);
+  width: 32px;
+  height: 32px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+}
+.nav-btn:hover:not(:disabled) {
+  border-color: var(--accent);
+  background: rgba(77, 171, 247, 0.12);
+}
+.nav-btn:disabled { opacity: 0.45; cursor: not-allowed; }
+#nav-readout { margin: var(--s3) 0 0; font-size: 12px; }
+
 /* Awareness GM field (docs/design/awareness-ring.md §5): compact number
    input in a .gm-field-row — the selected player token's awareness radius. */
 #awareness-input { flex: 0 0 auto; width: 72px; }
@@ -652,10 +711,13 @@ body.is-gm .legend-explored { display: none; }
   #sidebar.is-open { transform: translateX(0); }
   #sidebar-toggle { display: inline-block; }
   /* Touch targets ≥ 44px */
-  .btn, .tool-btn, .icon-btn, input[type="text"], input[type="number"], select {
+  .btn, .tool-btn, .icon-btn, .nav-btn, input[type="text"], input[type="number"], select {
     min-height: 44px;
   }
   .btn-small { min-height: 44px; }
+  /* 44×44 touch targets for the nav arrows + zoom (pan-zoom §3.2). */
+  .nav-btn { width: 44px; height: 44px; }
+  .nav-arrows { grid-template-columns: repeat(3, 44px); grid-template-rows: repeat(3, 44px); }
 }
 @media (min-width: 1024px) {
   #sidebar-toggle { display: none; }

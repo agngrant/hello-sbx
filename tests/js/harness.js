@@ -128,6 +128,7 @@ function makeEl() {
   const el = {
     id: "", textContent: "", value: "", checked: false,
     disabled: false, tabIndex: 0, innerHTML: "", files: [],
+    title: "",
     style: {}, dataset: {},
     clientWidth: 800, clientHeight: 600, width: 0, height: 0, src: "",
     classList: {
@@ -231,6 +232,16 @@ function buildApi() {
   const timer = makeTimer();
   const __SEND = makeSend();
 
+  // Listener registries for the document / window stubs (pan-zoom §4/§E8):
+  // app.js registers a document keydown + a window resize handler; the tests
+  // dispatch events into these so the REAL handler code runs.
+  const __DOC_LISTENERS = {};
+  const __WIN_LISTENERS = {};
+  const __RFR = { queue: [], renderCalls: 0, dispatch() {
+    const q = this.queue; this.queue = [];
+    for (const fn of q) { this.renderCalls += 1; fn(); }
+  } };
+
   const registry = {};
   const document = {
     querySelector(sel) {
@@ -250,15 +261,41 @@ function buildApi() {
       return sel === ".door-swatch" ? chips.slice() : [];
     },
     createElement() { return makeEl(); },
-    addEventListener() {},
+    addEventListener(type, fn) {
+      (__DOC_LISTENERS[type] = __DOC_LISTENERS[type] || []).push(fn);
+    },
+    removeEventListener(type, fn) {
+      const l = __DOC_LISTENERS[type];
+      if (l) { const i = l.indexOf(fn); if (i >= 0) l.splice(i, 1); }
+    },
+    // Test helper: dispatch a keydown (or other) event to the registered
+    // document listeners (the real app.js keydown handler).
+    dispatch(type, ev) {
+      for (const fn of __DOC_LISTENERS[type] || []) fn(ev);
+    },
     body: { classList: { add() {}, remove() {}, toggle() {} } },
     title: "",
   };
   const window = {
     matchMedia() { return { matches: false }; },
-    addEventListener() {},
+    addEventListener(type, fn) {
+      (__WIN_LISTENERS[type] = __WIN_LISTENERS[type] || []).push(fn);
+    },
+    removeEventListener(type, fn) {
+      const l = __WIN_LISTENERS[type];
+      if (l) { const i = l.indexOf(fn); if (i >= 0) l.splice(i, 1); }
+    },
+    // Test helper: dispatch a window event (e.g. resize) to the registered
+    // window listeners (the real app.js debounced resize handler).
+    dispatch(type, ev) {
+      for (const fn of __WIN_LISTENERS[type] || []) fn(ev);
+    },
     devicePixelRatio: 1,
   };
+  // requestAnimationFrame (pan-zoom §E8): schedules render callbacks; the
+  // tests flush with __RFR.dispatch() and count renderCalls to assert at most
+  // one render per frame (no unbounded render queue under key-repeat).
+  const requestAnimationFrame = (fn) => { __RFR.queue.push(fn); return 1; };
   const location = { protocol: "http:", host: "127.0.0.1:8000" };
 
   const WebSocket = class {
@@ -306,7 +343,10 @@ function buildApi() {
     "drawDoorCell, renderLegendDoorSwatches, drawDoorClosed, drawPadlock, drawDoorOpen," +
     "SAFE_STATES," +
     "isSafeDoor, safeDoorStateAt, validateSafe, sendSafeDoor, setSafeAction," +
-    "_timer: timer, _send: __SEND, _fetch: __FETCH }";
+    // Pan & Zoom (pan-zoom spec): view math + controls.
+    "LEVELS, fitLevel, viewStep, viewBounds, applyView, applyViewNow, fitToMap," +
+    "panBy, zoomBy, syncNavControls, focusInField, cellFromEvent," +
+    "_timer: timer, _send: __SEND, _fetch: __FETCH, _rfr: __RFR, _window: window };";
   // eslint-disable-next-line no-eval
   eval(src + EXPORTS);
 

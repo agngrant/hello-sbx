@@ -460,5 +460,6 @@ iteration's deliverable.
   (`python scripts/e2e_proof.py` is all-✓).
 - README explains roles, how to start (pinned packages via `requirements.txt`),
   controls, and limitations (e.g. PNG/BMP only, no-interlace PNG; JSON-base64 upload;
-  no zoom/pan in v1).
+  discrete zoom/pan — 11 fixed levels L0…L10 plus whole-cell panning, no
+  wheel/pinch/drag).
 - All 8 hard requirements in §1 are demonstrably met (QA signs off).

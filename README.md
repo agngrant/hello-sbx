@@ -73,8 +73,9 @@ and binds `127.0.0.1:8000`.
 ### Playing
 
 - **Players:** tap / click a tile to move your own character. If the path is blocked
-  by a wall you'll be told "Walls block movement." Arrow keys nudge a selected token.
-  Your character is the one with the blue **YOU** ring.
+  by a wall you'll be told "Walls block movement." Your character is the one with the
+  blue **YOU** ring. (Movement is by tap/click only — arrow keys no longer nudge a
+  selected token; they now pan the view, see below.)
 - **GM:** the GM is the editor and referee of record:
   - **Select any entity** (click a token or a sidebar row) and **move it anywhere** —
     the GM may move player characters, NPCs, and enemies.
@@ -90,6 +91,26 @@ and binds `127.0.0.1:8000`.
   - **Fog of war:** the old fog-of-war toggle is retained on the wire for
     compatibility but no longer changes what players see — visibility is now
     always the line-of-sight + proximity model below.
+
+### Navigating the map (pan & zoom)
+
+Both roles navigate the map with the **"Map view"** panel at the top of the
+right-hand sidebar (in the drawer on narrow screens) or the keyboard:
+
+- **Pan:** the arrow cluster (← ↑ → ↓) pans the visible window by a step of the
+  visible cells; the cursor keys pan identically. When a map edge is reached the
+  matching arrow is disabled (self-explanatory `title`), and a map axis that
+  already fits is permanently locked.
+- **Zoom:** the **− / +** buttons (or `+`/`=` / `-` on the keyboard) step the
+  level in/out. There are **11 fixed zoom levels** — **L0** shows 6×5 cells
+  (maximum zoom) up to **L10**, 60×50 (minimum zoom); the extreme level's button
+  is disabled.
+- **Fit:** on joining and on a map swap the view re-fits to the whole map (the
+  smallest level whose window covers it). Window resizes keep the current level
+  + pan (re-clamped); they do **not** re-fit.
+- The readout line shows the current level, the visible window size, and the
+  visible map region. The view is per-client (a tab's view never affects anyone
+  else).
 
 ### The awareness overlay
 
@@ -294,8 +315,13 @@ python -m unittest discover -s tests -t .   # also supported (suite is unittest-
 - **In-memory sessions.** Restarting the server starts fresh — there is **no
   save/load of sessions or maps to disk** yet (the sample dungeon is re-registered at
   startup; uploaded maps live in memory only).
-- **No zoom / pan.** The map is fit to the viewport (cell size is computed from the
-  canvas). Large grids simply use smaller cells.
+- **Zoom / pan is discrete, not free-form.** The map is navigated with the
+  "Map view" controls (sidebar) or the keyboard: 11 fixed zoom levels
+  (**L0** = 6×5 cells … **L10** = 60×50) plus whole-cell panning (arrow
+  buttons / cursor keys pan, `+`/`-` zoom). There is no mouse-wheel zoom,
+  pinch, or drag-to-pan; on window resize the current level + pan are kept
+  (re-clamped), not re-fit. A map larger than the view at a level is panned
+  to reach (the view starts fitted to the whole map).
 - **Image decode is narrow.** No **interlaced PNG**, and no **JPEG / WebP** (and no
   16-bit multi-channel *test coverage* — 8-bit multi-channel is fully tested).
 - **Visibility is a three-tier model, not a wall-passing radar.** A player sees

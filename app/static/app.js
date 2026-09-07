@@ -75,6 +75,12 @@ const els = {
   toasts: $("#toasts"),
   // map: sidebar
   sidebar: $("#sidebar"),
+  // map: nav panel (pan-zoom spec §3) — "Map view", first sidebar section
+  navPanel: $("#nav-panel"),
+  navUp: $("#nav-up"), navDown: $("#nav-down"),
+  navLeft: $("#nav-left"), navRight: $("#nav-right"),
+  zoomIn: $("#zoom-in"), zoomOut: $("#zoom-out"),
+  navReadout: $("#nav-readout"),
   awarenessTitle: $("#awareness-title"),
   awarenessList: $("#awareness-list"),
   awarenessSummary: $("#awareness-summary"),
@@ -106,6 +112,12 @@ const state = {
   cell: 0,              // computed canvas cell size (CSS px)
   offsetX: 0,           // grid origin on canvas (CSS px)
   offsetY: 0,
+  // Pan & zoom (pan-zoom spec §2.1): per-client, frontend-only view state.
+  //   level ∈ 0 (max zoom, 6×5) … 10 (min zoom, 60×50); panX/panY are integer
+  //   cell offsets from the west/north map edge, clamped to [0, size−visible].
+  // NEVER serialized or sent to the server (AC21).
+  view: { level: 0, panX: 0, panY: 0 },
+  _view: null,          // computed {s,ox,oy,x0,x1,y0,y1,W,H} (applyView)
   entities: [],         // GM: full list; players: [] (server sends [] to players)
   youEntity: null,      // a player's own character (server "you_entity" field)
   awareness: [],        // per-player awareness items (always present)
@@ -240,7 +252,17 @@ function onWelcome(msg) {
 function onState(msg) { applyState(msg); }
 
 function applyState(msg) {
-  const mapChanged = !state.grid ||
+  // Pan & zoom (pan-zoom spec §2.5 / E3): the view must RE-FIT only when the
+  // map's DIMENSIONS change (join / a `use_map` swap to a different size). A
+  // same-map broadcast (door open/close, a repaint, ...) keeps the current
+  // level + pan (E2/A8: no re-fit on resize or content-only updates) — so
+  // `mapChanged` (full grid-content diff) drives the RENDER, while `mapFits`
+  // (dimension diff) drives the REFIT. The render below uses the FULL grid
+  // diff (mapContentChanged) so content-only changes still re-render.
+  const mapFits = state.grid
+    ? (state.grid.width !== msg.map.width || state.grid.height !== msg.map.height)
+    : true;   // first map ever (welcome) → treat as a (re)fit
+  const mapContentChanged = !state.grid ||
     JSON.stringify(state.grid) !== JSON.stringify(msg.map);
   state.grid = { width: msg.map.width, height: msg.map.height,
                  cells: msg.map.cells };
@@ -300,7 +322,11 @@ function applyState(msg) {
     ? "Toggle fog of war for players. As GM you always see everything."
     : "GM controls fog of war";
   document.body.classList.toggle("fog-on", state.fog);
-  if (!els.mapView.hidden || mapChanged) {
+  // Re-fit the view only on a map DIMENSION change (join / use_map swap,
+  // spec E3); otherwise keep the current level+pan (defensively re-clamped
+  // by layoutCanvas). Content-only updates just re-render.
+  if (mapFits) fitToMap();
+  if (!els.mapView.hidden || mapContentChanged) {
     if (els.mapView.hidden) els.mapView.hidden = false;
     els.mapName.textContent = state.mapName || "—";
     els.noMap.hidden = true;
@@ -450,7 +476,7 @@ function showView(view) {
   els.lobbyView.hidden = view !== "lobby";
   els.uploadView.hidden = view !== "upload";
   els.mapView.hidden = view !== "map";
-  if (view === "map") renderLegendDoorSwatches();
+  if (view === "map") { renderLegendDoorSwatches(); syncNavControls(); }
 }
 
 /* Legend door swatches (door-iconography spec §8.1): each `.door-swatch`
@@ -862,6 +888,210 @@ function drawDoorOpen(ctx, cx, cy, s, slabX, slabY, slabW, slabH, p) {
 
 /* ───────────────────────────── Canvas: layout + shared cell renderer ── */
 
+/* ════════════════ Pan & Zoom — view math (pan-zoom spec §2, §5) ════════════════
+   A per-client, discrete-zoom, cell-panned viewport: the map can be bigger
+   than the viewport, navigated via the sidebar #nav-panel (arrow + zoom
+   buttons) and the keyboard. Frontend-only — the view state is NEVER
+   serialized or sent to the server (AC21).
+   - Discrete levels L0…L10 (§5.1): L0 = 6×5 (max zoom) … L10 = 60×50 (min).
+   - Uniform SQUARE cells, letterboxed (§2.3): cell = max(1, floor(min(availW/W, availH/H))).
+   - Integer-cell pan, clamped to [0, size − visible] (§2.4); step = 10% of
+     the visible axis (min 1, half-up, A6).
+   - fit = smallest level whose window covers the map, else L10 + pan (§5.3).
+   - One click→cell transform (cellFromEvent, §2.6) and one pixel→draw
+     origin (s, ox, oy) — every interaction and every drawn thing shares them.
+   The upload PREVIEW canvas keeps its own self-fit math (A10): it calls
+   drawGridOnCanvas with NO `view`, which is byte-identical to pre-feature. */
+
+// §5.1 frozen level table: {w: visible cols, h: visible rows} per level.
+const LEVELS = [
+  { w: 6, h: 5 },    // L0 — max zoom (owner req 6)
+  { w: 8, h: 7 },    // L1
+  { w: 10, h: 8 },   // L2
+  { w: 13, h: 11 },  // L3
+  { w: 16, h: 13 },  // L4
+  { w: 20, h: 17 },  // L5
+  { w: 25, h: 21 },  // L6
+  { w: 30, h: 25 },  // L7
+  { w: 40, h: 33 },  // L8
+  { w: 50, h: 42 },  // L9
+  { w: 60, h: 50 },  // L10 — min zoom (owner req 6)
+];
+const LEVEL_COUNT = LEVELS.length;   // 11 → levels 0..10
+
+const _clamp = (v, lo, hi) => Math.min(Math.max(v, lo), hi);
+
+// §5.3 fit rule: smallest L with W(L) ≥ mw AND H(L) ≥ mh, else 10 (E7).
+function fitLevel(mw, mh) {
+  for (let l = 0; l < LEVEL_COUNT; l++) {
+    if (LEVELS[l].w >= mw && LEVELS[l].h >= mh) return l;
+  }
+  return LEVEL_COUNT - 1;
+}
+
+// §2.4 pan step (A6, half-up): max(1, round(0.1 × visible axis cells)).
+function viewStep(level, axis) {
+  const dim = (axis === "x") ? LEVELS[level].w : LEVELS[level].h;
+  return Math.max(1, Math.round(0.1 * dim));
+}
+
+// §5.2 pan range: [0, max(0, mapSize − visible)] per axis.
+function viewBounds(level, mw, mh) {
+  return {
+    x: Math.max(0, mw - LEVELS[level].w),
+    y: Math.max(0, mh - LEVELS[level].h),
+  };
+}
+
+// §2.3 + render window: compute the uniform square cell, the letterbox
+// offsets (which go NEGATIVE under pan) and the visible [x0,x1)×[y0,y1)
+// window, and store them on state (state.cell/offsetX/offsetY + state._view).
+// `availW/H` are the wrap's inner pixels (wrap.clientWidth/Height − 16, the
+// same margin as today's layout). Guards a degenerate (≤0) area by leaving
+// the prior view untouched.
+function applyView(availW, availH) {
+  const g = state.grid;
+  if (!g || availW <= 0 || availH <= 0) return;
+  const v = state.view;
+  const L = LEVELS[v.level];
+  const mw = g.width, mh = g.height;
+  // Defensive re-clamp (E2): a prior pan may be out of range at this level.
+  const b = viewBounds(v.level, mw, mh);
+  v.panX = _clamp(v.panX, 0, b.x);
+  v.panY = _clamp(v.panY, 0, b.y);
+  const W = L.w, H = L.h;
+  const s = Math.max(1, Math.floor(Math.min(availW / W, availH / H)));
+  const ox = Math.floor((availW - W * s) / 2) - v.panX * s;
+  const oy = Math.floor((availH - H * s) / 2) - v.panY * s;
+  state.cell = s;
+  state.offsetX = ox;
+  state.offsetY = oy;
+  state._view = {
+    s, ox, oy, W, H,
+    x0: v.panX, x1: Math.min(mw, v.panX + W),
+    y0: v.panY, y1: Math.min(mh, v.panY + H),
+  };
+}
+
+// Apply the view math to the CURRENT wrap size (for pan/zoom that run
+// outside a full layoutCanvas pass). Reads the live wrap dimensions.
+function applyViewNow() {
+  const wrap = els.canvasWrap;
+  applyView(Math.max(0, wrap.clientWidth - 16),
+            Math.max(0, wrap.clientHeight - 16));
+}
+
+// §2.5 "fit whole map": level = fitLevel, pan = (0,0) (E1, E3, E7). The
+// pixel layout is (re)computed by the layoutCanvas the caller runs next; this
+// only fixes the level + pan (and keeps the nav controls in sync).
+function fitToMap() {
+  const g = state.grid;
+  if (!g) return;
+  state.view.level = fitLevel(g.width, g.height);
+  state.view.panX = 0;
+  state.view.panY = 0;
+  applyViewNow();
+  syncNavControls();
+}
+
+// §2.5: pan one step on one axis (clamped, §2.4). The matching arrow key and
+// arrow button both call this with the SAME (±1,0)/(0,±1) delta, so their
+// effect is identical (owner req 3 / AC3).
+function panBy(dx, dy) {
+  const g = state.grid;
+  if (!g) return;
+  const v = state.view;
+  const b = viewBounds(v.level, g.width, g.height);
+  const nx = _clamp(v.panX + dx * viewStep(v.level, "x"), 0, b.x);
+  const ny = _clamp(v.panY + dy * viewStep(v.level, "y"), 0, b.y);
+  if (nx === v.panX && ny === v.panY) { syncNavControls(); return; } // silent no-op (E8)
+  v.panX = nx;
+  v.panY = ny;
+  applyViewNow();
+  syncNavControls();
+  scheduleRender();
+}
+
+// §2.5: zoom in/out one level (clamped to [0,10]); the pan is re-clamped for
+// the new (possibly smaller) pan range.
+function zoomBy(delta) {
+  const g = state.grid;
+  if (!g) return;
+  const v = state.view;
+  const nl = _clamp(v.level + delta, 0, LEVEL_COUNT - 1);
+  if (nl === v.level) { syncNavControls(); return; } // silent no-op (E8)
+  v.level = nl;
+  const b = viewBounds(nl, g.width, g.height);
+  v.panX = _clamp(v.panX, 0, b.x);
+  v.panY = _clamp(v.panY, 0, b.y);
+  applyViewNow();
+  syncNavControls();
+  scheduleRender();
+}
+
+// §3.3 (frozen states): one function sets all six nav buttons' disabled +
+// title from the view state. Called after any view mutation, fit, state
+// change, or resize. No map → all six disabled.
+function syncNavControls() {
+  const g = state.grid;
+  const btn = (el) => el || { disabled: false, title: "" };
+  if (!g) {
+    const t = "No map yet";
+    for (const el of [els.navUp, els.navDown, els.navLeft, els.navRight,
+                      els.zoomIn, els.zoomOut]) {
+      const b = btn(el); b.disabled = true; b.title = t;
+    }
+    if (els.navReadout) els.navReadout.textContent = "";
+    return;
+  }
+  const v = state.view;
+  const L = LEVELS[v.level];
+  const bx = viewBounds(v.level, g.width, g.height).x;
+  const by = viewBounds(v.level, g.width, g.height).y;
+  const lockX = g.width <= L.w;    // axis locked: map fits horizontally
+  const lockY = g.height <= L.h;
+  const set = (el, disabled, title) => { const b = btn(el); b.disabled = disabled; b.title = title; };
+  const lockXT = "Map fits horizontally — no pan";
+  const lockYT = "Map fits vertically — no pan";
+  set(els.navLeft,  lockX || v.panX <= 0,   lockX ? lockXT : "Panned to the west edge");
+  set(els.navRight, lockX || v.panX >= bx,  lockX ? lockXT : "Panned to the east edge");
+  set(els.navUp,    lockY || v.panY <= 0,   lockY ? lockYT : "Panned to the north edge");
+  set(els.navDown,  lockY || v.panY >= by,  lockY ? lockYT : "Panned to the south edge");
+  set(els.zoomOut,  v.level <= 0, "Maximum zoom (6×5)");
+  set(els.zoomIn,   v.level >= LEVEL_COUNT - 1, "Minimum zoom (60×50)");
+  // One-line readout: `L{level} · {W}×{H} · ({x0},{y0})–({x1−1},{y1−1}) of {mw}×{mh}`.
+  if (els.navReadout) {
+    els.navReadout.textContent =
+      `L${v.level} · ${L.w}×${L.h} · (${v.panX},${v.panY})–`
+      + `(${Math.min(g.width, v.panX + L.w) - 1},${Math.min(g.height, v.panY + L.h) - 1})`
+      + ` of ${g.width}×${g.height}`;
+  }
+}
+
+// §4.3 input focus guard (frozen set INPUT/TEXTAREA, extended A3 to SELECT
+// + contenteditable): arrows / + / − over an open field must NOT pan/zoom
+// (and must not preventDefault, so native editing is untouched). A real
+// BUTTON is never a "field" — native Space/Enter activation is preserved.
+function focusInField(t) {
+  if (!t) return false;
+  const tag = t.tagName;
+  if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return true;
+  return t.isContentEditable === true;
+}
+
+/* Coalesced render (E8): view mutations mark the frame dirty; at most ONE
+   requestAnimationFrame re-render runs per frame, so a 30 Hz key-repeat
+   stream never queues unbounded renders. */
+let _renderQueued = false;
+function scheduleRender() {
+  if (_renderQueued) return;
+  _renderQueued = true;
+  requestAnimationFrame(() => {
+    _renderQueued = false;
+    if (!els.mapView.hidden) renderAll();
+  });
+}
+
 function layoutCanvas() {
   const wrap = els.canvasWrap;
   const availW = Math.max(0, wrap.clientWidth - 16);
@@ -870,11 +1100,11 @@ function layoutCanvas() {
   const g = state.grid;
   if (!g || availW <= 0 || availH <= 0) return;
 
-  state.cell = Math.max(8, Math.floor(Math.min(availW / g.width, availH / g.height)));
-  const cw = state.cell * g.width;
-  const ch = state.cell * g.height;
-  state.offsetX = Math.floor((availW - cw) / 2);
-  state.offsetY = Math.floor((availH - ch) / 2);
+  // Pan & zoom (§2.3): the cell size + origin now come from the VIEW state
+  // (level/pan), not a fit-to-map. Cells are square; the window is centered
+  // with letterboxing and shifted by the integer-cell pan (offsets may go
+  // negative under pan). The old Math.max(8,…) floor is dropped (A9).
+  applyView(availW, availH);
 
   const canvas = els.canvas;
   canvas.width = Math.round(availW * dpr);
@@ -884,14 +1114,16 @@ function layoutCanvas() {
   const ctx = canvas.getContext("2d");
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
 
-  // Background outside the grid
+  // Background outside the window (covers letterbox bars + off-window area)
   ctx.fillStyle = "#171b26";
   ctx.fillRect(0, 0, availW, availH);
   // Explored map (§6.3): the map-canvas pass tiers cells ONLY for a player
   // holding a well-formed visibility matrix. The GM (and any absent/malformed
-  // matrix) renders full detail — `null` → today's renderer, byte-identical.
+  // matrix) renders full detail — `null` → the no-tier renderer. The map pass
+  // also passes the VIEW so the renderer culls to the visible window (§6.1);
+  // the preview canvas never passes a view (A10, self-fit whole-map).
   const vis = (state.role === "player") ? state.visibility : null;
-  drawGridOnCanvas(canvas, ctx, vis);
+  drawGridOnCanvas(canvas, ctx, vis, state._view);
 }
 
 /* Single cell-renderer shared by #map-canvas and #preview-canvas
@@ -910,17 +1142,35 @@ function layoutCanvas() {
    A cell's tier is decided once up-front and honored in EVERY pass, so a
    hidden cell contributes no fill AND no grid line (its grid lines would
    otherwise outline the dark region). The entity/token pass (step 3) is
-   untouched — it runs on top exactly as today. */
+   untouched — it runs on top exactly as today.
 
-function drawGridOnCanvas(canvas, ctx, visibility = null) {
+   `view` (pan-zoom, §6) — an OPTIONAL computed view `{s, ox, oy, x0, x1,
+   y0, y1}` (from applyView). When passed (the #map-canvas pass ONLY), the
+   renderer draws from that origin + cell size and EVERY cell/wall/door loop
+   iterates the visible window [x0,x1)×[y0,y1) instead of the full grid —
+   culling to the visible cells while the per-cell tier + frontier rules are
+   UNCHANGED (`tier(x,y)` is looked up in the full-map matrix regardless).
+   When ABSENT (the upload-preview pass), the function is byte-identical to
+   pre-feature: it self-fits the WHOLE map with its own s/ox/oy (A10). */
+
+function drawGridOnCanvas(canvas, ctx, visibility = null, view = null) {
   const g = state.grid;
   if (!g) return;
-  const dpr = window.devicePixelRatio || 1;
-  const availW = Math.max(1, canvas.width / dpr);
-  const availH = Math.max(1, canvas.height / dpr);
-  const s = Math.max(4, Math.floor(Math.min(availW / g.width, availH / g.height)));
-  const ox = Math.floor((availW - s * g.width) / 2);
-  const oy = Math.floor((availH - s * g.height) / 2);
+  let s, ox, oy, x0, x1, y0, y1;
+  if (view) {
+    // Map-canvas pass: geometry + render window come from the view state.
+    s = view.s; ox = view.ox; oy = view.oy;
+    x0 = view.x0; x1 = view.x1; y0 = view.y0; y1 = view.y1;
+  } else {
+    // Preview / self-fit pass (A10): whole map, byte-identical to today.
+    const dpr = window.devicePixelRatio || 1;
+    const availW = Math.max(1, canvas.width / dpr);
+    const availH = Math.max(1, canvas.height / dpr);
+    s = Math.max(4, Math.floor(Math.min(availW / g.width, availH / g.height)));
+    ox = Math.floor((availW - s * g.width) / 2);
+    oy = Math.floor((availH - s * g.height) / 2);
+    x0 = 0; x1 = g.width; y0 = 0; y1 = g.height;
+  }
 
   // Re-validated here so a direct caller passing a raw matrix (rather than
   // the already-validated state.visibility) can never crash the render.
@@ -936,22 +1186,23 @@ function drawGridOnCanvas(canvas, ctx, visibility = null) {
 
   // ── 1. Floor / floor-tinted base + grid lines ──
   if (!vis) {
-    // No tiering (GM / preview): one fill for the whole grid + one grid-line
-    // pass — byte-for-byte today's behavior.
+    // No tiering (GM / preview): one fill for the rendered region + one
+    // grid-line pass. In the map (view) pass the region is the visible
+    // window; in the preview pass (no view) it is the whole grid (A10).
     ctx.fillStyle = T.floor;
-    ctx.fillRect(ox, oy, s * g.width, s * g.height);
+    ctx.fillRect(ox + x0 * s, oy + y0 * s, (x1 - x0) * s, (y1 - y0) * s);
     ctx.strokeStyle = T.gridLine;
     ctx.lineWidth = 1;
     ctx.beginPath();
-    for (let x = 0; x <= g.width; x++) {
+    for (let x = x0; x <= x1; x++) {
       const px = Math.round(ox + x * s) + 0.5;
-      ctx.moveTo(px, oy);
-      ctx.lineTo(px, oy + g.height * s);
+      ctx.moveTo(px, oy + y0 * s);
+      ctx.lineTo(px, oy + y1 * s);
     }
-    for (let y = 0; y <= g.height; y++) {
+    for (let y = y0; y <= y1; y++) {
       const py = Math.round(oy + y * s) + 0.5;
-      ctx.moveTo(ox, py);
-      ctx.lineTo(ox + g.width * s, py);
+      ctx.moveTo(ox + x0 * s, py);
+      ctx.lineTo(ox + x1 * s, py);
     }
     ctx.stroke();
   } else {
@@ -966,9 +1217,12 @@ function drawGridOnCanvas(canvas, ctx, visibility = null) {
     // 0, the left of col 0, the right of the last col, the bottom of the last
     // row). The explored/seen region thus outlines its frontier against the
     // dark and keeps its frame; an H cell of its own never contributes a
-    // line (an H|H edge is not drawn).
-    for (let y = 0; y < g.height; y++) {
-      for (let x = 0; x < g.width; x++) {
+    // line (an H|H edge is not drawn). In the map (view) pass the loops run
+    // only over the visible window; a drawn cell at a window edge still sees
+    // its OUT-of-window neighbour via tier(x,y) in the full-map matrix, so
+    // the 1px frontier edge at the window boundary resolves correctly (§6.1).
+    for (let y = y0; y < y1; y++) {
+      for (let x = x0; x < x1; x++) {
         const t = tier(x, y);
         if (t === "H") continue;
         ctx.fillStyle = palette(t).floor;
@@ -982,8 +1236,8 @@ function drawGridOnCanvas(canvas, ctx, visibility = null) {
     // neighbor is a SHARED edge (that tier's style, S side wins over E);
     // an edge against a hidden cell or off the grid is a FRONTIER/frame
     // edge and uses the drawn cell's own style.
-    for (let y = 0; y < g.height; y++) {
-      for (let x = 0; x < g.width; x++) {
+    for (let y = y0; y < y1; y++) {
+      for (let x = x0; x < x1; x++) {
         const t = tier(x, y);
         if (t === "H") continue;
         const lineStyle = (full) => (full ? T.gridLine : T.gridLineDim);
@@ -1041,8 +1295,8 @@ function drawGridOnCanvas(canvas, ctx, visibility = null) {
   // record each visible wall's [px, py, tier] once, then batch the fill, the
   // diagonal hatch, and the border per tier so each tier uses its own colors.
   const walls = [];
-  for (let y = 0; y < g.height; y++) {
-    for (let x = 0; x < g.width; x++) {
+  for (let y = y0; y < y1; y++) {
+    for (let x = x0; x < x1; x++) {
       if (g.cells[y][x] !== "wall") continue;
       const t = tier(x, y);
       if (t === "H") continue;
@@ -1093,8 +1347,9 @@ function drawGridOnCanvas(canvas, ctx, visibility = null) {
   // survives at E so locked stays readable); the "H" tier is still skipped
   // (a hidden door is not drawn), so GM/preview (no matrix) and a player's
   // S cells render full detail while the player's E cells render greyed.
-  for (let y = 0; y < g.height; y++) {
-    for (let x = 0; x < g.width; x++) {
+  // In the map (view) pass only the in-window doorway cells are drawn.
+  for (let y = y0; y < y1; y++) {
+    for (let x = x0; x < x1; x++) {
       if (g.cells[y][x] !== "doorway") continue;
       const t = tier(x, y);
       if (t === "H") continue;
@@ -1108,10 +1363,12 @@ function drawGridOnCanvas(canvas, ctx, visibility = null) {
     }
   }
 
-  // 3. Entity tokens (GM / own character) — the #map-canvas pass only,
-  //    UNCHANGED by the explored map (rings / own token / awareness items /
-  //    hover / paint all render on top exactly as today).
-  if (canvas.id === "map-canvas") drawEntitiesAndDots(ctx, s, ox, oy);
+  // 3. Entity tokens (GM / own character) — the #map-canvas pass only.
+  //    Unchanged by the explored map. Under pan/zoom (§6.1) the entities are
+  //    culled to the visible render window (the single (s, ox, oy) origin).
+  if (canvas.id === "map-canvas") {
+    drawEntitiesAndDots(ctx, s, ox, oy, { x0, x1, y0, y1 });
+  }
 }
 
 /* ───────────────────────────── Awareness rings (canvas, §4) ─────────────────────────────
@@ -1138,12 +1395,14 @@ function drawAwarenessRing(ctx, x, y, radius, s, ox, oy) {
   ctx.restore();
 }
 
-function drawAwarenessRings(ctx, s, ox, oy) {
+function drawAwarenessRings(ctx, s, ox, oy, win) {
   const players = state.players || [];
+  const inWin = (x, y) => !win || (x >= win.x0 && x < win.x1 && y >= win.y0 && y < win.y1);
   if (state.role === "gm") {
     // GM: a ring around every player-owned token (the GM has no token).
     for (const e of state.entities) {
       if (!e.owner) continue;
+      if (!inWin(e.x, e.y)) continue;   // §6.1 cull: off-window → skipped
       const p = players.find((pl) => pl.entity_id === e.id);
       const r = p && Number.isFinite(p.awareness_radius)
         ? p.awareness_radius : 4;
@@ -1151,6 +1410,7 @@ function drawAwarenessRings(ctx, s, ox, oy) {
     }
   } else if (state.youEntity) {
     // Player: one ring around their own token, at their own radius.
+    if (!inWin(state.youEntity.x, state.youEntity.y)) return;
     const p = players.find((pl) => pl.id === state.you.id);
     const r = p && Number.isFinite(p.awareness_radius)
       ? p.awareness_radius : 4;
@@ -1158,18 +1418,26 @@ function drawAwarenessRings(ctx, s, ox, oy) {
   }
 }
 
-/* 4. + 5. Tokens, awareness dots, selection, hover, paint preview */
-function drawEntitiesAndDots(ctx, s, ox, oy) {
+/* 4. + 5. Tokens, awareness dots, selection, hover, paint preview.
+   `win` (pan-zoom §6.1) — an OPTIONAL render window `{x0,x1,y0,y1}` in MAP
+   cells (from state._view). When present (the map-canvas pass), entities /
+   awareness items OUTSIDE it are SKIPPED ENTIRELY (no draw calls — AC22):
+   a token at (59,59) is not drawn while the L0 window shows (0..5,0..4).
+   Everything drawn uses the SAME (s, ox, oy) origin as the grid (§6.2), so
+   a marker for (x,y) is centered at (ox + (x+0.5)s, oy + (y+0.5)s) —
+   alignment is structurally guaranteed at every level/pan. */
+function drawEntitiesAndDots(ctx, s, ox, oy, win) {
   // Players keep their own entity in a local view so it stays renderable
   // even though the server sends players an empty "entities" list.
   const entities = allEntities();
+  const inWin = (x, y) => !win || (x >= win.x0 && x < win.x1 && y >= win.y0 && y < win.y1);
 
   // Awareness rings (under the tokens; see drawAwarenessRings).
-  drawAwarenessRings(ctx, s, ox, oy);
+  drawAwarenessRings(ctx, s, ox, oy, win);
 
   // Selection ring (under tokens)
   const sel = entities.find((e) => e.id === state.selectedEntityId);
-  if (sel) {
+  if (sel && inWin(sel.x, sel.y)) {
     ctx.strokeStyle = T.accent;
     ctx.lineWidth = 2.5;
     ctx.beginPath();
@@ -1179,6 +1447,7 @@ function drawEntitiesAndDots(ctx, s, ox, oy) {
 
   // Full tokens for every entity the client controls (GM: all; player: self).
   for (const e of entities) {
+    if (!inWin(e.x, e.y)) continue;   // §6.1 cull
     const isOwn = state.you && e.id === state.you.entity_id;
     drawToken(ctx, e, ox, oy, s, {
       ring: isOwn && state.role === "player", // blue "YOU" ring = players only
@@ -1197,15 +1466,24 @@ function drawEntitiesAndDots(ctx, s, ox, oy) {
   const ownId = state.you ? state.you.entity_id : null;
   for (const item of state.awareness) {
     if (state.role === "gm") {
+      if (!inWin(item.x, item.y)) continue;   // §6.1 cull
       const shape = item.color === "green" ? "tri" : item.color === "white" ? "circle" : "square";
       drawDot(ctx, ox + item.x * s + s * 0.78, oy + item.y * s + s * 0.22,
               s * 0.16, shape, item.color, 1);
     } else if (item.approximate) {
-      // Unknown contact: a coarse block, no identity (name/color/team).
-      // item.x/item.y is the block's ORIGIN cell; the marker sits at the
-      // block's center.
-      drawUnknownDot(ctx, ox + (item.x * 2) * s, oy + (item.y * 2) * s, s);
+      // Unknown contact: a coarse 2×2 block, no identity. item.x/item.y is
+      // the block's ORIGIN cell (in the server's 2×2-quantized coords), so
+      // the block spans map cells [item.x*2, item.x*2+2) × [item.y*2,
+      // item.y*2+2). Cull by OVERLAP (§6.1/A12): a block that straddles the
+      // window is still drawn and clips at the canvas edge; a fully
+      // off-window block is skipped entirely.
+      const bx = item.x * 2, by = item.y * 2;
+      const overlaps = !win || (bx < win.x1 && bx + 2 > win.x0 &&
+                                by < win.y1 && by + 2 > win.y0);
+      if (!overlaps) continue;
+      drawUnknownDot(ctx, ox + bx * s, oy + by * s, s);
     } else if (item.entity_id !== ownId) {
+      if (!inWin(item.x, item.y)) continue;   // §6.1 cull
       // Full contact (line of sight): colored token + name label +
       // colorblind shape marker (triangle friend / circle neutral /
       // square enemy), reusing the GM label rendering.
@@ -1221,7 +1499,8 @@ function drawEntitiesAndDots(ctx, s, ox, oy) {
     // (own entity's awareness item never appears — server excludes it)
   }
 
-  // Hover ring + paint preview
+  // Hover ring + paint preview (hoverCell is always an in-window cell —
+  // cellFromEvent only returns in-window, in-bounds cells, so no cull here).
   if (hoverCell) {
     const hx = ox + hoverCell.x * s;
     const hy = oy + hoverCell.y * s;
@@ -1369,6 +1648,7 @@ function renderAll() {
   drawSidebar();
   updateControlHint();
   syncGmTools();
+  syncNavControls();   // pan-zoom §3.3: keep the six nav states in sync
 }
 
 /* ───────────────────────────── Sidebar ───────────────────────────── */
@@ -1535,13 +1815,28 @@ let hoverCell = null;
 
 /* ───────────────────────────── Canvas interaction ───────────────────────────── */
 
+// The SINGLE click→cell transform (pan-zoom §2.6, frozen floor-divide).
+// Every interaction (hover + coord readout, GM lastHovered spawn target, GM
+// paint, GM Door/Safe-door tools, player door tap / click-to-move, entity
+// hit-testing) resolves through this one function. Under pan/zoom,
+// state.offsetX/Y are the view's origin (NEGATIVE when panned) and
+// state.cell the view cell size, so this automatically yields the correct
+// map cell at every level/pan.
+//
+// "In-bounds" is the VISIBLE RENDER WINDOW (state._view: [x0,x1)×[y0,y1)),
+// which always lies inside the map, so map-bounds are enforced too. A pixel
+// in the letterbox bars, in the dark area beyond a small map, or otherwise
+// off-window/off-map returns null → all existing no-op guards apply
+// unchanged (§6.3/E5: dragging off the window is "no paint", exactly like
+// dragging off the map pre-feature — no phantom paints).
 function cellFromEvent(ev) {
   const g = state.grid;
   if (!g) return null;
+  const w = state._view || { x0: 0, x1: g.width, y0: 0, y1: g.height };
   const rect = els.canvas.getBoundingClientRect();
   const x = Math.floor((ev.clientX - rect.left - state.offsetX) / state.cell);
   const y = Math.floor((ev.clientY - rect.top - state.offsetY) / state.cell);
-  if (x < 0 || y < 0 || x >= g.width || y >= g.height) return null;
+  if (x < w.x0 || y < w.y0 || x >= w.x1 || y >= w.y1) return null;
   return { x, y };
 }
 
@@ -1915,8 +2210,20 @@ function toggleFog() {
   wsSend({ type: "set_fog", on: els.fogToggle.checked });
 }
 
-/* Keyboard (wireframes §9): arrows move the selected entity one cell;
-   Esc deselects / closes the drawer. */
+/* Keyboard (pan-zoom spec §4; wireframes §9 updated):
+   - Esc: deselect / close drawer / back to map (unchanged).
+   - Enter/Space on an awareness row: select (GM, unchanged).
+   - Arrows PAN the view one step (§2.4) — IDENTICAL delta to the matching
+     #nav-panel arrow button (owner req 3). This RETIRES the old arrow-key
+     "nudge the selected entity" behavior (spec A2: wireframes §9) — movement
+     is click/tap only; the awareness list keeps its Tab/Enter/Space surface.
+   - `+` / `=` zoom in one level, `-` zooms out (§4.1).
+   Guards (§4.3/A4/A5): fully ignored while focus is in an input/textarea/
+   select/contenteditable (native editing untouched — no preventDefault);
+   ignored with ANY modifier (never fight browser zoom/shortcuts);
+   only when the map view is visible, joined, and a map exists.
+   No other keys are bound (no "0"=fit, no wheel zoom, no Home/End, A5).
+   Guarded/capped presses are silent no-ops (no toast). */
 document.addEventListener("keydown", (ev) => {
   if (ev.key === "Escape") {
     if (!els.mapView.hidden) selectEntity(null);
@@ -1932,17 +2239,30 @@ document.addEventListener("keydown", (ev) => {
       return;
     }
   }
-  const dirs = { ArrowUp: [0, -1], ArrowDown: [0, 1], ArrowLeft: [-1, 0], ArrowRight: [1, 0] };
-  if (dirs[ev.key] && state.joined && state.selectedEntityId &&
-      !els.mapView.hidden) {
-    ev.preventDefault();
-    const e = allEntities().find((x) => x.id === state.selectedEntityId);
-    if (!e) return;
-    const [dx, dy] = dirs[ev.key];
-    sendMove(e.id, e.x + dx, e.y + dy,
-             state.role === "gm" ? els.overrideToggle.checked : false);
+  if (focusInField(ev.target)) return;   // §4.3 input focus guard (A3)
+  if (ev.ctrlKey || ev.metaKey || ev.altKey || ev.shiftKey) return; // A4
+  if (els.mapView.hidden || !state.joined || !state.grid) return;
+  switch (ev.key) {
+    case "ArrowLeft":  ev.preventDefault(); panBy(-1, 0); return;
+    case "ArrowRight": ev.preventDefault(); panBy(1, 0);  return;
+    case "ArrowUp":    ev.preventDefault(); panBy(0, -1); return;
+    case "ArrowDown":  ev.preventDefault(); panBy(0, 1);  return;
+    case "+": case "=": ev.preventDefault(); zoomBy(1);  return; // main-row + numpad
+    case "-":           ev.preventDefault(); zoomBy(-1); return;
   }
 });
+
+// Nav panel buttons (pan-zoom spec §3.2): real <button>s — one click = one
+// step, the SAME delta as the matching arrow key (owner req 2/3). Native
+// `disabled` (set by syncNavControls) blocks pointer + keyboard activation;
+// Space/Enter on a FOCUSED enabled button activates it natively (the §4.3
+// guard does not intercept buttons — a BUTTON is not a field).
+els.navLeft.addEventListener("click", () => panBy(-1, 0));
+els.navRight.addEventListener("click", () => panBy(1, 0));
+els.navUp.addEventListener("click", () => panBy(0, -1));
+els.navDown.addEventListener("click", () => panBy(0, 1));
+els.zoomOut.addEventListener("click", () => zoomBy(-1));
+els.zoomIn.addEventListener("click", () => zoomBy(1));
 
 /* ───────────────────────────── Drawer (tablet) ───────────────────────────── */
 
@@ -2228,5 +2548,6 @@ els.joinName.addEventListener("keydown", (ev) => {
 
 setConn("offline", "Offline");
 syncLobbyButtons();
+syncNavControls();   // pre-welcome: no map → all six nav controls disabled
 showView("lobby");
 connectWs();

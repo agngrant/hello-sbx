@@ -320,29 +320,44 @@ class TestAwarenessTiersPlayer(FrontendBase):
             "fog:false});")
 
     def test_canvas_renders_full_token_with_label_and_gray_approx_question(self):
-        # 16x12 grid on the 800x600 harness canvas → cell 50, origin (0,0).
-        # FULL item (3,1):  token circle arc(175,75,r); name label "Bob".
-        # APPROX item (2,1): block spans pixels (200..300, 100..200);
-        # the "?" marker sits at the block CENTER → arc(250,150,r).
+        # 16x12 grid, harness canvas 800x584 → the view auto-fits to the
+        # smallest covering level (L4, 16x13) → cell 50, origin (0,0).
+        # Under pan/zoom the single (s, ox, oy) origin is the contract (AC18):
+        # the full-token center and the approx "?" block center must equal
+        # (offset + (cell + 0.5)*cell) of their map coords. We read the LIVE
+        # cell/offsets so the test holds at any view level, then assert
+        # alignment and rule out the two classic misalignments.
         expr = (
             self._player_state()
             + "api.els.mapView.hidden=false;"
             + "api.renderAll();"
             + "const c=api.els.canvas.getContext('2d');"
-            + "return {arcs:c._arcs,texts:c._texts};})()"
+            + "const s=api.state.cell, ox=api.state.offsetX, oy=api.state.offsetY;"
+            + "return {arcs:c._arcs,texts:c._texts,s,ox,oy};})()"
         )
         out = js(expr)
-        # Full contact (3,1) → token circle drawn at the EXACT cell center.
-        self.assertIn('[176,76,18.24', out, out)
+        d = json.loads(out)
+        s, ox, oy = d["s"], d["ox"], d["oy"]
+        # arcs are [cx, cy, r] — compare (cx, cy) pairs only.
+        centers = {(a[0], a[1]) for a in d["arcs"]}
+
+        def at(cx, cy):
+            return (round(cx, 2), round(cy, 2))
+
+        # FULL token (3,1) → circle drawn at the EXACT cell center.
+        self.assertIn(at(ox + (3 + 0.5) * s, oy + (1 + 0.5) * s), centers,
+                      "full token center must equal offset + (cell+0.5)*cell")
         self.assertIn('"Bob"', out, out)          # FULL name label drawn
         self.assertIn('"B"', out)                 # identity letter drawn
         self.assertIn('"?"', out, out)            # approximate marker glyph
-        # The "?" marker is at the block CENTER (248,148) — NOT at the block
-        # origin cell center (128,120) and NOT where an "item.x is a cell"
-        # render would put it (128,76).
-        self.assertIn('[248,148,14.39', out, out)
-        self.assertNotIn('[128,120', out)
-        self.assertNotIn('[128,76', out)
+        # The "?" marker is at the 2x2 block CENTER — NOT at the block
+        # ORIGIN cell center (a misalignment bug) and NOT on the block corner.
+        self.assertIn(at(ox + (2 * 2 + 1) * s, oy + (1 * 2 + 1) * s), centers)
+        self.assertNotIn(at(ox + (2 + 0.5) * s, oy + (1 + 0.5) * s), centers,
+                         "approx marker must NOT sit on the origin cell")
+        self.assertNotIn(at(ox + (2 * 2) * s, oy + (1 * 2) * s), centers,
+                         "approx marker must NOT sit on the block corner")
+
 
     def test_approx_item_renders_no_identity(self):
         # An approximate item must NOT leak the entity's name/id anywhere in
@@ -1770,9 +1785,11 @@ class TestExploredMapRender(FrontendBase):
 
     def test_player_render_no_fill_over_hidden_cell(self):
         # A matrix whose ONLY S/E cells are (1,1) [S] and (3,2) [E]; every
-        # other cell is H. No fill may cover an H cell. With s=146, ox=27,
-        # oy=0 the two S/E floors land at known rects; any OTHER floor fill
-        # would be a bug.
+        # other cell is H. No fill may cover an H cell. The two S/E floors
+        # land at (offset + cell*size, ...) per the live view; any OTHER
+        # floor fill would be a bug. The geometry is read from state so the
+        # test holds under the pan/zoom view model (the 5x4 map auto-fits to
+        # L0's 6x5 window, so cell/offsets differ from the old fit-to-map).
         vis = json.dumps(["HHHHH", "HSHHH", "HHHEH", "HHHHH"])
         expr = (
             "(()=>{const map=" + self._MAP_JS + ";"
@@ -1784,15 +1801,17 @@ class TestExploredMapRender(FrontendBase):
             "visibility:" + vis + "});"
             "api.els.mapView.hidden=false;api.renderAll();"
             "const c=api.els.canvas.getContext('2d');"
-            "return c._fills.filter(f=>f.style==='#efe9dc'||f.style==='#6b7280')"
-            ".map(f=>[f.x,f.y,f.w,f.h,f.style]);})()"
+            "const s=api.state.cell, ox=api.state.offsetX, oy=api.state.offsetY;"
+            "return {s,ox,oy,fills:c._fills"
+            ".filter(f=>f.style==='#efe9dc'||f.style==='#6b7280')"
+            ".map(f=>[f.x,f.y,f.w,f.h,f.style])};})()"
         )
         out = json.loads(js(expr))
-        # S/E floor rects (s=146, ox=27, oy=0):
-        #   (1,1) [S] -> (27+146, 0+146) = (173,146,146,146)
-        #   (3,2) [E] -> (27+3*146, 0+2*146) = (465,292,146,146)
-        expected = {(173, 146, 146, 146), (465, 292, 146, 146)}
-        got = {(f[0], f[1], f[2], f[3]) for f in out}
+        s, ox, oy = out["s"], out["ox"], out["oy"]
+        # S/E floor rects: (1,1) [S] and (3,2) [E].
+        expected = {(ox + 1 * s, oy + 1 * s, s, s),
+                    (ox + 3 * s, oy + 2 * s, s, s)}
+        got = {(f[0], f[1], f[2], f[3]) for f in out["fills"]}
         self.assertEqual(got, expected,
                          "floor fills must land EXACTLY on the S and E cells, "
                          "never on an H cell: got %s expected %s" % (got, expected))
@@ -3304,5 +3323,681 @@ class TestSafeDoorHints(FrontendBase):
 
 
 
-if __name__ == "__main__":
+# ═══════════════════════════════════════════════════════════════════════════
+# Pan & Zoom (docs/design/pan-zoom.md) — AC1..AC22 driven by the Node harness.
+# The stub DOM carries the six nav buttons (clickable, disabled/title), a
+# controllable #canvas-wrap size, pointer→clientX/Y events, document/window
+# listener dispatch (keyboard + resize) and a flushable requestAnimationFrame.
+# ═══════════════════════════════════════════════════════════════════════════
+
+# Frozen §5.1 level table + §2.4 step table (W×H, stepX, stepY) per level.
+PZ_LEVELS = [(6, 5), (8, 7), (10, 8), (13, 11), (16, 13), (20, 17),
+             (25, 21), (30, 25), (40, 33), (50, 42), (60, 50)]
+PZ_STEP_X = [1, 1, 1, 1, 2, 2, 3, 3, 4, 5, 6]
+PZ_STEP_Y = [1, 1, 1, 1, 1, 2, 2, 3, 3, 4, 5]
+
+
+def _floor_map_js(w, h):
+    """A compact JS object literal for a w×h all-floor map."""
+    return ("{name:'m',width:%d,height:%d,cells:Array.from({length:%d},"
+            "()=>Array(%d).fill('floor'))}" % (w, h, h, w))
+
+
+class TestPanZoom(FrontendBase):
+    """Pan & Zoom (docs/design/pan-zoom.md) AC1..AC22.
+
+    The harness re-exports the real view-math (LEVELS, fitLevel, viewStep,
+    viewBounds, applyView, panBy, zoomBy, fitToMap, syncNavControls,
+    focusInField, cellFromEvent) and carries the six nav buttons plus a
+    controllable canvas-wrap size, so these tests run the REAL app.js code.
+    """
+
+    # Shared JS fragments.
+    _BTN = (
+        "({L:api.els.navLeft.disabled,lT:api.els.navLeft.title,"
+        "R:api.els.navRight.disabled,rT:api.els.navRight.title,"
+        "U:api.els.navUp.disabled,uT:api.els.navUp.title,"
+        "D:api.els.navDown.disabled,dT:api.els.navDown.title,"
+        "Zi:api.els.zoomIn.disabled,zit:api.els.zoomIn.title,"
+        "Zo:api.els.zoomOut.disabled,zot:api.els.zoomOut.title,"
+        "ro:api.els.navReadout.textContent})")
+
+    def _geo(self):
+        return ("({cell:api.state.cell,ox:api.state.offsetX,"
+                "oy:api.state.offsetY,v:api.state._view,view:api.state.view})")
+
+    def _gm_welcome(self, w, h, entities_js="[]"):
+        return (
+            "(()=>{const map=" + _floor_map_js(w, h) + ";"
+            "api.onWelcome({type:'welcome',"
+            "you:{id:'p1',name:'G',role:'gm',entity_id:null},"
+            "map,entities:" + entities_js + ",players:[],"
+            "awareness:[],fog:false});")
+
+    def _vset(self, level, px, py, avail=(800, 400)):
+        """JS to set the view level+pan and the canvas-wrap size, then
+        re-layout (applyView) + sync the nav controls."""
+        cw, ch = avail[0] + 16, avail[1] + 16
+        return (
+            "api.state.view.level=%d;api.state.view.panX=%d;api.state.view.panY=%d;"
+            "api.els.canvasWrap.clientWidth=%d;api.els.canvasWrap.clientHeight=%d;"
+            "api.layoutCanvas();api.syncNavControls();" % (level, px, py, cw, ch))
+
+    # ── AC7: level table conformance + cell formula ───────────────────────
+    def test_ac7_level_table_and_cell_formula(self):
+        # On a 60×60 map, for every L0..L10 the visible window equals the
+        # frozen W×H and cell obeys max(1, floor(min(availW/W, availH/H))).
+        expr = (
+            self._gm_welcome(60, 60)
+            + "api.els.canvasWrap.clientWidth=816;"
+            + "api.els.canvasWrap.clientHeight=416;"
+            + "const out=[];"
+            + "for(let L=0;L<11;L++){"
+            + "api.state.view.level=L;api.state.view.panX=0;"
+            + "api.state.view.panY=0;api.layoutCanvas();"
+            + "const v=api.state._view;"
+            + "out.push({L,W:v.W,H:v.H,cell:v.s});}"
+            + "return out;})()")
+        got = json.loads(js(expr))
+        self.assertEqual(len(got), 11)
+        for i, row in enumerate(got):
+            w, h = PZ_LEVELS[i]
+            self.assertEqual((row["W"], row["H"]), (w, h), "level %d" % i)
+            # cell = max(1, floor(min(800/W, 400/H)))
+            self.assertEqual(row["cell"],
+                             max(1, int(min(800 / w, 400 / h))),
+                             "level %d" % i)
+
+    # ── AC8: square cells + letterboxing (exact numbers) ──────────────────
+    def test_ac8_square_cells_and_letterbox(self):
+        out = json.loads(js(
+            self._gm_welcome(60, 60) + self._vset(0, 0, 0, (800, 400))
+            + "const a=" + self._geo() + ";"
+            + self._vset(10, 0, 0, (800, 400))
+            + "const b=" + self._geo() + ";"
+            + "return {a,b};})()"))
+        a, b = out["a"], out["b"]
+        # L0 (6×5): cell 80 (400/5 < 800/6), offsetX (800-480)/2=160, oy 0.
+        self.assertEqual(a["cell"], 80)
+        self.assertEqual(a["ox"], 160)
+        self.assertEqual(a["oy"], 0)
+        self.assertEqual((a["v"]["W"], a["v"]["H"]), (6, 5))
+        # L10 (60×50): cell 8 (floor(min(800/60, 400/50))), offsets 160/0.
+        self.assertEqual(b["cell"], 8)
+        self.assertEqual(b["ox"], 160)
+        self.assertEqual(b["oy"], 0)
+        self.assertEqual((b["v"]["W"], b["v"]["H"]), (60, 50))
+        # one cell for both axes (square cells).
+        self.assertEqual(a["v"]["s"], a["cell"])
+        self.assertEqual(b["v"]["s"], b["cell"])
+
+    # ── AC4/AC6: zoom stepping both directions + extremes ─────────────────
+    def test_ac4_ac6_zoom_buttons_step_and_extremes(self):
+        out = json.loads(js(
+            self._gm_welcome(60, 60)
+            + self._vset(0, 0, 0, (800, 400))
+            + "const at0=" + self._BTN + ";"
+            + "for(let i=0;i<10;i++)api.els.zoomIn.dispatchEvent({type:'click'});"
+            + "const lvl10=api.state.view.level;const at10=" + self._BTN + ";"
+            + "for(let i=0;i<10;i++)api.els.zoomOut.dispatchEvent({type:'click'});"
+            + "const lvl0=api.state.view.level;"
+            + "return {at0,at10,lvl10,lvl0};})()"))
+        self.assertEqual(out["lvl10"], 10)
+        self.assertEqual(out["lvl0"], 0)
+        at0, at10 = out["at0"], out["at10"]
+        # L0: zoom-out disabled "Maximum zoom (6×5)"; zoom-in enabled.
+        self.assertTrue(at0["Zo"])
+        self.assertEqual(at0["zot"], "Maximum zoom (6×5)")
+        self.assertFalse(at0["Zi"])
+        # L10: zoom-in disabled "Minimum zoom (60×50)"; zoom-out enabled.
+        self.assertTrue(at10["Zi"])
+        self.assertEqual(at10["zit"], "Minimum zoom (60×50)")
+        self.assertFalse(at10["Zo"])
+
+    def test_ac6_no_level_outside_range(self):
+        out = json.loads(js(
+            self._gm_welcome(60, 60) + self._vset(0, 0, 0, (800, 400))
+            + "for(let i=0;i<20;i++)api.zoomBy(1);const top=api.state.view.level;"
+            + "for(let i=0;i<40;i++)api.zoomBy(-1);const bot=api.state.view.level;"
+            + "return {top,bot};})()"))
+        self.assertEqual(out["top"], 10)
+        self.assertEqual(out["bot"], 0)
+
+    # ── AC9: pan step table (viewStep) + movement ─────────────────────────
+    def test_ac9_pan_step_table(self):
+        out = json.loads(js(
+            "(()=>{const sx=[],sy=[];"
+            "for(let L=0;L<11;L++){sx.push(api.viewStep(L,'x'));"
+            "sy.push(api.viewStep(L,'y'));}"
+            "return {sx,sy};})()"))
+        self.assertEqual(out["sx"], PZ_STEP_X)
+        self.assertEqual(out["sy"], PZ_STEP_Y)
+
+    def test_ac9_panby_moves_by_step(self):
+        out = json.loads(js(
+            self._gm_welcome(60, 60) + self._vset(4, 0, 0, (800, 400))
+            + "api.panBy(1,0);const ax=api.state.view.panX;"
+            + "api.panBy(0,1);const ay=api.state.view.panY;"
+            + "return {ax,ay};})()"))
+        self.assertEqual(out["ax"], PZ_STEP_X[4])   # L4 stepX = 2
+        self.assertEqual(out["ay"], PZ_STEP_Y[4])   # L4 stepY = 1
+
+    # ── AC10: pan clamp + edge disabled states ────────────────────────────
+    def test_ac10_pan_clamp_and_edge_titles(self):
+        # 40×30 map at L0 (6×5): panX ∈ [0,34], panY ∈ [0,25].
+        out = json.loads(js(
+            self._gm_welcome(40, 30) + self._vset(0, 0, 0, (800, 400))
+            + "const atWest=" + self._BTN + ";"
+            + "for(let i=0;i<200;i++)api.panBy(1,0);"
+            + "for(let i=0;i<200;i++)api.panBy(0,1);"
+            + "const px=api.state.view.panX,py=api.state.view.panY;"
+            + "const atEast=" + self._BTN + ";"
+            + "return {atWest,atEast,px,py};})()"))
+        self.assertEqual(out["px"], 34)   # clamped to 40-6
+        self.assertEqual(out["py"], 25)   # clamped to 30-5
+        self.assertTrue(out["atWest"]["L"], "← disabled at west edge")
+        self.assertEqual(out["atWest"]["lT"], "Panned to the west edge")
+        self.assertTrue(out["atEast"]["R"], "→ disabled at east edge")
+        self.assertEqual(out["atEast"]["rT"], "Panned to the east edge")
+        self.assertTrue(out["atEast"]["D"], "↓ disabled at south edge")
+        self.assertFalse(out["atEast"]["U"], "↑ enabled mid-map")
+
+    # ── AC11: map smaller than the view on an axis → centered + locked ────
+    def test_ac11_small_map_both_axes_locked(self):
+        # A 60×10 map at L10 (60×50 window): 60≤60 AND 10≤50 → both axes
+        # locked, pan (0,0), map centered.
+        out = json.loads(js(
+            self._gm_welcome(60, 10) + self._vset(10, 0, 0, (800, 400))
+            + "const at=" + self._BTN + ";const v=api.state.view;"
+            + "return {at,v};})()"))
+        at, v = out["at"], out["v"]
+        for k in ("L", "R", "U", "D"):
+            self.assertTrue(at[k], "arrow %s must be axis-locked" % k)
+        self.assertEqual(at["lT"], "Map fits horizontally — no pan")
+        self.assertEqual(at["uT"], "Map fits vertically — no pan")
+        self.assertEqual((v["panX"], v["panY"]), (0, 0))
+
+    def test_ac11_zoom_in_unlocks_horizontal_only(self):
+        # 60×10 at L9 (50×42): mw=60>50 → horizontal unlocks (range 10,
+        # step 5); vertical 10≤42 stays locked; panY pinned at 0.
+        out = json.loads(js(
+            self._gm_welcome(60, 10) + self._vset(9, 0, 0, (800, 400))
+            + "const at=" + self._BTN + ";"
+            + "api.panBy(1,0);const px=api.state.view.panX;"
+            + "api.panBy(0,1);const py=api.state.view.panY;"
+            + "return {at,px,py};})()"))
+        self.assertFalse(out["at"]["R"], "→ enabled once horizontal unlocks")
+        self.assertTrue(out["at"]["U"], "↑ still axis-locked (vertical)")
+        self.assertEqual(out["at"]["uT"], "Map fits vertically — no pan")
+        self.assertEqual(out["px"], 5, "horizontal step at L9 = 5")
+        self.assertEqual(out["py"], 0, "vertical stays locked")
+
+    # ── AC12: initial view fits the whole map (§5.3 table) ────────────────
+    def test_ac12_initial_fit_per_table(self):
+        cases = [(6, 5, 0), (4, 4, 0), (2, 3, 0), (8, 6, 1), (10, 8, 2),
+                 (12, 10, 3), (15, 15, 5), (24, 16, 6), (40, 30, 8),
+                 (55, 45, 10), (60, 50, 10), (60, 60, 10), (30, 60, 10)]
+        for w, h, expect in cases:
+            out = json.loads(js(
+                self._gm_welcome(w, h) + "return api.state.view;})()"))
+            self.assertEqual(out["level"], expect,
+                             "fit %dx%d -> L%d" % (w, h, expect))
+            self.assertEqual(out["panX"], 0)
+            self.assertEqual(out["panY"], 0)
+
+    def test_ac12_fitted_map_inside_window(self):
+        # 24×16 → L6 (25×21 window) covers the whole map: window == map.
+        out = json.loads(js(
+            self._gm_welcome(24, 16) + self._vset(6, 0, 0, (800, 400))
+            + "return api.state._view;})()"))
+        v = out
+        self.assertEqual((v["x0"], v["y0"]), (0, 0))
+        self.assertEqual((v["x1"], v["y1"]), (24, 16))
+
+    # ── AC13: re-fit on map swap (use_map) ────────────────────────────────
+    def test_ac13_refit_on_map_swap(self):
+        # Old 60×60 map at (L3, 5,5); a state frame for a 24×16 map re-fits
+        # to L6, pan (0,0), and renders the new grid.
+        out = json.loads(js(
+            self._gm_welcome(60, 60) + self._vset(3, 5, 5, (800, 400))
+            + "const before={level:api.state.view.level,"
+            + "pan:[api.state.view.panX,api.state.view.panY],"
+            + "gw:api.state.grid.width};"
+            + "const newmap=" + _floor_map_js(24, 16) + ";"
+            + "api.onState({type:'state',map:newmap,entities:[],players:[],"
+            + "awareness:[],fog:false});"
+            + "return {before,"
+            + "after:{level:api.state.view.level,"
+            + "pan:[api.state.view.panX,api.state.view.panY],"
+            + "gw:api.state.grid.width,gh:api.state.grid.height}};})()"))
+        self.assertEqual(out["before"]["level"], 3)
+        self.assertEqual(out["before"]["pan"], [5, 5])
+        self.assertEqual(out["before"]["gw"], 60)
+        self.assertEqual(out["after"]["gw"], 24)
+        self.assertEqual(out["after"]["gh"], 16)
+        self.assertEqual(out["after"]["level"], 6)
+        self.assertEqual(out["after"]["pan"], [0, 0])
+
+    # ── AC14: resize keeps level + clamped pan (no re-fit) ────────────────
+    def test_ac14_resize_keeps_level_and_pan(self):
+        out = json.loads(js(
+            self._gm_welcome(60, 60) + self._vset(6, 8, 4, (800, 400))
+            + "const before=" + self._geo() + ";"
+            + "api.els.canvasWrap.clientWidth=616;"
+            + "api.els.canvasWrap.clientHeight=516;"
+            + "api._window.dispatch('resize',{});"
+            + "api._timer.advance(100);"
+            + "const after=" + self._geo() + ";"
+            + "return {before,after};})()"))
+        b, a = out["before"], out["after"]
+        # level + pan unchanged (fit of 60×60 is L10; staying at L6 proves
+        # there was NO re-fit on resize).
+        self.assertEqual(a["view"]["level"], 6)
+        self.assertEqual((a["view"]["panX"], a["view"]["panY"]), (8, 4))
+        # cell recomputed for the new avail (600×500) at L6 (25×21):
+        # floor(min(600/25, 500/21)) = floor(min(24, 23.8)) = 23.
+        self.assertEqual(a["cell"], 23)
+        self.assertNotEqual(a["cell"], b["cell"], "cell changes with size")
+        self.assertGreaterEqual(a["view"]["panX"], 0)
+        self.assertLessEqual(a["view"]["panX"], 60 - 25)
+
+    # ── AC2: arrow buttons pan by the step; the window follows ────────────
+    def test_ac2_arrow_buttons_pan_by_step(self):
+        # 40×30 at L4 (16×13), pan (5,3). Each button pans its axis by the
+        # step (L4: stepX=2, stepY=1) and the rendered window follows.
+        out = json.loads(js(
+            self._gm_welcome(40, 30) + self._vset(4, 5, 3, (800, 400))
+            + "const base={x0:api.state._view.x0,y0:api.state._view.y0};"
+            + "api.els.navLeft.dispatchEvent({type:'click'});"
+            + "const l={px:api.state.view.panX,py:api.state.view.panY,"
+            + "x0:api.state._view.x0,y0:api.state._view.y0};"
+            + "api.els.navRight.dispatchEvent({type:'click'});"
+            + "const r={px:api.state.view.panX,py:api.state.view.panY};"
+            + "api.els.navUp.dispatchEvent({type:'click'});"
+            + "const u={px:api.state.view.panX,py:api.state.view.panY};"
+            + "api.els.navDown.dispatchEvent({type:'click'});"
+            + "const d={px:api.state.view.panX,py:api.state.view.panY};"
+            + "return {base,l,r,u,d};})()"))
+        self.assertEqual((out["base"]["x0"], out["base"]["y0"]), (5, 3))
+        self.assertEqual(out["l"]["px"], 3)    # ← : panX −2
+        self.assertEqual(out["l"]["py"], 3)    # …panY unchanged
+        self.assertEqual(out["l"]["x0"], 3)    # window x0 follows
+        self.assertEqual(out["l"]["y0"], 3)
+        self.assertEqual(out["r"]["px"], 5)    # → : back to 5
+        self.assertEqual(out["u"]["px"], 5)    # ↑ : panY −1, panX unchanged
+        self.assertEqual(out["u"]["py"], 2)
+        self.assertEqual(out["d"]["py"], 3)    # ↓ : back to 3
+        self.assertEqual(out["d"]["px"], 5)
+
+    # ── AC3: cursor keys produce an identical delta to the buttons ────────
+    def test_ac3_cursor_keys_match_button_delta(self):
+        out = json.loads(js(
+            self._gm_welcome(40, 30) + self._vset(4, 10, 5, (800, 400))
+            + "const base={px:api.state.view.panX,py:api.state.view.panY};"
+            + "api.document.dispatch('keydown',"
+            + "{key:'ArrowLeft',target:{},preventDefault(){}});"
+            + "const key={px:api.state.view.panX,py:api.state.view.panY};"
+            + "api.state.view.panX=base.px;api.state.view.panY=base.py;"
+            + "api.syncNavControls();"
+            + "api.els.navLeft.dispatchEvent({type:'click'});"
+            + "const btn={px:api.state.view.panX,py:api.state.view.panY};"
+            + "return {base,key,btn};})()"))
+        self.assertEqual(out["key"]["px"], out["base"]["px"] - PZ_STEP_X[4])
+        self.assertEqual(out["key"]["py"], out["base"]["py"])
+        self.assertEqual(out["key"], out["btn"],
+                         "cursor key delta must equal the button delta")
+
+    # ── AC5: + / = / - keys zoom in / in / out ────────────────────────────
+    def test_ac5_cursor_keys_zoom(self):
+        out = json.loads(js(
+            self._gm_welcome(60, 60) + self._vset(5, 0, 0, (800, 400))
+            + "api.document.dispatch('keydown',"
+            + "{key:'+',target:{},preventDefault(){}});"
+            + "const plus=api.state.view.level;"
+            + "api.document.dispatch('keydown',"
+            + "{key:'=',target:{},preventDefault(){}});"
+            + "const eq=api.state.view.level;"
+            + "api.document.dispatch('keydown',"
+            + "{key:'-',target:{},preventDefault(){}});"
+            + "const minus=api.state.view.level;"
+            + "return {plus,eq,minus};})()"))
+        self.assertEqual(out["plus"], 6)
+        self.assertEqual(out["eq"], 7)
+        self.assertEqual(out["minus"], 6)
+
+    # ── A2: arrows PAN (retired arrow-key entity move) ─────────────────────
+    def test_a2_arrows_pan_not_move(self):
+        # With an entity selected, ArrowUp must PAN the view and send NO
+        # move frame (the old arrow-key nudge behavior is retired).
+        ents = ("[{id:'e1',name:'N',kind:'npc',team:'neutral',x:10,y:10}]")
+        out = json.loads(js(
+            self._gm_welcome(40, 30, entities_js=ents)
+            + self._vset(4, 10, 5, (800, 400))
+            + "api.selectEntity('e1');"
+            + "api._send.reset();"
+            + "api.document.dispatch('keydown',"
+            + "{key:'ArrowUp',target:{},preventDefault(){}});"
+            + "const py=api.state.view.panY;"
+            + "return {py,sent:api._send.sent.map(m=>m.type)};})()"))
+        self.assertEqual(out["py"], 4)   # panned up by stepY (L4 = 1)
+        self.assertEqual(out["sent"], [], "arrows must not move the entity")
+
+    # ── AC15: input focus guard (field → fully ignored) ───────────────────
+    def test_ac15_input_focus_guard(self):
+        out = json.loads(js(
+            self._gm_welcome(40, 30) + self._vset(4, 10, 5, (800, 400))
+            + "const before={px:api.state.view.panX,py:api.state.view.panY,"
+            + "level:api.state.view.level};"
+            + "for(const tag of ['INPUT','TEXTAREA','SELECT']){"
+            + "const ev1={key:'ArrowUp',target:{tagName:tag},"
+            + "preventDefault(){this.pd=true}};"
+            + "api.document.dispatch('keydown',ev1);"
+            + "const ev2={key:'-',target:{tagName:tag},"
+            + "preventDefault(){this.pd=true}};"
+            + "api.document.dispatch('keydown',ev2);"
+            + "if(ev1.pd||ev2.pd)return{err:'preventDefault over a field'};"
+            + "}"
+            + "const after={px:api.state.view.panX,py:api.state.view.panY,"
+            + "level:api.state.view.level};"
+            + "return {before,after};})()"))
+        self.assertNotIn("err", out)
+        self.assertEqual(out["before"], out["after"],
+                         "no pan/zoom while focus is in a field")
+
+    def test_ac15_contenteditable_guard(self):
+        # A contenteditable target is also guarded (A3).
+        out = json.loads(js(
+            self._gm_welcome(40, 30) + self._vset(4, 10, 5, (800, 400))
+            + "api.document.dispatch('keydown',"
+            + "{key:'ArrowDown',target:{tagName:'DIV',isContentEditable:true},"
+            + "preventDefault(){}});"
+            + "return {py:api.state.view.panY};})()"))
+        self.assertEqual(out["py"], 5, "contenteditable must not pan")
+
+    def test_ac15_non_field_pans(self):
+        out = json.loads(js(
+            self._gm_welcome(40, 30) + self._vset(4, 10, 5, (800, 400))
+            + "api.document.dispatch('keydown',"
+            + "{key:'ArrowUp',target:{},preventDefault(){}});"
+            + "return {py:api.state.view.panY};})()"))
+        self.assertEqual(out["py"], 4)
+
+    # ── AC16: painting / door / safe-door under the transform ─────────────
+    def _gm_wall_ctx(self, level, px, py, avail=(800, 400)):
+        return (self._gm_welcome(40, 30) + self._vset(level, px, py, avail)
+                + "api.setTool('wall');")
+
+    def test_ac16_paint_resolves_cell_under_transform(self):
+        # 40×30 GM at L4 (16×13), pan (2,3), avail 800×400 → cell 30,
+        # offset (100,-85), window x[2,18) y[3,16). A drag across the
+        # window emits paint frames for the cells rendered under each
+        # sampled pixel (including the window-edge cell (17,15)); entering
+        # the letterbox bar (x≥18) emits nothing.
+        out = json.loads(js(
+            self._gm_wall_ctx(4, 2, 3)
+            + "const c=api.state.cell,ox=api.state.offsetX,"
+            + "oy=api.state.offsetY;"
+            + "const P=(x,y)=>({clientX:ox+x*c+c/2,clientY:oy+y*c+c/2});"
+            + "api._send.reset();"
+            + "api.els.canvas.dispatchEvent(Object.assign("
+            + "{type:'pointerdown',pointerId:1},P(2,3)));"
+            + "api.els.canvas.dispatchEvent(Object.assign("
+            + "{type:'pointermove'},P(5,3)));"
+            + "api.els.canvas.dispatchEvent(Object.assign("
+            + "{type:'pointermove'},P(10,8)));"
+            + "api.els.canvas.dispatchEvent(Object.assign("
+            + "{type:'pointermove'},P(17,15)));"
+            + "api.els.canvas.dispatchEvent({type:'pointermove',"
+            + "clientX:ox+18*c+5,clientY:oy+3*c+c/2});"
+            + "api.els.canvas.dispatchEvent({type:'pointerup'});"
+            + "return {sent:api._send.sent,"
+            + "win:[api.state._view.x0,api.state._view.x1,"
+            + "api.state._view.y0,api.state._view.y1]};})()"))
+        self.assertEqual(out["win"], [2, 18, 3, 16])
+        painted = [(m["x"], m["y"], m["cell_type"]) for m in out["sent"]]
+        self.assertEqual(painted,
+                         [(2, 3, "wall"), (5, 3, "wall"),
+                          (10, 8, "wall"), (17, 15, "wall")])
+
+    def test_ac16_door_and_safedoor_tools_resolve_cell(self):
+        out = json.loads(js(
+            self._gm_welcome(40, 30)
+            + "api.state.grid.cells[8][10]='doorway';"
+            + self._vset(4, 2, 3)
+            + "api.setTool('door');"
+            + "api._send.reset();"
+            + "const c=api.state.cell,ox=api.state.offsetX,"
+            + "oy=api.state.offsetY;"
+            + "api.els.canvas.dispatchEvent({type:'click',"
+            + "clientX:ox+10*c+c/2,clientY:oy+8*c+c/2});"
+            + "const door=api._send.sent.slice();"
+            + "api.state.safe={'10,8':'L'};"
+            + "api.setTool('safeDoor');api.setSafeAction('unlock');"
+            + "api._send.reset();"
+            + "api.els.canvas.dispatchEvent({type:'click',"
+            + "clientX:ox+10*c+c/2,clientY:oy+8*c+c/2});"
+            + "return {door,safe:api._send.sent};})()"))
+        self.assertEqual(out["door"],
+                         [{"type": "door", "x": 10, "y": 8,
+                           "action": "unlock"}])
+        self.assertEqual(out["safe"],
+                         [{"type": "safe_door", "x": 10, "y": 8,
+                           "action": "unlock"}])
+
+    # ── AC17: movement + spawn under the transform ─────────────────────────
+    def test_ac17_player_tap_to_move_under_transform(self):
+        out = json.loads(js(
+            "(()=>{const map=" + _floor_map_js(40, 30) + ";"
+            + "api.onWelcome({type:'welcome',"
+            + "you:{id:'p2',name:'Alice',role:'player',entity_id:'e2'},"
+            + "map,entities:[],you_entity:{id:'e2',name:'Alice',"
+            + "kind:'player',team:'party',x:6,y:6},"
+            + "players:[{id:'p2',entity_id:'e2',awareness_radius:4}],"
+            + "awareness:[],fog:false});"
+            + self._vset(5, 4, 2)
+            + "const c=api.state.cell,ox=api.state.offsetX,"
+            + "oy=api.state.offsetY;"
+            + "api._send.reset();"
+            + "api.els.canvas.dispatchEvent({type:'click',"
+            + "clientX:ox+15*c+c/2,clientY:oy+10*c+c/2});"
+            + "return {sent:api._send.sent,"
+            + "win:[api.state._view.x0,api.state._view.y0,"
+            + "api.state._view.x1,api.state._view.y1]};})()"))
+        self.assertEqual(out["win"], [4, 2, 24, 19])
+        self.assertEqual(out["sent"],
+                         [{"type": "move", "entity_id": "e2", "x": 15,
+                           "y": 10, "override": False}])
+
+    def test_ac17_gm_add_spawns_on_hovered_cell(self):
+        out = json.loads(js(
+            self._gm_welcome(40, 30) + self._vset(3, 2, 2)
+            + "const c=api.state.cell,ox=api.state.offsetX,"
+            + "oy=api.state.offsetY;"
+            + "api.els.canvas.dispatchEvent({type:'pointermove',"
+            + "clientX:ox+7*c+c/2,clientY:oy+9*c+c/2});"
+            + "api.els.newEntityKind.value='npc';"
+            + "api.els.newEntityTeam.value='party';"
+            + "api.els.newEntityName.value='Sentry';"
+            + "api._send.reset();"
+            + "api.els.btnNewEntity.dispatchEvent({type:'click'});"
+            + "const spawn=api._send.sent.slice();"
+            + "api.state.selectedEntityId='eX';"
+            + "api._send.reset();"
+            + "api.els.canvas.dispatchEvent({type:'click',"
+            + "clientX:ox+20*c+c/2,clientY:oy+2*c+c/2});"
+            + "return {spawn,offWin:api._send.sent};})()"))
+        self.assertEqual(out["spawn"],
+                         [{"type": "create_entity", "name": "Sentry",
+                           "kind": "npc", "team": "party", "x": 7, "y": 9}])
+        self.assertEqual(out["offWin"], [],
+                         "an out-of-window click must send nothing")
+
+    # ── AC18: awareness overlay alignment under the transform ─────────────
+    def test_ac18_awareness_overlay_alignment(self):
+        out = json.loads(js(
+            "(()=>{const map=" + _floor_map_js(40, 30) + ";"
+            + "api.onWelcome({type:'welcome',"
+            + "you:{id:'p2',name:'Alice',role:'player',entity_id:'e2'},"
+            + "map,entities:[],you_entity:{id:'e2',name:'Alice',"
+            + "kind:'player',team:'party',x:6,y:6},"
+            + "players:[{id:'p2',entity_id:'e2',awareness_radius:4}],"
+            + "awareness:[{entity_id:'e1',x:9,y:7,color:'green',"
+            + "name:'Bob',kind:'player',label:true},"
+            + "{entity_id:'<a>',x:3,y:2,approximate:true,label:false}],"
+            + "fog:false});"
+            + self._vset(4, 3, 4)
+            + "const c=api.state.cell,ox=api.state.offsetX,"
+            + "oy=api.state.offsetY;"
+            + "api.els.canvas.getContext('2d')._arcs.length=0;"
+            + "api.els.canvas.getContext('2d')._fills.length=0;"
+            + "api.els.canvas.getContext('2d')._texts.length=0;"
+            + "api.renderAll();"
+            + "const ctx=api.els.canvas.getContext('2d');"
+            + "const arcs=ctx._arcs.map(a=>[a[0],a[1]]);"
+            + "const rf=ctx._fills.find(f=>"
+            + "f.style==='rgba(77, 171, 247, 0.10)');"
+            + "return {c,ox,oy,arcs,ring:rf?[rf.x,rf.y]:null};})()"))
+        c, ox, oy = out["c"], out["ox"], out["oy"]
+        centers = {(round(x, 2), round(y, 2)) for x, y in out["arcs"]}
+
+        def at(x, y):
+            return (round(ox + (x + 0.5) * c, 2),
+                    round(oy + (y + 0.5) * c, 2))
+
+        self.assertIn(at(6, 6), centers, "own token misaligned")
+        self.assertIn(at(9, 7), centers, "full contact misaligned")
+        # approx item (3,2) → 2×2 block origin cell (6,4); the marker sits
+        # at the block CENTER = origin + 1 cell = pixel (ox+(3*2+1)c, oy+(2*2+1)c).
+        approx_center = (round(ox + (3 * 2 + 1) * c, 2),
+                         round(oy + (2 * 2 + 1) * c, 2))
+        self.assertIn(approx_center, centers, "approx block misaligned")
+        # the awareness ring (own token, radius 4) is centered on the token.
+        self.assertIsNotNone(out["ring"], "awareness ring not drawn")
+        half = (4 + 0.5) * c
+        ring_cx = out["ring"][0] + half
+        ring_cy = out["ring"][1] + half
+        self.assertEqual((round(ring_cx, 2), round(ring_cy, 2)), at(6, 6),
+                         "ring anchor misaligned")
+
+    # ── AC22: render culling (no draw call for off-window entities) ───────
+    def test_ac22_render_culling(self):
+        ents = ("[{id:'en',name:'Near',kind:'npc',team:'neutral',x:5,y:4},"
+                "{id:'ef',name:'Far',kind:'npc',team:'neutral',x:59,y:59}]")
+        out = json.loads(js(
+            self._gm_welcome(60, 60, entities_js=ents)
+            + self._vset(0, 0, 0, (800, 400))
+            + "const C=api.els.canvas.getContext('2d');"
+            + "C._arcs.length=0;C._fills.length=0;C._texts.length=0;"
+            + "api.renderAll();"
+            + "const t0={N:C._texts.includes('N'),"
+            + "F:C._texts.includes('F')};"
+            + "const fills0=C._fills.filter(f=>f.style==='#efe9dc');"
+            + "api.state.view.panX=54;api.state.view.panY=55;"
+            + "api.layoutCanvas();api.syncNavControls();"
+            + "C._arcs.length=0;C._fills.length=0;C._texts.length=0;"
+            + "api.renderAll();"
+            + "const t1={N:C._texts.includes('N'),"
+            + "F:C._texts.includes('F')};"
+            + "const fills1=C._fills.filter(f=>f.style==='#efe9dc');"
+            + "return {t0,t1,s:api.state.cell,fills0:"
+            + "fills0.map(f=>[f.w,f.h]),fills1:"
+            + "fills1.map(f=>[f.w,f.h])};})()"))
+        # the grid pass fills only the 6×5 window (one rect), not the map.
+        self.assertEqual(out["fills0"], [[6 * out["s"], 5 * out["s"]]])
+        self.assertEqual(out["fills1"], [[6 * out["s"], 5 * out["s"]]])
+        # near entity (5,4) drawn at the NW corner, far (59,59) culled;
+        # after panning to the SE corner the far entity is drawn, near gone.
+        self.assertTrue(out["t0"]["N"])
+        self.assertFalse(out["t0"]["F"])
+        self.assertTrue(out["t1"]["F"])
+        self.assertFalse(out["t1"]["N"])
+
+    # ── AC1: every cell becomes reachable / visible ───────────────────────
+    def test_ac1_navigable_cell5959(self):
+        # cell (59,59) is visible at L10/pan(0,10); the L0 SE corner of a
+        # 60×60 map is pan(54,55) (max panX=60-6=54, max panY=60-5=55),
+        # which shows window x[54,60) y[55,60) ⊇ (59,59). (The spec's "L0,
+        # pan (54, 54)" example is off-by-one: at panY 54 row 59 is 1px out.)
+        out = json.loads(js(
+            self._gm_welcome(60, 60) + self._vset(10, 0, 10, (800, 400))
+            + "const v1=api.state._view;"
+            + self._vset(0, 54, 55, (800, 400))
+            + "const v2=api.state._view;"
+            + "const inW=(v,x,y)=>x>=v.x0&&x<v.x1&&y>=v.y0&&y<v.y1;"
+            + "return {a:inW(v1,59,59),b:inW(v2,59,59)};})()"))
+        self.assertTrue(out["a"], "visible at L10 pan(0,10)")
+        self.assertTrue(out["b"], "visible at L0 pan(54,55)")
+
+    # ── AC19: 60×60 (E7) — horizontal locked, vertical pan 0/5/10 ────────
+    def test_ac19_sixty_by_sixty_vertical_pan(self):
+        out = json.loads(js(
+            self._gm_welcome(60, 60) + self._vset(10, 0, 0, (800, 400))
+            + "const fit=Object.assign({level:api.state.view.level},"
+            + self._BTN + ");"
+            + "api.panBy(0,1);api.panBy(0,1);"
+            + "const down2=Object.assign({py:api.state.view.panY},"
+            + self._BTN + ");"
+            + "api.panBy(0,-1);api.panBy(0,-1);"
+            + "const up2=Object.assign({py:api.state.view.panY},"
+            + self._BTN + ");"
+            + "return {fit,down2,up2};})()"))
+        fit = out["fit"]
+        self.assertEqual(fit["level"], 10, "60×60 fits to L10")
+        self.assertEqual(fit["lT"], "Map fits horizontally — no pan")
+        self.assertTrue(fit["L"] and fit["R"], "←/→ permanently disabled")
+        self.assertTrue(fit["U"], "↑ disabled at fit (panY=0)")
+        self.assertFalse(fit["D"])
+        self.assertEqual(out["down2"]["py"], 10, "↓×2 → 0→5→10")
+        self.assertTrue(out["down2"]["D"], "↓ disabled at south edge")
+        self.assertFalse(out["down2"]["U"], "↑ enabled mid-map")
+        self.assertEqual(out["up2"]["py"], 0, "↑×2 → 10→5→0")
+        self.assertTrue(out["up2"]["U"], "↑ re-disabled at north edge")
+
+    # ── AC20: rapid key repeat (E8) — exact steps + one rAF render ────────
+    def test_ac20_rapid_key_repeat(self):
+        out = json.loads(js(
+            self._gm_welcome(60, 60) + self._vset(10, 0, 0, (800, 400))
+            + "for(let i=0;i<5;i++)api.document.dispatch('keydown',"
+            + "{key:'ArrowDown',target:{},preventDefault(){}});"
+            + "const q=api._rfr.queue.length;"
+            + "api._rfr.dispatch();"
+            + "const renders=api._rfr.renderCalls;"
+            + "return {py:api.state.view.panY,q,renders};})()"))
+        self.assertEqual(out["py"], 10, "5 steps of 5 clamp at 10")
+        self.assertEqual(out["q"], 1, "at most one rAF render queued")
+        self.assertEqual(out["renders"], 1, "one render per frame")
+
+    # ── AC21: per-client, frontend-only (no wire frames) ──────────────────
+    def test_ac21_view_ops_send_no_wire_frames(self):
+        out = json.loads(js(
+            self._gm_welcome(60, 60) + self._vset(4, 0, 0, (800, 400))
+            + "api._send.reset();"
+            + "for(let i=0;i<5;i++)api.panBy(1,0);"
+            + "for(let i=0;i<5;i++)api.zoomBy(1);"
+            + "api.fitToMap();"
+            + "api.els.canvasWrap.clientWidth=616;"
+            + "api._window.dispatch('resize',{});"
+            + "api._timer.advance(100);"
+            + "return {sent:api._send.sent};})()"))
+        self.assertEqual(out["sent"], [],
+                         "view ops must not send any WS frame")
+
+    # ── AC2 (HTML): #nav-panel is the first sidebar section ───────────────
+    def test_ac2_nav_panel_in_sidebar_first(self):
+        with open(INDEX) as fh:
+            html = fh.read()
+        self.assertIn('id="nav-panel"', html)
+        nav = html.index('id="nav-panel"')
+        gm = html.index('id="entity-tools"')
+        aw = html.index('id="awareness"')
+        sidebar = html.index('id="sidebar"')
+        self.assertTrue(sidebar < nav < gm < aw,
+                        "nav-panel must be the first sidebar section")
+        for b in ("nav-up", "nav-down", "nav-left", "nav-right",
+                  "zoom-in", "zoom-out", "nav-readout"):
+            self.assertIn('id="%s"' % b, html)
+
+
+
+if __name__ == '__main__':
     unittest.main()
