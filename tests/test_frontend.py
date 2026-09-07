@@ -3432,36 +3432,100 @@ class TestPanZoom(FrontendBase):
         self.assertEqual(b["v"]["s"], b["cell"])
 
     # ── AC4/AC6: zoom stepping both directions + extremes ─────────────────
+    # `+` zooms IN (level→0, bigger cells, fewer squares); `−` zooms OUT
+    # (level→10, smaller cells, more squares).
     def test_ac4_ac6_zoom_buttons_step_and_extremes(self):
         out = json.loads(js(
             self._gm_welcome(60, 60)
-            + self._vset(0, 0, 0, (800, 400))
-            + "const at0=" + self._BTN + ";"
+            + self._vset(10, 0, 0, (800, 400))
+            + "const at10=" + self._BTN + ";"
             + "for(let i=0;i<10;i++)api.els.zoomIn.dispatchEvent({type:'click'});"
-            + "const lvl10=api.state.view.level;const at10=" + self._BTN + ";"
+            + "const lvl0=api.state.view.level;const at0=" + self._BTN + ";"
             + "for(let i=0;i<10;i++)api.els.zoomOut.dispatchEvent({type:'click'});"
-            + "const lvl0=api.state.view.level;"
+            + "const lvl10=api.state.view.level;"
             + "return {at0,at10,lvl10,lvl0};})()"))
-        self.assertEqual(out["lvl10"], 10)
-        self.assertEqual(out["lvl0"], 0)
+        self.assertEqual(out["lvl0"], 0, "`+`×10 from L10 lands on L0")
+        self.assertEqual(out["lvl10"], 10, "`−`×10 from L0 lands on L10")
         at0, at10 = out["at0"], out["at10"]
-        # L0: zoom-out disabled "Maximum zoom (6×5)"; zoom-in enabled.
-        self.assertTrue(at0["Zo"])
-        self.assertEqual(at0["zot"], "Maximum zoom (6×5)")
-        self.assertFalse(at0["Zi"])
-        # L10: zoom-in disabled "Minimum zoom (60×50)"; zoom-out enabled.
-        self.assertTrue(at10["Zi"])
-        self.assertEqual(at10["zit"], "Minimum zoom (60×50)")
-        self.assertFalse(at10["Zo"])
+        # L0: zoom-in (`+`) disabled "Fully zoomed in (6×5)"; zoom-out enabled.
+        self.assertTrue(at0["Zi"])
+        self.assertEqual(at0["zit"], "Fully zoomed in (6×5)")
+        self.assertFalse(at0["Zo"])
+        # L10: zoom-out (`−`) disabled "Fully zoomed out (60×50)"; zoom-in enabled.
+        self.assertTrue(at10["Zo"])
+        self.assertEqual(at10["zot"], "Fully zoomed out (60×50)")
+        self.assertFalse(at10["Zi"])
 
     def test_ac6_no_level_outside_range(self):
+        # zoomBy(+1) zooms IN toward L0; zoomBy(−1) zooms OUT toward L10.
         out = json.loads(js(
-            self._gm_welcome(60, 60) + self._vset(0, 0, 0, (800, 400))
-            + "for(let i=0;i<20;i++)api.zoomBy(1);const top=api.state.view.level;"
-            + "for(let i=0;i<40;i++)api.zoomBy(-1);const bot=api.state.view.level;"
-            + "return {top,bot};})()"))
+            self._gm_welcome(60, 60) + self._vset(10, 0, 0, (800, 400))
+            + "for(let i=0;i<20;i++)api.zoomBy(1);const bottom=api.state.view.level;"
+            + "for(let i=0;i<40;i++)api.zoomBy(-1);const top=api.state.view.level;"
+            + "return {bottom,top};})()"))
+        self.assertEqual(out["bottom"], 0)
         self.assertEqual(out["top"], 10)
-        self.assertEqual(out["bot"], 0)
+
+    # ── BUG REGRESSION (owner report): `+` zooms IN, `−` zooms OUT ────────
+    # Before the fix the buttons were wired to the wrong direction: `+`
+    # took the level toward 10 (smaller cells, MORE squares) and `−` toward
+    # 0. This asserts the conventional behavior end-to-end: clicking `+`
+    # decreases the level (fewer squares / bigger cells = more detail) and
+    # clicking `−` increases it (more squares / smaller cells), plus the
+    # disabled state at each extreme. Run on a 24×16 map at L6 (window 25×21
+    # covers 450×378 < 800×400 so a level step is visible).
+    def test_zoom_buttons_increase_decrease_level_and_disable_at_extremes(self):
+        # Start mid-range (L6). A single `+` must DECREASE the level
+        # (zoom IN: fewer squares, bigger cells) and a single `−` must
+        # INCREASE it (zoom OUT: more squares, smaller cells).
+        out = json.loads(js(
+            self._gm_welcome(24, 16) + self._vset(6, 0, 0, (800, 400))
+            + "const start={level:api.state.view.level,cell:api.state.cell};"
+            + "api.els.zoomIn.dispatchEvent({type:'click'});"
+            + "const afterPlus={level:api.state.view.level,cell:api.state.cell,"
+            + "w:api.state._view.W,h:api.state._view.H};"
+            + "api.els.zoomOut.dispatchEvent({type:'click'});"
+            + "const afterMinus={level:api.state.view.level,cell:api.state.cell,"
+            + "w:api.state._view.W,h:api.state._view.H};"
+            + "return {start,afterPlus,afterMinus};})()"))
+        self.assertEqual(out["start"]["level"], 6)
+        # `+` → zoom IN: level 6 → 5 (L5 window 20×17, cell 20 → bigger).
+        self.assertEqual(out["afterPlus"]["level"], 5,
+                         "`+` must DECREASE the level (zoom in)")
+        self.assertEqual((out["afterPlus"]["w"], out["afterPlus"]["h"]),
+                         (20, 17))
+        self.assertGreater(out["afterPlus"]["cell"], out["start"]["cell"],
+                           "zooming in makes cells bigger")
+        # `−` → zoom OUT: level 5 → 6 (L6 window 25×21, cell 18 → smaller).
+        self.assertEqual(out["afterMinus"]["level"], 6,
+                         "`−` must INCREASE the level (zoom out)")
+        self.assertEqual((out["afterMinus"]["w"], out["afterMinus"]["h"]),
+                         (25, 21))
+        self.assertLess(out["afterMinus"]["cell"], out["afterPlus"]["cell"],
+                        "zooming out makes cells smaller")
+
+        # Driven to each extreme: at L10 the `−` (zoom out) button is
+        # disabled — already zoomed out as far as possible; at L0 the `+`
+        # (zoom in) button is disabled — already zoomed in as far as possible.
+        ext = json.loads(js(
+            self._gm_welcome(24, 16) + self._vset(6, 0, 0, (800, 400))
+            + "for(let i=0;i<10;i++)api.els.zoomOut.dispatchEvent({type:'click'});"
+            + "const at10=" + self._BTN + ";const lvl10=api.state.view.level;"
+            + "for(let i=0;i<10;i++)api.els.zoomIn.dispatchEvent({type:'click'});"
+            + "const at0=" + self._BTN + ";const lvl0=api.state.view.level;"
+            + "return {at0,at10,lvl10,lvl0};})()"))
+        self.assertEqual(ext["lvl10"], 10, "`−`×10 reaches L10")
+        self.assertEqual(ext["lvl0"], 0, "`+`×10 reaches L0")
+        # At L10: zoom-out (`−`) disabled, zoom-in (`+`) enabled.
+        self.assertTrue(ext["at10"]["Zo"], "`−` disabled at L10")
+        self.assertEqual(ext["at10"]["zot"], "Fully zoomed out (60×50)")
+        self.assertFalse(ext["at10"]["Zi"], "`+` enabled at L10")
+        # At L0: zoom-in (`+`) disabled, zoom-out (`−`) enabled.
+        self.assertTrue(ext["at0"]["Zi"], "`+` disabled at L0")
+        self.assertEqual(ext["at0"]["zit"], "Fully zoomed in (6×5)")
+        self.assertFalse(ext["at0"]["Zo"], "`−` enabled at L0")
+
+    # ── AC5: `+` / `=` zoom IN, `−` zooms OUT (level moves the right way) ──
 
     # ── AC9: pan step table (viewStep) + movement ─────────────────────────
     def test_ac9_pan_step_table(self):
@@ -3647,8 +3711,9 @@ class TestPanZoom(FrontendBase):
         self.assertEqual(out["key"], out["btn"],
                          "cursor key delta must equal the button delta")
 
-    # ── AC5: + / = / - keys zoom in / in / out ────────────────────────────
+    # ── AC5: `+` / `=` zoom IN (level−1), `−` zooms OUT (level+1) ────────
     def test_ac5_cursor_keys_zoom(self):
+        # From L5: `+` → L4 (zoom in), `=` → L3 (zoom in), `−` → L4 (zoom out).
         out = json.loads(js(
             self._gm_welcome(60, 60) + self._vset(5, 0, 0, (800, 400))
             + "api.document.dispatch('keydown',"
@@ -3661,9 +3726,9 @@ class TestPanZoom(FrontendBase):
             + "{key:'-',target:{},preventDefault(){}});"
             + "const minus=api.state.view.level;"
             + "return {plus,eq,minus};})()"))
-        self.assertEqual(out["plus"], 6)
-        self.assertEqual(out["eq"], 7)
-        self.assertEqual(out["minus"], 6)
+        self.assertEqual(out["plus"], 4)
+        self.assertEqual(out["eq"], 3)
+        self.assertEqual(out["minus"], 4)
 
     # ── A2: arrows PAN (retired arrow-key entity move) ─────────────────────
     def test_a2_arrows_pan_not_move(self):

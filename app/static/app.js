@@ -1014,11 +1014,18 @@ function panBy(dx, dy) {
 
 // §2.5: zoom in/out one level (clamped to [0,10]); the pan is re-clamped for
 // the new (possibly smaller) pan range.
+// SIGN CONVENTION (bug fix — owner report): `delta` is ZOOM-IN steps. +1 =
+// zoom IN one level (bigger cells, FEWER squares visible, MORE detail) and
+// decrements the level toward 0; −1 = zoom OUT one level (smaller cells,
+// MORE squares visible) and increments the level toward 10. The level model
+// is zoom-increasing (L0 = 6×5 most zoomed in … L10 = 60×50 most zoomed
+// out), so a zoom-IN moves to a LOWER level index. The `−` button, the `+`
+// button, and the `−`/`+`/`=` keys all pass the matching sign through here.
 function zoomBy(delta) {
   const g = state.grid;
   if (!g) return;
   const v = state.view;
-  const nl = _clamp(v.level + delta, 0, LEVEL_COUNT - 1);
+  const nl = _clamp(v.level - delta, 0, LEVEL_COUNT - 1);
   if (nl === v.level) { syncNavControls(); return; } // silent no-op (E8)
   v.level = nl;
   const b = viewBounds(nl, g.width, g.height);
@@ -1057,8 +1064,11 @@ function syncNavControls() {
   set(els.navRight, lockX || v.panX >= bx,  lockX ? lockXT : "Panned to the east edge");
   set(els.navUp,    lockY || v.panY <= 0,   lockY ? lockYT : "Panned to the north edge");
   set(els.navDown,  lockY || v.panY >= by,  lockY ? lockYT : "Panned to the south edge");
-  set(els.zoomOut,  v.level <= 0, "Maximum zoom (6×5)");
-  set(els.zoomIn,   v.level >= LEVEL_COUNT - 1, "Minimum zoom (60×50)");
+  // Disabled at the matching extreme: `−` (zoom out) is dead at L10 — already
+  // zoomed out as far as possible (60×50); `+` (zoom in) is dead at L0 —
+  // already zoomed in as far as possible (6×5).
+  set(els.zoomOut,  v.level >= LEVEL_COUNT - 1, "Fully zoomed out (60×50)");
+  set(els.zoomIn,   v.level <= 0, "Fully zoomed in (6×5)");
   // One-line readout: `L{level} · {W}×{H} · ({x0},{y0})–({x1−1},{y1−1}) of {mw}×{mh}`.
   if (els.navReadout) {
     els.navReadout.textContent =
@@ -2247,8 +2257,8 @@ document.addEventListener("keydown", (ev) => {
     case "ArrowRight": ev.preventDefault(); panBy(1, 0);  return;
     case "ArrowUp":    ev.preventDefault(); panBy(0, -1); return;
     case "ArrowDown":  ev.preventDefault(); panBy(0, 1);  return;
-    case "+": case "=": ev.preventDefault(); zoomBy(1);  return; // main-row + numpad
-    case "-":           ev.preventDefault(); zoomBy(-1); return;
+    case "+": case "=": ev.preventDefault(); zoomBy(1);  return; // zoom IN (level−1); main-row + numpad
+    case "-":           ev.preventDefault(); zoomBy(-1); return; // zoom OUT (level+1)
   }
 });
 
@@ -2261,6 +2271,9 @@ els.navLeft.addEventListener("click", () => panBy(-1, 0));
 els.navRight.addEventListener("click", () => panBy(1, 0));
 els.navUp.addEventListener("click", () => panBy(0, -1));
 els.navDown.addEventListener("click", () => panBy(0, 1));
+// `−` zooms OUT (smaller cells, see MORE), `+` zooms IN (bigger cells, more
+// detail) — the signs passed here are zoom-in steps (see zoomBy), so the
+// buttons and the `−`/`+`/`=` keys are the same direction.
 els.zoomOut.addEventListener("click", () => zoomBy(-1));
 els.zoomIn.addEventListener("click", () => zoomBy(1));
 

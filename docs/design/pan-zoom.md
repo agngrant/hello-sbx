@@ -178,7 +178,7 @@ permanently disabled, §3.3).
 | Join / welcome (first map) | `fitLevel(mw, mh)` (§5.3) | `(0, 0)` |
 | Map swap — `use_map` → new `state` frame with different map dims (the `mapChanged` check already in `applyState`) | `fitLevel` of the NEW map | `(0, 0)` (E3) |
 | Window resize (existing debounced handler) | **unchanged** | **unchanged**, re-clamped defensively (E2) |
-| `+` / `−` button or key | `level ± 1`, clamped to `[0, 10]` | unchanged, re-clamped (a zoom-in can shrink the pan range) |
+| `+` (zoom in) / `−` (zoom out) button or key | `+` → `level−1` (toward L0), `−` → `level+1` (toward L10), clamped to `[0, 10]` | unchanged, re-clamped (a zoom-in can shrink the pan range) |
 | Arrow button / key | unchanged | one axis ± step, clamped |
 
 Note: because the levels are fixed in **cell** units, resize changes only
@@ -290,8 +290,8 @@ view mutation, state change, fit, or resize:
 | `→` | `0 < panX < max(0, mw−W)` | `panX = max(0, mw−W)` — `title="Panned to the east edge"` | same as `←` | — |
 | `↑` | `0 < panY < max(0, mh−H)` | `panY = 0` — `title="Panned to the north edge"` | `mh ≤ H` — `title="Map fits vertically — no pan"` | — |
 | `↓` | `0 < panY < max(0, mh−H)` | `panY = max(0, mh−H)` — `title="Panned to the south edge"` | same as `↑` | — |
-| `−` | `level > 0` | — | — | `level = 0` (L0, 6×5) — `title="Maximum zoom (6×5)"` |
-| `+` | `level < 10` | — | — | `level = 10` (L10, 60×50) — `title="Minimum zoom (60×50)"` |
+| `−` | `level < 10` | — | — | `level = 10` (L10, 60×50) — `title="Fully zoomed out (60×50)"` |
+| `+` | `level > 0` | — | — | `level = 0` (L0, 6×5) — `title="Fully zoomed in (6×5)"` |
 
 Disabled = native `disabled` attribute (so no pointer, no keyboard
 activation, `opacity .45`, `cursor: not-allowed` — the existing
@@ -310,8 +310,8 @@ handled today).
 | Key (`ev.key`) | Action | Modifier notes | Guard behavior |
 |---|---|---|---|
 | `ArrowLeft` / `ArrowRight` / `ArrowUp` / `ArrowDown` | Pan one step on that axis (§2.4) — **identical delta to the matching arrow button** (owner req 3) | Ignored with **any** modifier (Ctrl/Alt/Shift/Meta) — no Shift+arrow variant exists | Guard §4.3; only when `#map-view` is visible, joined, and a map exists; `preventDefault()` (stops page scroll) |
-| `+` or `=` | Zoom in one level (`level+1`, cap 10) | Ignored with any modifier (Ctrl+`=` is browser zoom — never fight it) | Guard §4.3; same visibility conditions; `preventDefault()` |
-| `-` | Zoom out one level (`level−1`, floor 0) | Same as above | Same as above |
+| `+` or `=` | Zoom in one level (`level−1`, floor 0 — bigger cells, more detail) | Ignored with any modifier (Ctrl+`=` is browser zoom — never fight it) | Guard §4.3; same visibility conditions; `preventDefault()` |
+| `-` | Zoom out one level (`level+1`, cap 10 — smaller cells, see more) | Same as above | Same as above |
 
 Notes:
 - `ev.key` is used (not `ev.code`), so **main-row and numpad** `+` / `-`
@@ -531,18 +531,19 @@ asserts read `state.view` / the computed `cell` / `offsetX` / `offsetY`.
   no field focused produces a delta **identical** to clicking the matching
   arrow button (same sign, same magnitude per §2.4, clamped). *(harness)*
 - **AC4 — Zoom in / out buttons** (owner req 4).
-  Clicking `+` increments `level` (window W×H per §5.1, cell grows per
-  §2.3, readout updates); `−` decrements; a full `+` ×10 from L0 lands on
-  L10 and a full `−` ×10 lands on L0. *(harness)*
+  Clicking `+` zooms IN (DECREMENTS `level` toward 0: window W×H per §5.1
+  shrinks, cell grows per §2.3, readout updates); `−` zooms OUT (INCREMENTS
+  `level` toward 10); a full `+` ×10 from L10 lands on L0 and a full `−` ×10
+  from L0 lands on L10. *(harness)*
 - **AC5 — `+`/`=` zoom in, `-` zooms out** (owner req 5).
   `keydown` `+`, `=`, and `-` (unmodified, no field focus) change the
   level by +1, +1, −1 respectively; numpad variants (same `ev.key`) do too.
   *(harness)*
 - **AC6 — Zoom extremes** (owner req 6).
-  At L0 the visible window is exactly 6×5 cells and `−`/`-` are no-ops
-  with `#zoom-out` **disabled** ("Maximum zoom (6×5)"); at L10 the window
-  is exactly 60×50 and `+`/`+`/`=` are no-ops with `#zoom-in` **disabled**
-  ("Minimum zoom (60×50)"). No level exists outside `[0, 10]`. *(harness)*
+  At L0 the visible window is exactly 6×5 cells and `+`/`+`/`=` are no-ops
+  with `#zoom-in` **disabled** ("Fully zoomed in (6×5)"); at L10 the window
+  is exactly 60×50 and `−`/`-` are no-ops with `#zoom-out` **disabled**
+  ("Fully zoomed out (60×50)"). No level exists outside `[0, 10]`. *(harness)*
 - **AC7 — Level table conformance.** On a 60×60 map, for every L0…L10 the
   rendered window equals the frozen W×H of §5.1 and `cell` obeys
   `floor(min(availW/W, availH/H))`. *(harness)*
