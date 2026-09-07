@@ -582,13 +582,16 @@ class TestDoorPerformance(unittest.TestCase):
 class TestSafeDoorStateMachine(SafeDoorSessionBase):
     """AC3: the full safe-door state machine + permission matrix — every
     legal transition, every illegal (state, action, role) returns the EXACT
-    error string in the §4.3 deterministic order (role first)."""
+    error string in the §4.3 deterministic order (role first). The safe
+    door now carries a lock state: fresh mark → L; L ─unlock→ U ─open→ O
+    ─close→ U; lock from U or O (force-closes O) → L."""
 
     # -- permissions (role gate FIRST) -----------------------------------
     def test_non_gm_any_action_not_allowed(self):
-        # AC3 step 1: a player gets "not allowed" for EVERY safe action,
-        # even on a non-doorway / OOB cell (the role gate runs first).
-        for action in ("mark", "unmark", "open", "close"):
+        # AC3 step 1: a player gets "not allowed" for EVERY safe action
+        # (now all six), even on a non-doorway / OOB cell (the role gate
+        # runs first).
+        for action in ("mark", "unmark", "unlock", "lock", "open", "close"):
             with self.subTest(action=action):
                 self.assertEqual(
                     self.p1_safe(5, 5, action),
@@ -625,29 +628,29 @@ class TestSafeDoorStateMachine(SafeDoorSessionBase):
             {"type": "error", "message": "not a doorway"},
         )
 
-    def test_bad_action_includes_lock_unlock(self):
-        # A safe door has NO lock state → lock/unlock are bad actions.
+    def test_bad_action(self):
+        # An unrecognized action reports the FULL six-action list —
+        # lock/unlock are VALID safe-door actions (they only fail when the
+        # cell is not a safe door, tested below).
         self.assertEqual(
-            self.gm_safe(5, 5, "lock"),
+            self.gm_safe(5, 5, "explode"),
             {"type": "error",
-             "message": "action must be one of mark/unmark/open/close"},
-        )
-        self.assertEqual(
-            self.gm_safe(5, 5, "unlock"),
-            {"type": "error",
-             "message": "action must be one of mark/unmark/open/close"},
+             "message": ("action must be one of "
+                         "mark/unmark/unlock/lock/open/close")},
         )
         self.assertEqual(
             self.gm_safe(5, 5, None),
             {"type": "error",
-             "message": "action must be one of mark/unmark/open/close"},
+             "message": ("action must be one of "
+                         "mark/unmark/unlock/lock/open/close")},
         )
 
     # -- mark / unmark -----------------------------------------------------
-    def test_mark_normal_doorway_starts_closed(self):
+    def test_mark_normal_doorway_starts_locked(self):
+        # AC2: a fresh mark starts LOCKED ("L") — the secure default.
         self.assertIsNone(self.gm_safe(5, 5, "mark"))
         self.assertTrue(self.session.grid.is_safe_door(5, 5))
-        self.assertEqual(self.session.grid.safe_door_state_at(5, 5), "C")
+        self.assertEqual(self.session.grid.safe_door_state_at(5, 5), "L")
         # a marked safe door has NO normal-door state (mutual exclusion):
         self.assertIsNone(self.session.grid.door_state_at(5, 5))
         self.assertNotIn("5,5", self.session.grid.doors or {})
@@ -656,7 +659,7 @@ class TestSafeDoorStateMachine(SafeDoorSessionBase):
         # A recorded normal door is DROPPED when it becomes a safe door.
         self.assertIsNone(self.gm_door(5, 5, "unlock"))  # 5,5 → U
         self.assertIsNone(self.gm_safe(5, 5, "mark"))
-        self.assertEqual(self.session.grid.safe, {"5,5": "C"})
+        self.assertEqual(self.session.grid.safe, {"5,5": "L"})
         self.assertNotIn("5,5", self.session.grid.doors or {})
 
     def test_mark_already_safe(self):
@@ -666,15 +669,23 @@ class TestSafeDoorStateMachine(SafeDoorSessionBase):
             {"type": "error", "message": "already a safe door"},
         )
 
-    def test_unmark_closed_reverts_to_u(self):
-        self.assertIsNone(self.gm_safe(5, 5, "mark"))
+    def test_unmark_locked_reverts_to_l(self):
+        self.assertIsNone(self.gm_safe(5, 5, "mark"))  # → L
         self.assertIsNone(self.gm_safe(5, 5, "unmark"))
         self.assertFalse(self.session.grid.is_safe_door(5, 5))
         self.assertIsNone(self.session.grid.safe)
+        self.assertEqual(self.session.grid.door_state_at(5, 5), "L")
+
+    def test_unmark_unlocked_closed_reverts_to_u(self):
+        self.assertIsNone(self.gm_safe(5, 5, "mark"))  # → L
+        self.assertIsNone(self.gm_safe(5, 5, "unlock"))  # → U
+        self.assertIsNone(self.gm_safe(5, 5, "unmark"))
+        self.assertFalse(self.session.grid.is_safe_door(5, 5))
         self.assertEqual(self.session.grid.door_state_at(5, 5), "U")
 
     def test_unmark_open_reverts_to_o(self):
         self.assertIsNone(self.gm_safe(5, 5, "mark"))
+        self.assertIsNone(self.gm_safe(5, 5, "unlock"))
         self.assertIsNone(self.gm_safe(5, 5, "open"))
         self.assertIsNone(self.gm_safe(5, 5, "unmark"))
         self.assertFalse(self.session.grid.is_safe_door(5, 5))
@@ -686,17 +697,73 @@ class TestSafeDoorStateMachine(SafeDoorSessionBase):
             {"type": "error", "message": "not a safe door"},
         )
 
-    # -- open / close ------------------------------------------------------
-    def test_open_c_to_o(self):
+    # -- unlock / lock -----------------------------------------------------
+    def test_unlock_l_to_u(self):
+        self.assertIsNone(self.gm_safe(5, 5, "mark"))  # → L
+        self.assertIsNone(self.gm_safe(5, 5, "unlock"))
+        self.assertEqual(self.session.grid.safe_door_state_at(5, 5), "U")
+
+    def test_unlock_already_unlocked_u(self):
         self.assertIsNone(self.gm_safe(5, 5, "mark"))
+        self.assertIsNone(self.gm_safe(5, 5, "unlock"))  # → U
+        self.assertEqual(
+            self.gm_safe(5, 5, "unlock"),
+            {"type": "error", "message": "safe door is already unlocked"},
+        )
+
+    def test_unlock_already_unlocked_o(self):
+        # unlock on an OPEN door is also "already unlocked" (O is unlocked).
+        self.assertIsNone(self.gm_safe(5, 5, "mark"))
+        self.assertIsNone(self.gm_safe(5, 5, "unlock"))
+        self.assertIsNone(self.gm_safe(5, 5, "open"))  # → O
+        self.assertEqual(
+            self.gm_safe(5, 5, "unlock"),
+            {"type": "error", "message": "safe door is already unlocked"},
+        )
+
+    def test_lock_u_to_l(self):
+        self.assertIsNone(self.gm_safe(5, 5, "mark"))  # → L
+        self.assertIsNone(self.gm_safe(5, 5, "unlock"))  # → U
+        self.assertIsNone(self.gm_safe(5, 5, "lock"))
+        self.assertEqual(self.session.grid.safe_door_state_at(5, 5), "L")
+
+    def test_lock_already_locked(self):
+        self.assertIsNone(self.gm_safe(5, 5, "mark"))  # → L
+        self.assertEqual(
+            self.gm_safe(5, 5, "lock"),
+            {"type": "error", "message": "safe door is already locked"},
+        )
+
+    def test_lock_o_force_closes_to_l(self):
+        # AC3/E14: lock-while-open force-closes (no open-and-locked state);
+        # it is NOT occupancy-guarded (the door was already open/walkable).
+        self.assertIsNone(self.gm_safe(5, 5, "mark"))
+        self.assertIsNone(self.gm_safe(5, 5, "unlock"))
+        self.assertIsNone(self.gm_safe(5, 5, "open"))  # → O
+        self.assertIsNone(self.gm_safe(5, 5, "lock"))
+        self.assertEqual(self.session.grid.safe_door_state_at(5, 5), "L")
+
+    # -- open / close ------------------------------------------------------
+    def test_open_locked_rejected(self):
+        # A fresh safe door is LOCKED: open before unlock is rejected.
+        self.assertIsNone(self.gm_safe(5, 5, "mark"))  # → L
+        self.assertEqual(
+            self.gm_safe(5, 5, "open"),
+            {"type": "error", "message": "safe door is locked"},
+        )
+
+    def test_open_u_to_o(self):
+        self.assertIsNone(self.gm_safe(5, 5, "mark"))
+        self.assertIsNone(self.gm_safe(5, 5, "unlock"))  # → U
         self.assertIsNone(self.gm_safe(5, 5, "open"))
         self.assertEqual(self.session.grid.safe_door_state_at(5, 5), "O")
 
-    def test_close_o_to_c(self):
+    def test_close_o_to_u(self):
         self.assertIsNone(self.gm_safe(5, 5, "mark"))
-        self.assertIsNone(self.gm_safe(5, 5, "open"))
+        self.assertIsNone(self.gm_safe(5, 5, "unlock"))
+        self.assertIsNone(self.gm_safe(5, 5, "open"))  # → O
         self.assertIsNone(self.gm_safe(5, 5, "close"))
-        self.assertEqual(self.session.grid.safe_door_state_at(5, 5), "C")
+        self.assertEqual(self.session.grid.safe_door_state_at(5, 5), "U")
 
     def test_open_non_safe(self):
         self.assertEqual(
@@ -710,16 +777,37 @@ class TestSafeDoorStateMachine(SafeDoorSessionBase):
             {"type": "error", "message": "not a safe door"},
         )
 
+    def test_unlock_non_safe(self):
+        self.assertEqual(
+            self.gm_safe(5, 5, "unlock"),
+            {"type": "error", "message": "not a safe door"},
+        )
+
+    def test_lock_non_safe(self):
+        self.assertEqual(
+            self.gm_safe(5, 5, "lock"),
+            {"type": "error", "message": "not a safe door"},
+        )
+
     def test_open_already_open(self):
         self.assertIsNone(self.gm_safe(5, 5, "mark"))
-        self.assertIsNone(self.gm_safe(5, 5, "open"))
+        self.assertIsNone(self.gm_safe(5, 5, "unlock"))
+        self.assertIsNone(self.gm_safe(5, 5, "open"))  # → O
         self.assertEqual(
             self.gm_safe(5, 5, "open"),
             {"type": "error", "message": "safe door is already open"},
         )
 
-    def test_close_already_closed(self):
+    def test_close_already_closed_l(self):
+        self.assertIsNone(self.gm_safe(5, 5, "mark"))  # → L
+        self.assertEqual(
+            self.gm_safe(5, 5, "close"),
+            {"type": "error", "message": "safe door is already closed"},
+        )
+
+    def test_close_already_closed_u(self):
         self.assertIsNone(self.gm_safe(5, 5, "mark"))
+        self.assertIsNone(self.gm_safe(5, 5, "unlock"))  # → U
         self.assertEqual(
             self.gm_safe(5, 5, "close"),
             {"type": "error", "message": "safe door is already closed"},
@@ -741,7 +829,8 @@ class TestSafeDoorStateMachine(SafeDoorSessionBase):
 
     def test_close_with_token_on_it_rejected(self):
         self.assertIsNone(self.gm_safe(5, 5, "mark"))
-        self.assertIsNone(self.gm_safe(5, 5, "open"))
+        self.assertIsNone(self.gm_safe(5, 5, "unlock"))
+        self.assertIsNone(self.gm_safe(5, 5, "open"))  # → O
         self.assertIsNone(drive(self.session, self.gm_s,
                                 {"type": "place", "entity_id": self.p1_ent,
                                  "x": 5, "y": 5}))
@@ -752,6 +841,20 @@ class TestSafeDoorStateMachine(SafeDoorSessionBase):
         )
         # the door stays open (no entity is left on a closed safe door):
         self.assertEqual(self.session.grid.safe_door_state_at(5, 5), "O")
+
+    def test_lock_from_open_with_token_not_guarded(self):
+        # E14: lock from open force-closes and is NOT occupancy-guarded
+        # (the door was already open/walkable — a hostile can't be on it
+        # anyway; a party/neutral token is left on the now-closed cell by
+        # design, same as the normal door's A5 nuance).
+        self.assertIsNone(self.gm_safe(5, 5, "mark"))
+        self.assertIsNone(self.gm_safe(5, 5, "unlock"))
+        self.assertIsNone(self.gm_safe(5, 5, "open"))  # → O
+        self.assertIsNone(drive(self.session, self.gm_s,
+                                {"type": "place", "entity_id": self.p1_ent,
+                                 "x": 5, "y": 5}))
+        self.assertIsNone(self.gm_safe(5, 5, "lock"))  # allowed (not guarded)
+        self.assertEqual(self.session.grid.safe_door_state_at(5, 5), "L")
 
 
 class TestSafeDoorWireState(SafeDoorSessionBase):
@@ -770,7 +873,7 @@ class TestSafeDoorWireState(SafeDoorSessionBase):
         st_gm = self.session.state_for(self.gm)
         st_p = self.session.state_for(self.p1)
         for st in (st_gm, st_p):
-            self.assertEqual(st["map"]["safe"], {"5,5": "C"})
+            self.assertEqual(st["map"]["safe"], {"5,5": "L"})
             # doors skips the safe cell → disjoint, jointly covering:
             self.assertEqual(st["map"]["doors"], {"10,4": "L", "9,7": "L"})
             self.assertEqual(
@@ -781,15 +884,26 @@ class TestSafeDoorWireState(SafeDoorSessionBase):
     def test_welcome_carries_safe(self):
         self.assertIsNone(self.gm_safe(5, 5, "mark"))
         w = self.session.welcome_for(self.p1)
-        self.assertEqual(w["map"]["safe"], {"5,5": "C"})
+        self.assertEqual(w["map"]["safe"], {"5,5": "L"})
         self.assertNotIn("5,5", w["map"]["doors"])
 
     def test_unmark_removes_safe_restores_doors(self):
+        # mark → L, unmark preserves the state → normal door "L".
         self.assertIsNone(self.gm_safe(5, 5, "mark"))
         self.assertIsNone(self.gm_safe(5, 5, "unmark"))
         st = self.session.state_for(self.gm)
         self.assertNotIn("safe", st["map"])  # no safe doors → key omitted
-        self.assertEqual(st["map"]["doors"]["5,5"], "U")
+        self.assertEqual(st["map"]["doors"]["5,5"], "L")
+
+    def test_unmark_open_restores_doors_o(self):
+        # mark → L, unlock → U, open → O, unmark → normal door "O".
+        self.assertIsNone(self.gm_safe(5, 5, "mark"))
+        self.assertIsNone(self.gm_safe(5, 5, "unlock"))
+        self.assertIsNone(self.gm_safe(5, 5, "open"))
+        self.assertIsNone(self.gm_safe(5, 5, "unmark"))
+        st = self.session.state_for(self.gm)
+        self.assertNotIn("safe", st["map"])
+        self.assertEqual(st["map"]["doors"]["5,5"], "O")
 
 
 class TestSafeDoorRestriction(SafeDoorSessionBase):
@@ -799,10 +913,11 @@ class TestSafeDoorRestriction(SafeDoorSessionBase):
 
     def test_hostile_blocked_by_open_safe_door(self):
         # The (5,5) doorway is the gap in the col-5 wall between Alice
-        # (left room, at (1,1)) and the right room. Mark it a safe door and
-        # open it: a hostile still cannot path through (the open safe door
-        # is a wall to it), while a party token can.
+        # (left room, at (1,1)) and the right room. Mark it a safe door
+        # (L), unlock + open it: a hostile still cannot path through (the
+        # open safe door is a wall to it), while a party token can.
         self.assertIsNone(self.gm_safe(5, 5, "mark"))
+        self.assertIsNone(self.gm_safe(5, 5, "unlock"))
         self.assertIsNone(self.gm_safe(5, 5, "open"))
         # GM creates a hostile on the right side and tries to path it back
         # through the open safe door → no route.
@@ -821,6 +936,7 @@ class TestSafeDoorRestriction(SafeDoorSessionBase):
 
     def test_party_walks_through_open_safe_door(self):
         self.assertIsNone(self.gm_safe(5, 5, "mark"))
+        self.assertIsNone(self.gm_safe(5, 5, "unlock"))
         self.assertIsNone(self.gm_safe(5, 5, "open"))
         # Alice (1,1) is on the left side; the safe door leads to (6,5).
         # But to keep the assertion deterministic, walk Alice to the other
@@ -834,9 +950,22 @@ class TestSafeDoorRestriction(SafeDoorSessionBase):
              self.session.entities[self.p1_ent].y), (5, 5))
 
     def test_closed_safe_door_blocks_all_teams(self):
-        # Marked (starts closed) and NOT opened: a party token cannot cross
-        # either (a closed safe door is a wall for everyone).
+        # Marked (starts LOCKED+closed) and NOT opened: a party token cannot
+        # cross either (a closed safe door is a wall for everyone).
         self.assertIsNone(self.gm_safe(5, 5, "mark"))
+        reply = drive(self.session, self.p1_s,
+                      {"type": "move", "entity_id": self.p1_ent, "x": 5, "y": 5})
+        self.assertEqual(reply, {"type": "error", "message": NO_ROUTE})
+        self.assertEqual(
+            (self.session.entities[self.p1_ent].x,
+             self.session.entities[self.p1_ent].y), (1, 1))
+
+    def test_unlocked_closed_safe_door_blocks_all_teams(self):
+        # A U (unlocked but closed) safe door is STILL a wall to everyone
+        # — "unlocked" only means the GM may open it, not that anyone may
+        # walk through (spec non-goal: safe doors are GM-managed).
+        self.assertIsNone(self.gm_safe(5, 5, "mark"))  # → L
+        self.assertIsNone(self.gm_safe(5, 5, "unlock"))  # → U (closed)
         reply = drive(self.session, self.p1_s,
                       {"type": "move", "entity_id": self.p1_ent, "x": 5, "y": 5})
         self.assertEqual(reply, {"type": "error", "message": NO_ROUTE})
@@ -854,6 +983,7 @@ class TestSafeDoorHostileOverrideGuard(SafeDoorSessionBase):
         # A hostile standing adjacent; override onto the safe cell (both
         # states) → rejected, NOT teleported.
         self.assertIsNone(self.gm_safe(5, 5, "mark"))
+        self.assertIsNone(self.gm_safe(5, 5, "unlock"))
         self.assertIsNone(self.gm_safe(5, 5, "open"))
         self.assertIsNone(drive(self.session, self.gm_s,
                                 {"type": "create_entity", "name": "Vex",
@@ -871,6 +1001,7 @@ class TestSafeDoorHostileOverrideGuard(SafeDoorSessionBase):
 
     def test_hostile_place_rejected(self):
         self.assertIsNone(self.gm_safe(5, 5, "mark"))
+        self.assertIsNone(self.gm_safe(5, 5, "unlock"))
         self.assertIsNone(self.gm_safe(5, 5, "open"))
         self.assertIsNone(drive(self.session, self.gm_s,
                                 {"type": "create_entity", "name": "Vex",
@@ -885,6 +1016,7 @@ class TestSafeDoorHostileOverrideGuard(SafeDoorSessionBase):
 
     def test_hostile_create_rejected(self):
         self.assertIsNone(self.gm_safe(5, 5, "mark"))
+        self.assertIsNone(self.gm_safe(5, 5, "unlock"))
         self.assertIsNone(self.gm_safe(5, 5, "open"))
         reply = drive(self.session, self.gm_s,
                       {"type": "create_entity", "name": "Vex",
@@ -897,6 +1029,7 @@ class TestSafeDoorHostileOverrideGuard(SafeDoorSessionBase):
         # E4: a party/neutral token standing on an OPEN safe door cannot be
         # re-teamed to hostile (the last path to put a hostile on a safe cell).
         self.assertIsNone(self.gm_safe(5, 5, "mark"))
+        self.assertIsNone(self.gm_safe(5, 5, "unlock"))
         self.assertIsNone(self.gm_safe(5, 5, "open"))
         # Walk Alice onto the open safe door (legal for party).
         self.assertIsNone(drive(self.session, self.p1_s,
@@ -916,8 +1049,8 @@ class TestSafeDoorHostileOverrideGuard(SafeDoorSessionBase):
         # E11 (contrast): a party/neutral token CAN be override-placed onto
         # a CLOSED safe door (the GM's ignore-walls ability, like a closed
         # normal door). Override is GM-only (the frozen move-permission rule),
-        # so the GM drives it.
-        self.assertIsNone(self.gm_safe(5, 5, "mark"))  # starts C, NOT opened
+        # so the GM drives it. The fresh mark is L (locked+closed).
+        self.assertIsNone(self.gm_safe(5, 5, "mark"))  # starts L, NOT opened
         reply = drive(self.session, self.gm_s,
                       {"type": "move", "entity_id": self.p1_ent, "x": 5, "y": 5,
                        "override": True})
@@ -928,8 +1061,9 @@ class TestSafeDoorHostileOverrideGuard(SafeDoorSessionBase):
         self.assertEqual(self.session.entities[self.p1_ent].team, "party")
 
     def test_hostile_override_closed_safe_door_rejected(self):
-        # The hostile guard holds even when the door is CLOSED.
-        self.assertIsNone(self.gm_safe(5, 5, "mark"))  # C
+        # The hostile guard holds even when the door is CLOSED (L here —
+        # the fresh mark state).
+        self.assertIsNone(self.gm_safe(5, 5, "mark"))  # L (closed)
         self.assertIsNone(drive(self.session, self.gm_s,
                                 {"type": "create_entity", "name": "Vex",
                                  "kind": "enemy", "team": "hostile",
@@ -1022,6 +1156,7 @@ class TestSafeDoorAwarenessUnchanged(SafeDoorSessionBase):
     def test_open_safe_door_is_full(self):
         s, gm_s, p1_s, p1, enemy = self._room_session()
         self.assertIsNone(safe(s, gm_s, 3, 1, "mark"))
+        self.assertIsNone(safe(s, gm_s, 3, 1, "unlock"))
         self.assertIsNone(safe(s, gm_s, 3, 1, "open"))
         st = s.state_for(p1)
         aw = st["awareness"]

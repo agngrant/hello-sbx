@@ -564,7 +564,9 @@ class TestDoorFindPath(unittest.TestCase):
 
 
 def safe_grid(rows, safe, name="safe-test"):
-    """A :class:`Grid` with the given ``safe`` ("<x>,<y>" -> "C"|"O") set."""
+    """A :class:`Grid` with the given ``safe`` set ("<x>,<y>" -> "U" (closed)
+    | "O"). Both "L" and "U" are closed for pathfinding; these tests use
+    "U" (the legacy-migrated closed state) throughout."""
     g = make_grid(rows, name=name)
     for key, st in safe.items():
         x, y = (int(p) for p in key.split(","))
@@ -579,7 +581,7 @@ class TestSafeDoorWalkable(unittest.TestCase):
     ROWS = [["floor", "doorway", "floor"]]
 
     def test_closed_safe_door_blocks_every_team(self):
-        g = safe_grid(self.ROWS, {"1,0": "C"})
+        g = safe_grid(self.ROWS, {"1,0": "U"})
         for team in (None, "party", "neutral", "hostile"):
             with self.subTest(team=team):
                 self.assertFalse(walkable(g, 1, 0, team=team))
@@ -599,7 +601,7 @@ class TestSafeDoorWalkable(unittest.TestCase):
         # unwalkable for every team; identical for LOS (team-agnostic).
         wall = make_grid(self.ROWS)
         wall.cells[0][1] = "wall"
-        closed = safe_grid(self.ROWS, {"1,0": "C"})
+        closed = safe_grid(self.ROWS, {"1,0": "U"})
         for team in (None, "party", "neutral", "hostile"):
             self.assertEqual(walkable(wall, 1, 0, team=team),
                              walkable(closed, 1, 0, team=team),
@@ -609,7 +611,7 @@ class TestSafeDoorWalkable(unittest.TestCase):
                          False)
 
     def test_floor_unaffected_by_safe_doors(self):
-        g = safe_grid(self.ROWS, {"1,0": "C"})
+        g = safe_grid(self.ROWS, {"1,0": "U"})
         self.assertTrue(walkable(g, 0, 0, team="hostile"))
         self.assertTrue(walkable(g, 2, 0, team="hostile"))
 
@@ -648,7 +650,7 @@ class TestSafeDoorStep(unittest.TestCase):
         g = safe_grid(
             [["floor", "doorway", "floor"],
              ["floor", "floor", "floor"]],
-            {"1,0": "C"},
+            {"1,0": "U"},
         )
         for team in (None, "party", "neutral", "hostile"):
             with self.subTest(team=team):
@@ -661,14 +663,14 @@ class TestSafeDoorLineOfSight(unittest.TestCase):
     behaviour is identical for all teams by construction (no team param)."""
 
     def test_closed_safe_door_blocks_sight_open_transparent(self):
-        closed = safe_grid([["floor", "doorway", "floor"]], {"1,0": "C"})
+        closed = safe_grid([["floor", "doorway", "floor"]], {"1,0": "U"})
         open_ = safe_grid([["floor", "doorway", "floor"]], {"1,0": "O"})
         self.assertFalse(has_line_of_sight(closed, (0, 0), (2, 0)))
         self.assertTrue(has_line_of_sight(open_, (0, 0), (2, 0)))
 
     def test_closed_safe_door_blocks_like_a_wall(self):
         wall = make_grid([["floor", "wall", "floor"]])
-        door = safe_grid([["floor", "doorway", "floor"]], {"1,0": "C"})
+        door = safe_grid([["floor", "doorway", "floor"]], {"1,0": "U"})
         self.assertEqual(
             has_line_of_sight(wall, (0, 0), (2, 0)),
             has_line_of_sight(door, (0, 0), (2, 0)),
@@ -682,7 +684,7 @@ class TestSafeDoorLineOfSight(unittest.TestCase):
             [["floor", "doorway", "floor"],
              ["doorway", "floor", "floor"],
              ["floor", "floor", "floor"]],
-            {"1,0": "C", "0,1": "C"},
+            {"1,0": "U", "0,1": "U"},
         )
         self.assertFalse(has_line_of_sight(g, (0, 0), (1, 1)))
         self.assertFalse(has_line_of_sight(g, (0, 0), (2, 2)))
@@ -691,7 +693,7 @@ class TestSafeDoorLineOfSight(unittest.TestCase):
             [["floor", "doorway", "floor"],
              ["doorway", "floor", "floor"],
              ["floor", "floor", "floor"]],
-            {"1,0": "C", "0,1": "O"},
+            {"1,0": "U", "0,1": "O"},
         )
         self.assertTrue(has_line_of_sight(g_one, (0, 0), (1, 1)))
 
@@ -725,7 +727,7 @@ class TestSafeDoorFindPath(unittest.TestCase):
                 self.assertIn((1, 1), path)
 
     def test_closed_safe_door_seals_for_every_team(self):
-        g = safe_grid(self.WALL_WITH_DOOR, {"1,1": "C"})
+        g = safe_grid(self.WALL_WITH_DOOR, {"1,1": "U"})
         for team in (None, "party", "neutral", "hostile"):
             with self.subTest(team=team):
                 self.assertIsNone(find_path(g, (0, 1), (2, 1), team=team))

@@ -60,18 +60,27 @@ DOOR_STATES = ("L", "U", "O")
 
 
 # ---------------------------------------------------------------------------
-# Safe-room door states (docs/design/safe-room-doors.md §3) — a second,
-# ADDITIVE door layer on top of the frozen cell vocabulary + the normal
-# door state machine. A safe-room door is a ``doorway`` cell recorded in
-# ``Grid.safe`` (never in ``Grid.doors`` — the two are mutually exclusive,
-# D1/I1). A safe door has NO lock state (always unlocked): it is either
-# closed ("C", the default when marked) or open ("O").
+# Safe-room door states (docs/design/door-iconography.md §3, supersedes
+# safe-room-doors.md §3) — a second, ADDITIVE door layer on top of the
+# frozen cell vocabulary + the normal door state machine. A safe-room door
+# is a ``doorway`` cell recorded in ``Grid.safe`` (never in ``Grid.doors``
+# — the two are mutually exclusive, D1/I1). Safe doors use the SAME
+# three-state model as normal doors: ``"L"`` = locked + closed (the
+# fresh-mark default, §3.4), ``"U"`` = unlocked + closed (a legacy ``"C"``
+# migrates here), ``"O"`` = open. Both ``L`` and ``U`` are CLOSED (a wall
+# for LOS + movement); only ``"O"`` is open.
 # ---------------------------------------------------------------------------
 
-#: The two safe-door states (spec §3.1): ``"C"`` closed (the mark default),
-#: ``"O"`` open. There is deliberately no third char — a safe door has no
-#: lock state (it is always unlocked; "always unlocked, starts closed").
-SAFE_DOOR_STATES = ("C", "O")
+#: The three safe-door states (door-iconography §3.1): ``"L"`` locked +
+#: closed (fresh-mark default), ``"U"`` closed + unlocked, ``"O"`` open.
+#: Mirrors :data:`DOOR_STATES`.
+SAFE_DOOR_STATES = ("L", "U", "O")
+
+#: The pre-redesign closed safe-door char (door-iconography §3.2): the only
+#: legacy value ``Grid.from_dict`` coerces — ``"C"`` → ``"U"`` (the old
+#: closed state was always-unlocked, so it preserves its exact behavior).
+#: ``"C"`` never reaches the validated model or the wire.
+SAFE_DOOR_LEGACY_STATE = "C"
 
 #: Teams allowed to occupy a safe-room door cell (spec §5, SAFE-3): the
 #: entity restriction is judged by the entity's ``team`` — ``party`` (player
@@ -102,7 +111,7 @@ class Grid:
     cells: list[list[str]] = field(default_factory=list)  # cells[y][x]
     image: str | None = None  # filename of uploaded source image (optional)
     doors: dict[str, str] | None = None  # NORMAL doors (door-features D1)
-    safe: dict[str, str] | None = None  # SAFE-room doors (safe-room D1): "<x>,<y>" -> "C"|"O"
+    safe: dict[str, str] | None = None  # SAFE-room doors (safe-room D1): "<x>,<y>" -> "L"|"U"|"O"
 
     def __post_init__(self) -> None:
         if len(self.cells) != self.height:
@@ -140,11 +149,13 @@ class Grid:
                     raise ValueError(f"door at {key!r} is not on a doorway cell")
                 clean[key] = st
             self.doors = clean
-        # Safe-room door state (safe-room spec §3.3): mirrors the door
-        # validation — every key must be a well-formed in-bounds
-        # "<x>,<y>" over a ``doorway`` cell with a valid "C"/"O" state, and
-        # (mutual exclusion, D1/I1) the cell must NOT also carry a recorded
-        # normal-door state.
+        # Safe-room door state (door-iconography spec §3.3): mirrors the
+        # door validation — every key must be a well-formed in-bounds
+        # "<x>,<y>" over a ``doorway`` cell with a valid "L"/"U"/"O" state,
+        # and (mutual exclusion, D1/I1) the cell must NOT also carry a
+        # recorded normal-door state. (A legacy "C" from an old payload is
+        # already coerced to "U" by ``from_dict`` before the constructor
+        # runs, so it never reaches here.)
         if self.safe is not None:
             safe_clean: dict[str, str] = {}
             for key, st in self.safe.items():
@@ -198,7 +209,22 @@ class Grid:
 
         The ``doors`` key is optional: absent/``None`` ⇒ every door locked
         (spec §3.4, A2 — the safe backward-compat default).
+
+        Legacy safe-door migration (door-iconography §3.2, the ONLY
+        backward-compat touch): a ``safe`` payload saved by the pre-redesign
+        build (``safe-doors-v1``) may contain the legacy closed char
+        :data:`SAFE_DOOR_LEGACY_STATE` (``"C"``). It is coerced to ``"U"``
+        (unlocked closed) BEFORE the constructor validates, so a legacy map
+        loads with the door's exact old behavior (closed, always-unlocked)
+        and the next ``to_dict`` emits ``"U"`` (self-healing — a ``"C"``
+        never reaches the model or the wire).
         """
+        raw_safe = data.get("safe")
+        if raw_safe:
+            raw_safe = {
+                k: ("U" if v == SAFE_DOOR_LEGACY_STATE else v)
+                for k, v in raw_safe.items()
+            }
         return cls(
             name=data.get("name", "Untitled map"),
             width=int(data["width"]),
@@ -206,7 +232,7 @@ class Grid:
             cells=[list(row) for row in data["cells"]],
             image=data.get("image"),
             doors=data.get("doors"),
-            safe=data.get("safe"),  # None ⇒ no safe doors (A2 backward compat)
+            safe=raw_safe,  # None ⇒ no safe doors (A2 backward compat)
         )
 
     # -- door state accessors (spec §3.5) ---------------------------------
@@ -342,14 +368,16 @@ class Grid:
         return self.safe is not None and f"{x},{y}" in self.safe
 
     def safe_door_state_at(self, x: int, y: int) -> str | None:
-        """The safe-door state at ``(x, y)`` — ``"C"|"O"`` for a safe door,
-        ``None`` for any non-safe cell."""
+        """The safe-door state at ``(x, y)`` — ``"L"|"U"|"O"`` for a safe
+        door, ``None`` for any non-safe cell."""
         if not self.is_safe_door(x, y):
             return None
         return self.safe[f"{x},{y}"]
 
     def is_safe_door_closed(self, x: int, y: int) -> bool:
-        """True iff ``(x, y)`` is a CLOSED safe door (state ``"C"``)."""
+        """True iff ``(x, y)`` is a CLOSED safe door (state ``"L"`` or
+        ``"U"``). Both are a wall for LOS + movement (pathfinding relies
+        on this — it only ever tests open vs not-open)."""
         st = self.safe_door_state_at(x, y)
         return st is not None and st != "O"
 
@@ -374,27 +402,25 @@ class Grid:
 
     def unmark_safe_door(self, x: int, y: int) -> None:
         """Remove the safe marking from ``(x, y)``, reverting it to a NORMAL
-        door (safe-room spec §3.5).
+        door (door-iconography spec §3.5).
 
-        Preserves the open/closed intent: a CLOSED safe door (``"C"``) becomes
-        a closed+UNLOCKED normal door (``"U"``); an OPEN safe door (``"O"``)
-        becomes an open normal door (``"O"``). (A fresh safe door is
-        closed+always-unlocked, so its natural normal-door reversion is
-        ``"U"`` — the GM can re-lock it afterward.) Raises ``ValueError`` if
-        not a safe door.
+        The safe state is PRESERVED into the normal door: ``"L"``→``"L"``,
+        ``"U"``→``"U"``, ``"O"``→``"O"`` (a locked safe door reverts to a
+        locked normal door, which the GM can then unlock as a normal door;
+        an open safe door stays open). Supersedes the old ``C``→``"U"`` /
+        ``O``→``"O"`` reversion. Raises ``ValueError`` if not a safe door.
         """
         key = f"{x},{y}"
         if not self.is_safe_door(x, y):
             raise ValueError(f"no safe door at ({x},{y})")
-        st = self.safe[key]
+        st = self.safe[key]  # "L" | "U" | "O"
         self.safe = dict(self.safe)
         del self.safe[key]
         if not self.safe:
             self.safe = None
-        # Reversion to a normal door, preserving open/closed:
-        new_state = "O" if st == "O" else "U"
+        # Reversion to a normal door, preserving the state (L→L, U→U, O→O):
         self.doors = dict(self.doors or {})
-        self.doors[key] = new_state
+        self.doors[key] = st
 
 
 # ---------------------------------------------------------------------------

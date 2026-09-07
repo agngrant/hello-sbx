@@ -450,7 +450,55 @@ function showView(view) {
   els.lobbyView.hidden = view !== "lobby";
   els.uploadView.hidden = view !== "upload";
   els.mapView.hidden = view !== "map";
+  if (view === "map") renderLegendDoorSwatches();
 }
+
+/* Legend door swatches (door-iconography spec §8.1): each `.door-swatch`
+   chip in #legend holds a 16×16 <canvas> rendering the ACTUAL map art —
+   the S-tier floor base + drawDoorCell(ctx, kind, state, 0, 0, 16, "S") —
+   so the legend is pixel-identical to the door it documents. Idempotent
+   (one canvas per chip, drawn once); the ONLY production call site is
+   showView("map") (P1 join-blocking bug fix: this body reads the `T`
+   design tokens declared further down this file, so it must never run
+   before `T` exists — a load-time call threw a TDZ ReferenceError that
+   aborted boot and left the Join buttons disabled forever). */
+function renderLegendDoorSwatches() {
+  const legend = els.legend;
+  if (!legend) return;
+  for (const el of legend.querySelectorAll(".door-swatch")) {
+    // Idempotent: skip chips that already hold a swatch canvas (the stub
+    // DOM's querySelector is a no-op, so fall back to the children list).
+    const hasCanvas = (el.querySelector && el.querySelector("canvas")) ||
+      (Array.isArray(el.children) && el.children.length > 0);
+    if (hasCanvas) continue;
+    const kind = el.dataset.kind;                 // "normal" | "safe"
+    const dstate = el.dataset.state;              // "L" | "U" | "O"
+    const c = document.createElement("canvas");
+    c.width = 16;
+    c.height = 16;
+    const c2d = c.getContext && c.getContext("2d");
+    if (c2d) {
+      c2d.fillStyle = T.floor;                    // floor base (S tier)
+      c2d.fillRect(0, 0, 16, 16);
+      drawDoorCell(c2d, kind, dstate, 0, 0, 16, "S");
+    }
+    el.appendChild(c);
+  }
+}
+
+/* P1 join-blocking bug: `renderLegendDoorSwatches()` must never run before
+   the `const T` token table is initialized (its loop reads `T.floor`). The
+   old load-time call here threw a TDZ ReferenceError ("Cannot access 'T'
+   before initialization") in every real browser, aborting app.js before
+   the Join-button listeners further down in this file were ever wired —
+   the buttons stayed disabled forever and users could not join. There is
+   now NO load-time call: the legend is hidden until a join, and
+   showView("map") — the welcome / production call site — draws it at the
+   right time, when `T` is long since initialized. ORDERING CONSTRAINT for
+   future edits: no top-level statement in this file may read tokens/legend
+   before `T` is declared — a throw anywhere in this boot path silently
+   strands the user in a lobby whose Join buttons never enable (regression
+   guard: tests/test_frontend.py::TestLobbyBootRegression). */
 
 /* ───────────────────────────── Lobby ───────────────────────────── */
 
@@ -468,6 +516,12 @@ function join(role) {
 
 /* ───────────────────────────── Design tokens (JS copy for canvas) ── */
 
+/* `T` is declared here — after `renderLegendDoorSwatches()` (which reads
+   `T.floor`) but before any boot-time statement can invoke it: the function
+   is only called from showView("map"), i.e. after a join. Moving `T` back
+   below the lobby/legend code, or re-adding a load-time legend call,
+   re-creates the P1 TDZ crash (regression guard:
+   tests/test_frontend.py::TestLobbyBootRegression). */
 const T = {
   floor: "#efe9dc",
   gridLine: "#d9d1bd",
@@ -482,30 +536,31 @@ const T = {
   exploredWall: "#4b5563",
   exploredWallHatch: "#3f4753",
   exploredWallBorder: "#3f4753",
-  exploredDoor: "#8b94a3",   // deprecated alias: === exploredDoorOpen
-  // Door states (door-features spec §7.1). A door is a `doorway` cell +
-  // a state, rendered floor-based with a state-colored border + glyph
-  // (arch = open, bar = closed-unlocked, padlock = closed-locked). All
-  // three full-tier colors are distinct from floor (#efe9dc) and wall
-  // (#3b4252); the explored variants are the same art desaturated into
-  // the grey family (value-distinct from the explored floor #6b7280).
-  doorOpen: "#d97706",         // open (O): today's doorway amber + arch
-  doorUnlocked: "#f59f00",     // closed, unlocked (U): lighter amber + bar
-  doorLocked: "#e03131",       // closed, locked (L): red + padlock glyph
-  exploredDoorOpen: "#8b94a3",      // E tier: the explored-door grey
-  exploredDoorUnlocked: "#9a8f7a",  // E tier: desaturated amber
-  exploredDoorLocked: "#a06b6b",    // E tier: desaturated red
-  // Safe-room doors (safe-room doors spec §7.1). A safe door is a
-  // `doorway` cell rendered as a GREEN CROSS over the floor base: bright
-  // mint green #3ddc84 — deliberately distinct from the party token
-  // green #2f9e44 (darker forest; and a CIRCLE vs the CROSS glyph), from
-  // the normal-door red/amber family, and from floor/wall. Open and
-  // closed share the green — the BAR (present when closed) is the
-  // state discriminator, mirroring the normal-door "bar = closed" idiom.
-  safeOpen: "#3ddc84",         // open (O): green cross, no bar
-  safeClosed: "#3ddc84",       // closed (C): green cross + bar
-  exploredSafeOpen: "#8fae9c",     // E tier: desaturated sage green
-  exploredSafeClosed: "#8fae9c",   // E tier: desaturated sage green
+  // Pictorial wooden doors (door-iconography spec §5.3). A door is a
+  // `doorway` cell drawn floor-based as a WOODEN DOOR: brown slab for a
+  // normal door, green slab for a safe-room door (the wood hue is the
+  // at-a-glance family signal); a top-right padlock marks L (locked,
+  // closed), no padlock marks U (unlocked, closed), and O is an open leaf
+  // with a soft light glow (yellow normal / green safe). The E (explored)
+  // tier desaturates the slab to a flat grey family but keeps the padlock
+  // mark (ePadlockMark) so locked stays distinguishable from
+  // unlocked-closed in memory.
+  woodBrown: "#9c6b3a", woodBrownDark: "#7a4f2a",   // normal slab + planks (S)
+  woodGreen: "#4f9e6b", woodGreenDark: "#3c7d53",   // safe slab + planks (S)
+  padlockBody: "#e6b422", padlockShackle: "#8a8f98",  // padlock (L) (S)
+  lightYellow: "#ffe9a8",                            // normal open glow (O) (S)
+  lightGreen: "#c9f2d4",                            // safe open glow (O) (S)
+  frameBrown: "#5b4327", frameGreen: "#2f5c40",     // slab frames (S)
+  doorShadow: "rgba(0,0,0,0.18)",                   // slab inner shadow (S)
+  eWoodSlab: "#8a94a0",                            // both families' E slab (L/U)
+  eSlabFrame: "#5f6874",                            // E slab frame (L/U)
+  ePadlockMark: "#cfd4db",                          // E faint padlock (L) — the locked signal
+  eLight: "#e8ecf0",                                // both families' E open glow (O)
+  // Paint-preview fills for the door/safeDoor hover preview: the WOOD color
+  // of each family (a preview says "this is a door of this kind", not "this
+  // is a locked door") — door-iconography spec §7.2.
+  doorWoodPreview: "#9c6b3a",   // == woodBrown
+  safeWoodPreview: "#4f9e6b",   // == woodGreen
   gridLineDim: "rgba(217, 209, 189, 0.3)",
   accent: "#4dabf7",
   danger: "#e03131",
@@ -577,16 +632,20 @@ function doorStateAt(x, y) {
 }
 
 /* ─────────────────── Safe doors: state object + per-cell lookup ─────────
-   safe-room doors spec §7.3. `map.safe` is an ADDITIVE wire field that
-   rides inside `map` like `map.doors`: an object "<x>,<y>" -> "C" (closed)
-   | "O" (open) covering EVERY safe-door cell (emitted in full whenever ≥ 1
-   exists; a missing key ⇒ no safe doors ⇒ every doorway is a NORMAL door).
-   `map.safe` and `map.doors` partition the doorway cells server-side
-   (a doorway is one kind of door or the other, never both). A malformed
-   payload (wrong type, bad keys, bad state chars) is treated as {} —
-   defensive, never crashes the render (cf. validateDoors / 
-   validateVisibilityMatrix). */
-const SAFE_STATES = ["C", "O"];
+   safe-room doors spec §7.3 + door-iconography spec §7.1. `map.safe` is an
+   ADDITIVE wire field that rides inside `map` like `map.doors`: an object
+   "<x>,<y>" -> "L" (locked+closed) | "U" (unlocked, closed) | "O" (open) —
+   the SAME three-state model the normal doors use — covering EVERY
+   safe-door cell (emitted in full whenever ≥ 1 exists; a missing key ⇒ no
+   safe doors ⇒ every doorway is a NORMAL door). `map.safe` and `map.doors`
+   partition the doorway cells server-side (a doorway is one kind of door
+   or the other, never both). A LEGACY "C" (from a stale pre-redesign
+   server) is coerced to "U" (unlocked closed — the old closed state was
+   always-unlocked), mirroring the server's from_dict migration, so the
+   render never sees an unknown char. Any other malformed payload (wrong
+   type, bad keys, bad state chars) is treated as {} — defensive, never
+   crashes the render (cf. validateDoors / validateVisibilityMatrix). */
+const SAFE_STATES = ["L", "U", "O"];
 function validateSafe(safe) {
   if (safe == null) return {};
   if (typeof safe !== "object" || Array.isArray(safe)) return {};
@@ -594,8 +653,10 @@ function validateSafe(safe) {
   const keyRe = /^[0-9]+,[0-9]+$/;
   for (const key of Object.keys(safe)) {
     if (!keyRe.test(key)) return {};
-    if (SAFE_STATES.indexOf(safe[key]) === -1) return {};
-    clean[key] = safe[key];
+    let v = safe[key];
+    if (v === "C") v = "U";   // LEGACY migration (mirrors the server)
+    if (SAFE_STATES.indexOf(v) === -1) return {};
+    clean[key] = v;
   }
   return clean;
 }
@@ -611,112 +672,192 @@ function isSafeDoor(x, y) {
     state.safe, `${x},${y}`);
 }
 
-/* The safe-door state at (x,y): "C"|"O" for a safe-door cell (default "C"),
+/* The safe-door state at (x,y): "L"|"U"|"O" for a safe-door cell
+   (DEFAULT "L" — a doorway recorded safe with no value is LOCKED, the
+   safe/secure default, mirroring the normal door's locked default),
    null for a cell that is not a safe door. Mirrors the server's
    Grid.safe_door_state_at on the client. */
 function safeDoorStateAt(x, y) {
   if (!isSafeDoor(x, y)) return null;
-  return state.safe[`${x},${y}`] || "C";
+  return state.safe[`${x},${y}`] || "L";
 }
 
-/* The safe-door border/glyph color at visibility tier t (safe-room doors
-   spec §7.1): the full-detail mint green #3ddc84 for "S" (GM + preview +
-   in-sight — the GM and preview passes have no matrix, so they always take
-   this branch), the desaturated sage green #8fae9c for "E" (explored
-   memory). Open and closed share the tier's green — the BAR (present when
-   closed, see drawSafeDoorGlyph) is the state discriminator, mirroring the
-   normal-door "bar = closed" idiom but in green. */
-function safeDoorColor(state, t) {
-  if (t === "E") {
-    if (state === "O") return T.exploredSafeOpen;
-    return T.exploredSafeClosed;
-  }
-  if (state === "O") return T.safeOpen;
-  return T.safeClosed;
-}
-
-/* The safe-door glyph over the floor base (safe-room doors spec §7.1): a
-   centered green CROSS (plus sign) — the "safe room" mark — plus, when
-   CLOSED, a horizontal bar across the middle (the "bar = closed" idiom a
-   normal door already uses, here in green). The cross + optional bar makes
-   open vs closed unmistakable, and the green cross is unmistakably a
-   different glyph from a normal door's arch / bar / padlock. `s` = cell
-   size in px, (px,py) = cell origin. */
-function drawSafeDoorGlyph(ctx, state, px, py, s) {
+/* ─────────────── Pictorial wooden doors (door-iconography spec §5/§6) ──
+   One renderer draws ALL SIX door states: `kind` "normal" (brown wood)
+   or "safe" (green wood); `state` "L" (locked+closed), "U" (unlocked,
+   closed) or "O" (open); `t` "S" (full detail — GM view, player in-sight
+   cells) or "E" (explored, greyed). A door is a PICTORIC wooden door
+   drawn OVER the cell's floor base (the existing contract — the floor fill
+   + grid line are already there; the art is a "sticker", never a cell
+   replacement):
+     L → slab + frame + planks + inner shadow + a CLOSED padlock in the
+         TOP-RIGHT corner (the padlock is the SOLE L-vs-U discriminator);
+     U → identical to L minus the padlock (the ABSENCE is the signal);
+     O → the slab is gone: a soft radial LIGHT glow fills the opening
+         (yellow normal / green safe) with an ajar leaf swung over it.
+   The E tier desaturates everything to a flat grey family, but the padlock
+   mark survives as a LIGHT grey (ePadlockMark) so locked stays readable
+   in memory, and the open glow becomes near-white (eLight).
+   Pure function of (ctx, kind, state, px, py, s, t) — no closure over the
+   module state — so it is testable in the Node harness and reusable by the
+   legend swatches. Shared by `drawGridOnCanvas` (doorway pass) and
+   `renderLegendDoorSwatches`. */
+function drawDoorCell(ctx, kind, state, px, py, s, t) {
+  const E = t === "E";
   const cx = px + s / 2;
   const cy = py + s / 2;
-  const r = s * 0.28;   // cross arm extent (same scale as the door glyphs)
-  // Cross: two centered strokes.
-  ctx.beginPath();
-  ctx.moveTo(cx - r, cy);
-  ctx.lineTo(cx + r, cy);
-  ctx.moveTo(cx, cy - r);
-  ctx.lineTo(cx, cy + r);
-  ctx.stroke();
-  if (state === "C") {
-    // Bar across the middle: the "closed" mark (the cross arms extend past
-    // it, so the cell still reads as a cross, now shut — same position and
-    // length as the normal-door "U" bar, but drawn over the cross in green).
-    const by = cy + r * 0.8;
-    ctx.beginPath();
-    ctx.moveTo(cx - r, by);
-    ctx.lineTo(cx + r, by);
-    ctx.stroke();
-  }
-}
-
-/* The border/glyph color for a NORMAL door state at visibility tier t
-   (door-features spec §7.1): the full-detail amber/red family for "S"
-   (GM + preview + in-sight), the desaturated grey family for "E".
-   (Safe-room doors use safeDoorColor / drawSafeDoorGlyph instead.) */
-function doorColor(state, t) {
-  if (t === "E") {
-    if (state === "O") return T.exploredDoorOpen;
-    if (state === "U") return T.exploredDoorUnlocked;
-    return T.exploredDoorLocked;
-  }
-  if (state === "O") return T.doorOpen;
-  if (state === "U") return T.doorUnlocked;
-  return T.doorLocked;
-}
-
-/* The door glyph over the floor base (§7.2): the open door keeps today's
-   arch (byte-identical art); a closed-unlocked door draws a centered
-   horizontal "bar"; a closed-locked door draws a padlock (bar + a small
-   lock notch above it). `s` = cell size in px, (px,py) = cell origin. */
-function drawDoorGlyph(ctx, state, px, py, s) {
-  const r = s * 0.28;
-  const cx = px + s / 2;
-  const cy = py + s / 2;
+  const margin = Math.max(1, s * 0.10);   // floor-gap frame (floor base shows)
+  const slabX = px + margin, slabY = py + margin;
+  const slabW = s - 2 * margin, slabH = s - 2 * margin;
+  // Tier + family palette (§5.1 S / §5.2 E). The E slab is the SAME grey
+  // for both families (greying removes the hue — in memory both are
+  // "a door"); the padlock mark + open glow keep the state signals.
+  const p = E
+    ? { slab: T.eWoodSlab, plank: T.eSlabFrame, frame: T.eSlabFrame,
+        glow: T.eLight, lock: T.ePadlockMark, shadow: null, keyhole: false }
+    : (kind === "safe")
+      ? { slab: T.woodGreen, plank: T.woodGreenDark, frame: T.frameGreen,
+          glow: T.lightGreen, lock: null, shadow: T.doorShadow, keyhole: true }
+      : { slab: T.woodBrown, plank: T.woodBrownDark, frame: T.frameBrown,
+          glow: T.lightYellow, lock: null, shadow: T.doorShadow, keyhole: true };
   if (state === "O") {
-    // Arch — identical geometry to the pre-feature doorway glyph.
-    ctx.beginPath();
-    ctx.moveTo(cx - r, cy + r * 0.8);
-    ctx.lineTo(cx - r, cy - r * 0.4);
-    ctx.lineTo(cx + r, cy - r * 0.4);
-    ctx.lineTo(cx + r, cy + r * 0.8);
-    ctx.stroke();
+    drawDoorOpen(ctx, cx, cy, s, slabX, slabY, slabW, slabH, p);
     return;
   }
-  // Bar — the closed door's center beam.
-  const by = cy + r * 0.8;
-  ctx.beginPath();
-  ctx.moveTo(cx - r, by);
-  ctx.lineTo(cx + r, by);
-  ctx.stroke();
-  if (state === "L") {
-    // Padlock notch — a small hook above the bar (distinct from the plain
-    // "U" bar, and distinct from the "O" arch, at the 8px min cell size).
-    const top = cy - r * 0.6;
-    const h = Math.max(2, s * 0.13);
+  drawDoorClosed(ctx, s, slabX, slabY, slabW, slabH, p, state === "L");
+}
+
+/* Closed door (state "L" or "U", both kinds, both tiers, §6.1/§6.2):
+   frame + wooden slab + plank seams (s≥12) + inner shadow (S tier, s≥14)
+   + the top-right padlock (L only, always — min 4px). */
+function drawDoorClosed(ctx, s, slabX, slabY, slabW, slabH, p, locked) {
+  // 1. Frame (drawn FIRST, as the slab's outline; the floor inset around
+  //    the slab keeps the "floor base under the door" contract visible).
+  ctx.lineWidth = Math.max(1, Math.round(s * 0.08));
+  ctx.strokeStyle = p.frame;
+  ctx.strokeRect(slabX + 0.5, slabY + 0.5, slabW - 1, slabH - 1);
+  // 2. Slab fill (the wood). Kept inside the cell (the margin inset).
+  ctx.fillStyle = p.slab;
+  ctx.fillRect(slabX, slabY, slabW, slabH);
+  // 3. Plank seams — dropped at s < 12 (§6.4): one vertical mid-seam +
+  //    one horizontal seam read as "wood planks" at ≥12px.
+  if (s >= 12) {
+    ctx.lineWidth = Math.max(1, s * 0.05);
+    ctx.strokeStyle = p.plank;
     ctx.beginPath();
-    ctx.moveTo(cx, by);
-    ctx.lineTo(cx, top + h);
-    ctx.moveTo(cx - h, top + h);
-    ctx.arc(cx, top + h, h, Math.PI, 0, true);
-    ctx.lineTo(cx + h, top);
+    ctx.moveTo(slabX + slabW / 2, slabY);
+    ctx.lineTo(slabX + slabW / 2, slabY + slabH);
+    ctx.moveTo(slabX, slabY + slabH * 0.55);
+    ctx.lineTo(slabX + slabW, slabY + slabH * 0.55);
     ctx.stroke();
   }
+  // 4. Inner shadow (depth; S tier only, s >= 14 — greyed E art has no
+  //    shadow). Light-from-top-left convention: bottom + right edges.
+  if (p.shadow && s >= 14) {
+    ctx.lineWidth = 1;
+    ctx.strokeStyle = p.shadow;
+    ctx.beginPath();
+    ctx.moveTo(slabX, slabY + slabH - 1);
+    ctx.lineTo(slabX + slabW, slabY + slabH - 1);
+    ctx.moveTo(slabX + slabW - 1, slabY);
+    ctx.lineTo(slabX + slabW - 1, slabY + slabH);
+    ctx.stroke();
+  }
+  // 5. Padlock — the LOCKED signal, top-right corner of the slab (§6.1/
+  //    §6.3). L and U differ ONLY by this padlock (A7). Its bounding box's
+  //    right edge coincides with the slab's right inner edge and its top
+  //    edge with the slab's top inner edge, with a breathing gap so the
+  //    body never clips the frame.
+  if (locked) {
+    const padSize = Math.max(4, s * 0.42);
+    const padX = slabX + slabW - padSize;
+    drawPadlock(ctx, padX, slabY, padSize, p.lock, p.keyhole);
+  }
+}
+
+/* The CLOSED padlock glyph (shared by both families' "L"; §6.3): a
+   brass body with a steel shackle arc whose legs go STRAIGHT DOWN into
+   the body top (a locked shackle — no gap). Fill + stroke so it reads at
+   8px. `lock` (non-null only in the E tier) recolors body AND shackle to
+   one flat mark color (the greyed "locked" signal, §5.2); the keyhole
+   appears only when p >= 10 (≈ s >= 24, §6.4). */
+function drawPadlock(ctx, x0, y0, psize, lockColor, keyhole) {
+  const p = psize;
+  const bodyX = x0 + p * 0.22, bodyW = p * 0.56;
+  const bodyY = y0 + p * 0.42, bodyH = p * 0.58;
+  const shW = p * 0.44, shX0 = x0 + (p - shW) / 2;
+  const shTop = y0 + p * 0.12;
+  // 1. Shackle first (behind the body top): a thick rounded arc — the two
+  //    legs run straight down into the body top (a locked shackle).
+  ctx.lineWidth = Math.max(1.5, p * 0.18);
+  ctx.strokeStyle = lockColor || T.padlockShackle;
+  ctx.beginPath();
+  ctx.moveTo(shX0, bodyY);
+  ctx.lineTo(shX0, shTop + shW / 2);
+  ctx.arc(shX0 + shW / 2, shTop + shW / 2, shW / 2, Math.PI, 0, false);
+  ctx.lineTo(shX0 + shW, bodyY);
+  ctx.stroke();
+  // 2. Body (in front): a rounded brass rect.
+  ctx.fillStyle = lockColor || T.padlockBody;
+  roundRect(ctx, bodyX, bodyY, bodyW, bodyH, p * 0.12);
+  ctx.fill();
+  // 3. Keyhole — only when p >= 10 AND the tier allows it (S only; the E
+  //    tier keeps the padlock shape but drops the keyhole, §6.3/§6.4).
+  if (keyhole && p >= 10) {
+    ctx.fillStyle = "rgba(0,0,0,0.45)";
+    ctx.beginPath();
+    ctx.arc(bodyX + bodyW / 2, bodyY + bodyH * 0.38, p * 0.06, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillRect(bodyX + bodyW / 2 - 0.5, bodyY + bodyH * 0.38, 1,
+                 bodyH * 0.7 - bodyH * 0.38);
+  }
+}
+
+/* Open door (state "O", both kinds, both tiers, §6.5): the slab is gone —
+   the floor base shows through and the opening is filled with a SOFT
+   radial light glow (yellow normal / green safe; greyed near-white at E),
+   with an ajar leaf (a sliver of the door's own wood, swung up-left)
+   drawn over the glow at s >= 10. The frame is still drawn, so the glow
+   reads as "the lit room beyond the door frame" and never bleeds past the
+   cell. */
+function drawDoorOpen(ctx, cx, cy, s, slabX, slabY, slabW, slabH, p) {
+  // 1. Frame boundary (same geometry as the closed slab's frame).
+  ctx.lineWidth = Math.max(1, Math.round(s * 0.08));
+  ctx.strokeStyle = p.frame;
+  ctx.strokeRect(slabX + 0.5, slabY + 0.5, slabW - 1, slabH - 1);
+  // 2. Radial light glow, CLIPPED to the slab rect so the light never
+  //    bleeds onto neighbors; the transparent outer stop keeps the floor
+  //    base visible at the slab's corners (a soft edge, not a hard fill).
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(slabX, slabY, slabW, slabH);
+  ctx.clip();
+  const g = ctx.createRadialGradient(cx, cy, s * 0.05, cx, cy, s * 0.62);
+  g.addColorStop(0, p.glow);
+  g.addColorStop(0.55, p.glow);
+  g.addColorStop(1, "rgba(255,255,255,0)");
+  ctx.fillStyle = g;
+  ctx.fillRect(slabX, slabY, slabW, slabH);
+  // 3. Ajar leaf (s >= 10 only, §6.4): a thin parallelogram hinged on the
+  //    slab's left edge, swung ~55° up-left into the opening — a sliver of
+  //    the slab's own wood, edge-on, so the family color is preserved in
+  //    the open state. (At s < 10 the glow alone reads "open / lit".)
+  if (s >= 10) {
+    const hx = slabX, hy = cy;
+    const tipX = slabX + slabW * 0.42, tipY = cy - slabH * 0.30;
+    ctx.beginPath();
+    ctx.moveTo(hx, hy - slabH * 0.42);
+    ctx.lineTo(hx, hy + slabH * 0.42);
+    ctx.lineTo(tipX, tipY + slabH * 0.20);
+    ctx.lineTo(tipX, tipY - slabH * 0.10);
+    ctx.closePath();
+    ctx.fillStyle = p.slab;
+    ctx.fill();
+    ctx.lineWidth = Math.max(1, s * 0.08);
+    ctx.strokeStyle = p.frame;
+    ctx.stroke();
+  }
+  ctx.restore();
 }
 
 /* ───────────────────────────── Canvas: layout + shared cell renderer ── */
@@ -788,10 +929,10 @@ function drawGridOnCanvas(canvas, ctx, visibility = null) {
   const palette = (t) => (t === "E")
     ? { floor: T.exploredFloor, wallFill: T.exploredWall,
         hatch: T.exploredWallHatch, border: T.exploredWallBorder,
-        door: T.exploredDoorOpen, line: T.gridLineDim }
+        line: T.gridLineDim }
     : { floor: T.floor, wallFill: T.wallFill,
         hatch: T.wallHatch, border: T.wallBorder,
-        door: T.doorOpen, line: T.gridLine };
+        line: T.gridLine };
 
   // ── 1. Floor / floor-tinted base + grid lines ──
   if (!vis) {
@@ -939,23 +1080,19 @@ function drawGridOnCanvas(canvas, ctx, visibility = null) {
     ctx.stroke();
   }
 
-  // Doors (door-features spec §7.2): every `doorway` cell is a door in a
-  // state ("L" locked / "U" unlocked / "O" open, §7.3 — absent entry ⇒
-  // locked). A door cell is floor-based: it gets its tier's floor base +
-  // grid line and NO wall hatch; the state decides the border/glyph color
-  // and the glyph (arch = open, bar = closed-unlocked, padlock =
-  // closed-locked). Both tiers are state-driven; the "H" tier is still
-  // skipped (a hidden door is not drawn), so GM/preview (no matrix) and a
-  // player's S cells render full detail while the player's E cells render
-  // the desaturated grey variants.
-  //
-  // SAFE-ROOM DOORS (safe-room doors spec §7.2) — a `doorway` cell recorded
-  // in map.safe is a SAFE door, not a normal door: it renders the GREEN
-  // CROSS art (safeDoorColor/drawSafeDoorGlyph — green border + cross, plus
-  // a bar when closed, per tier) and SKIPS the normal-door branch (which
-  // stays byte-for-byte unchanged for every non-safe doorway). Safe and
-  // normal doors partition the doorway cells (map.safe ∩ map.doors = ∅),
-  // so the kind check first is total: a cell takes exactly one branch.
+  // Doors (door-iconography spec §6.6, superseding door-features §7.2 and
+  // safe-room doors §7.2): every `doorway` cell is a PICTORIAL wooden door
+  // in a state ("L" locked / "U" unlocked / "O" open) — the single
+  // drawDoorCell dispatcher replaces the old border+glyph (normal) and
+  // border+cross (safe) art. A safe-door cell (recorded in map.safe) takes
+  // kind "safe" + safeDoorStateAt (default "L"); every other doorway takes
+  // kind "normal" + doorStateAt (default "L") — the partition is total.
+  // A door cell is floor-based: it gets its tier's floor base + grid line
+  // and NO wall hatch; the door art is drawn OVER that base. Both tiers are
+  // state-driven (S: brown/green wood, E: greyed — but the padlock mark
+  // survives at E so locked stays readable); the "H" tier is still skipped
+  // (a hidden door is not drawn), so GM/preview (no matrix) and a player's
+  // S cells render full detail while the player's E cells render greyed.
   for (let y = 0; y < g.height; y++) {
     for (let x = 0; x < g.width; x++) {
       if (g.cells[y][x] !== "doorway") continue;
@@ -963,21 +1100,11 @@ function drawGridOnCanvas(canvas, ctx, visibility = null) {
       if (t === "H") continue;
       const px = ox + x * s;
       const py = oy + y * s;
-      if (isSafeDoor(x, y)) {
-        const sst = safeDoorStateAt(x, y) || "C";
-        ctx.strokeStyle = safeDoorColor(sst, t);
-        ctx.lineWidth = Math.max(2, Math.min(3, s / 8));
-        ctx.strokeRect(px + 1.5, py + 1.5, s - 3, s - 3);
-        ctx.lineWidth = Math.max(1.5, s / 24);
-        drawSafeDoorGlyph(ctx, sst, px, py, s);
-        continue;
-      }
-      const st = doorStateAt(x, y) || "L";
-      ctx.strokeStyle = doorColor(st, t);
-      ctx.lineWidth = Math.max(2, Math.min(3, s / 8));
-      ctx.strokeRect(px + 1.5, py + 1.5, s - 3, s - 3);
-      ctx.lineWidth = Math.max(1.5, s / 24);
-      drawDoorGlyph(ctx, st, px, py, s);
+      const kind = isSafeDoor(x, y) ? "safe" : "normal";
+      const st = (kind === "safe")
+        ? (safeDoorStateAt(x, y) || "L")
+        : (doorStateAt(x, y) || "L");
+      drawDoorCell(ctx, kind, st, px, py, s, t);
     }
   }
 
@@ -1101,8 +1228,8 @@ function drawEntitiesAndDots(ctx, s, ox, oy) {
     if (state.tool !== "select") {
       const fill = state.tool === "wall" ? T.wallFill
                  : state.tool === "doorway" ? T.doorway
-                 : state.tool === "door" ? doorColor(state.doorAction, "S")
-                 : state.tool === "safeDoor" ? T.safeOpen
+                 : state.tool === "door" ? T.doorWoodPreview
+                 : state.tool === "safeDoor" ? T.safeWoodPreview
                  : T.floor;
       ctx.globalAlpha = 0.5;
       ctx.fillStyle = fill;

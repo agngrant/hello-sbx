@@ -59,24 +59,28 @@ scenario and prints a check per behaviour:
      ->(7,2) through it (every path step a legal A* step, independent A*
      re-derivation); closing the door again blocks the return route;
      map.doors is present + full in every state (I5).
- 11. SAFE-ROOM DOORS (safe-room spec AC14): GM + 1 player on a FRESH
-     session. The welcome map has NO map.safe (absent by default) and
-     map.doors all L (regression); GM `safe_door mark` (5,5) -> map.safe =
-     {"5,5":"C"} and map.doors no longer has "5,5" (disjoint; REST carries
-     the additive safe key); GM open -> "5,5":"O". The RESTRICTION: a GM-
-     created hostile cannot path through the OPEN safe door ("no route",
-     position unchanged) while a neutral npc walks through it; the hostile
-     override/place/create guards reject "cannot place a hostile on a safe
-     room door" while a party/neutral override onto a CLOSED safe door is
-     allowed (E11). AWARENESS: a hostile behind a closed safe door is
-     INVISIBLE beyond the radius, APPROXIMATE within it (GM set_awareness),
-     and FULL behind the OPEN safe door (LOS is team-agnostic). EXPLORED:
-     behind the closed safe door the room is H, the face is S, opening
-     reveals S, closing greys to E (monotonic) — the S-set re-derives via
-     the SAFE-AWARE independent LOS helper (fed the wire map.safe). The
-     player's safe_door mark -> "not allowed"; a normal door message on the
-     safe cell -> "not a normal door"; GM unmark reverts (5,5) to a normal
-     door "U" and map.safe disappears.
+ 11. SAFE-ROOM DOORS (safe-room spec AC14 + door-iconography AC14): GM +
+     1 player on a FRESH session. The welcome map has NO map.safe (absent
+     by default) and map.doors all L (regression). Safe doors now carry a
+     LOCK state (L/U/O): GM `safe_door mark` (5,5) -> map.safe = {"5,5":
+     "L"} (locked, the secure fresh default) and map.doors no longer has
+     "5,5" (disjoint; REST carries the additive safe key); open while locked
+     -> "safe door is locked"; unlock -> "U"; open -> "O". The RESTRICTION:
+     a GM-created hostile cannot path through the OPEN safe door ("no
+     route", position unchanged) while a neutral npc walks through it; the
+     hostile override/place/create guards reject "cannot place a hostile on
+     a safe room door" while a party/neutral override onto a CLOSED safe
+     door is allowed (E11). AWARENESS: a hostile behind a closed safe door
+     is INVISIBLE beyond the radius, APPROXIMATE within it (GM
+     set_awareness), and FULL behind the OPEN safe door (LOS is
+     team-agnostic). EXPLORED: behind the closed safe door the room is H,
+     the face is S, opening reveals S, closing greys to E (monotonic) — the
+     S-set re-derives via the SAFE-AWARE independent LOS helper (fed the
+     wire map.safe). The player's safe_door mark -> "not allowed"; a normal
+     door message on the safe cell -> "not a normal door"; GM lock
+     (O→L, force-close, not occupancy-guarded) then close on the L door ->
+     "safe door is already closed"; GM unmark (from U) reverts (5,5) to a
+     normal door "U" (state preserved) and map.safe disappears.
 
 Run:  .venv/bin/python scripts/e2e_proof.py   (starts its own server)
 """
@@ -875,7 +879,7 @@ def main():
                                          "9,7": "L"},
                   json.dumps(rest0.get("doors")))
 
-            # (b) mark -> C (closed), then open -> O --------------------------
+            # (b) mark -> L (locked, the fresh default) ----------------------
             def wait_safe(c, val):
                 for _ in range(40):
                     m = c.recv_json()
@@ -888,22 +892,37 @@ def main():
 
             gm11.send_json({"type": "safe_door", "x": 5, "y": 5,
                             "action": "mark"})
-            m1 = wait_safe(gm11, {"5,5": "C"})
-            check("(b) GM mark: map.safe={'5,5':'C'} (closed, no lock state)",
-                  m1["map"]["safe"] == {"5,5": "C"},
+            m1 = wait_safe(gm11, {"5,5": "L"})
+            check("(b) GM mark: map.safe={'5,5':'L'} (locked, fresh default)",
+                  m1["map"]["safe"] == {"5,5": "L"},
                   json.dumps(m1["map"].get("safe")))
             check("(b) map.doors no longer has '5,5' (disjoint partition)",
                   "5,5" not in m1["map"].get("doors", {}),
                   json.dumps(m1["map"].get("doors")))
-            wait_safe(pl11, {"5,5": "C"})  # the player copy too
+            wait_safe(pl11, {"5,5": "L"})  # the player copy too
             conn = http.client.HTTPConnection(host, port, timeout=5)
             conn.request("GET", "/api/maps/sample-dungeon")
             rest1 = json.loads(conn.getresponse().read())
             conn.close()
-            check("(b) REST carries additive safe (disjoint from doors)",
-                  rest1.get("safe") == {"5,5": "C"}
+            check("(b) REST carries additive safe (L/U/O, disjoint from doors)",
+                  rest1.get("safe") == {"5,5": "L"}
                   and "5,5" not in rest1.get("doors", {}),
                   json.dumps(rest1.get("safe")))
+            # The fresh safe door is LOCKED: open before unlock is rejected.
+            gm11.send_json({"type": "safe_door", "x": 5, "y": 5,
+                            "action": "open"})
+            err = gm11.recv_json()
+            check("(b) open while locked -> 'safe door is locked'",
+                  err == {"type": "error", "message": "safe door is locked"},
+                  json.dumps(err))
+            # GM unlock (L->U) then open (U->O):
+            gm11.send_json({"type": "safe_door", "x": 5, "y": 5,
+                            "action": "unlock"})
+            m1u = wait_safe(gm11, {"5,5": "U"})
+            check("(b) GM unlock: map.safe={'5,5':'U'}",
+                  m1u["map"]["safe"] == {"5,5": "U"},
+                  json.dumps(m1u["map"].get("safe")))
+            wait_safe(pl11, {"5,5": "U"})
             gm11.send_json({"type": "safe_door", "x": 5, "y": 5,
                             "action": "open"})
             m2 = wait_safe(gm11, {"5,5": "O"})
@@ -996,7 +1015,7 @@ def main():
             # IS allowed (ignore-walls, like a closed normal door).
             gm11.send_json({"type": "safe_door", "x": 5, "y": 5,
                             "action": "close"})
-            wait_safe(gm11, {"5,5": "C"})
+            wait_safe(gm11, {"5,5": "U"})
             pl11.recv_json()             # the close broadcast (state)
             gm11.send_json({"type": "move", "entity_id": al_ent11,
                             "x": 5, "y": 5, "override": True})
@@ -1033,7 +1052,7 @@ def main():
             pl11.recv_json()
             gm11.send_json({"type": "safe_door", "x": 5, "y": 5,
                             "action": "close"})
-            wait_safe(gm11, {"5,5": "C"})
+            wait_safe(gm11, {"5,5": "U"})
             pl11.recv_json()
             gm11.send_json({"type": "create_entity", "name": "Vex11",
                             "kind": "enemy", "team": "hostile",
@@ -1098,14 +1117,14 @@ def main():
                            timeout=10).connect()
             try:
                 gmf.join("SafeExpGM", "gm")
-                # Precondition: a CLOSED safe door at (5,5). Clear any leftover
-                # state, re-mark, so it is deterministically "C".
+                # Precondition: a LOCKED safe door at (5,5). Clear any
+                # leftover state, re-mark, so it is deterministically "L".
                 gmf.send_json({"type": "safe_door", "x": 5, "y": 5,
                                "action": "unmark"})
                 gmf.recv_json()   # state (was safe) or "not a safe door"
                 gmf.send_json({"type": "safe_door", "x": 5, "y": 5,
                                "action": "mark"})
-                gmf.recv_json()   # state (safe now "C")
+                gmf.recv_json()   # state (safe now "L")
                 wplf = plf.join("SafeExpAl", "player")   # spawns (1,1)
                 gmf.recv_json_or_none(timeout=1)  # GM join-broadcast (player)
                 plf_ent = wplf["you"]["entity_id"]
@@ -1145,11 +1164,16 @@ def main():
                       s_set_of_f(pf_st) == rederive_f(pf_st, pf))
                 ever_se = set(s_set_of_f(pf_st))
 
-                # GM opens the safe door: (6,5) becomes in-sight -> S.
+                # GM unlocks then opens the safe door: (6,5) becomes in-sight
+                # -> S. (The player receives TWO state frames — one for the
+                # unlock, one for the open; wait for the OPEN one.)
+                gmf.send_json({"type": "safe_door", "x": 5, "y": 5,
+                               "action": "unlock"})
+                gmf.recv_json()   # the unlock state (GM copy)
                 gmf.send_json({"type": "safe_door", "x": 5, "y": 5,
                                "action": "open"})
                 gmf.recv_json()   # the open state (GM copy)
-                al_st = state_until(plf)
+                al_st = wait_safe(plf, {"5,5": "O"})
                 check("(f) opening reveals (6,5) as S (seen through the open "
                       "safe door)", mask_of_f(al_st, 6, 5) == "S",
                       mask_of_f(al_st, 6, 5))
@@ -1162,7 +1186,7 @@ def main():
                 gmf.send_json({"type": "safe_door", "x": 5, "y": 5,
                                "action": "close"})
                 gmf.recv_json()   # the close state (GM copy)
-                al_st = state_until(plf)
+                al_st = wait_safe(plf, {"5,5": "U"})
                 h_now = {(x, y) for y in range(phf) for x in range(pwf)
                          if al_st["visibility"][y][x] == "H"}
                 check("(f) closing again greys (6,5) to E (memory, NOT H) and "
@@ -1174,13 +1198,91 @@ def main():
                 gmf.close()
                 plf.close()
 
-            # (g) permissions over the wire -----------------------------------
+            # (g) permissions over the wire + the lock state machine ----------
             pl11.send_json({"type": "safe_door", "x": 5, "y": 5,
                             "action": "mark"})
             err = pl11.recv_json()
             check("(g) a player safe_door mark -> 'not allowed' (GM-only)",
                   err == {"type": "error", "message": "not allowed"},
                   json.dumps(err))
+            # An unrecognized action reports the FULL six-action list
+            # (lock/unlock are VALID safe-door actions now):
+            gm11.send_json({"type": "safe_door", "x": 5, "y": 5,
+                            "action": "explode"})
+            err = gm11.recv_json()
+            check("(g) bad safe action -> 'action must be one of "
+                  "mark/unmark/unlock/lock/open/close'",
+                  err == {"type": "error",
+                          "message": ("action must be one of "
+                                      "mark/unmark/unlock/lock/open/close")},
+                  json.dumps(err))
+            # The shared (5,5) door is U here: the (f) explored section
+            # unmarked (preserving O -> U) and re-marked (-> L), then its
+            # final close (O -> U) left it U. GM lock (U->L):
+            gm11.send_json({"type": "safe_door", "x": 5, "y": 5,
+                            "action": "lock"})
+            wait_safe(gm11, {"5,5": "L"})
+            pl11.recv_json()
+            check("(g) GM lock (U->L) works and broadcasts {'5,5':'L'}",
+                  True)
+            # close on the now-L (locked+closed) door -> already closed:
+            gm11.send_json({"type": "safe_door", "x": 5, "y": 5,
+                            "action": "close"})
+            err = gm11.recv_json()
+            check("(g) close on a locked+closed safe door -> 'safe door is "
+                  "already closed'",
+                  err == {"type": "error",
+                          "message": "safe door is already closed"},
+                  json.dumps(err))
+            # unlock back to U for the E14 force-close proof below:
+            gm11.send_json({"type": "safe_door", "x": 5, "y": 5,
+                            "action": "unlock"})
+            wait_safe(gm11, {"5,5": "U"})
+            pl11.recv_json()
+            # E14 force-close: open, park Alice ON the open safe door, then
+            # LOCK — a hostile can never occupy the cell (guard), but the
+            # party token is left on the now-closed door (lock from open is
+            # NOT occupancy-guarded).
+            gm11.send_json({"type": "safe_door", "x": 5, "y": 5,
+                            "action": "open"})
+            wait_safe(gm11, {"5,5": "O"})
+            pl11.recv_json()
+            gm11.send_json({"type": "create_entity", "name": "VexG",
+                            "kind": "enemy", "team": "hostile",
+                            "x": 5, "y": 5})
+            err = gm11.recv_json()
+            check("(g) hostile create on the OPEN safe cell -> 'cannot place "
+                  "a hostile on a safe room door'",
+                  err == {"type": "error",
+                          "message": "cannot place a hostile on a safe room door"},
+                  json.dumps(err))
+            gm11.send_json({"type": "place", "entity_id": al_ent11,
+                            "x": 5, "y": 5})
+            state_until(gm11)
+            pl11.recv_json()             # the place broadcast (player copy)
+            gm11.send_json({"type": "safe_door", "x": 5, "y": 5,
+                            "action": "lock"})
+            m11 = wait_safe(gm11, {"5,5": "L"})
+            al_now = next(e for e in m11["entities"]
+                          if e["id"] == al_ent11)
+            check("(g) GM lock from OPEN force-closes (O->L) even with a "
+                  "party token on the door (E14, not occupancy-guarded)",
+                  m11["map"]["safe"] == {"5,5": "L"}
+                  and (al_now["x"], al_now["y"]) == (5, 5),
+                  json.dumps({"safe": m11["map"].get("safe"),
+                              "alice": [al_now["x"], al_now["y"]]})
+                  )
+            pl11.recv_json()             # the lock broadcast (player copy)
+            # move Alice off the now-closed door again:
+            gm11.send_json({"type": "place", "entity_id": al_ent11,
+                            "x": 1, "y": 5})
+            state_until(gm11)
+            pl11.recv_json()
+            # unlock back to U for the unmark below:
+            gm11.send_json({"type": "safe_door", "x": 5, "y": 5,
+                            "action": "unlock"})
+            wait_safe(gm11, {"5,5": "U"})
+            pl11.recv_json()
             gm11.send_json({"type": "door", "x": 5, "y": 5,
                             "action": "unlock"})
             err = gm11.recv_json()
@@ -1189,12 +1291,13 @@ def main():
                   err == {"type": "error", "message": "not a normal door"},
                   json.dumps(err))
 
-            # (h) unmark reverts to a normal door (AC3/AC9) ---------------------
+            # (h) unmark reverts to a normal door PRESERVING the state
+            # (U -> "U" here; AC3/AC9) ---------------------
             gm11.send_json({"type": "safe_door", "x": 5, "y": 5,
                             "action": "unmark"})
             st11 = state_until(gm11)
             pl11.recv_json_or_none(timeout=1)
-            check("(h) GM unmark (closed) reverts to a normal door 'U' and "
+            check("(h) GM unmark (U) reverts to a normal door 'U' and "
                   "map.safe is empty/absent",
                   "safe" not in st11["map"]
                   and st11["map"]["doors"].get("5,5") == "U",

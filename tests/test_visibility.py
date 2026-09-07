@@ -602,7 +602,9 @@ class TestInvariants(unittest.TestCase):
 
 
 def safe_grid_vis(rows, safe, name="safe-vis"):
-    """A :class:`Grid` with the given ``safe`` set ("<x>,<y>" -> "C"|"O")."""
+    """A :class:`Grid` with the given ``safe`` set ("<x>,<y>" -> "U" (closed)
+    | "O"). Both "L" and "U" are closed for visibility; these tests use
+    "U" (the legacy-migrated closed state) throughout."""
     g = make_grid(rows)
     for key, st in safe.items():
         x, y = (int(p) for p in key.split(","))
@@ -629,7 +631,7 @@ class TestSafeDoorVisibility(unittest.TestCase):
         # Never explored: the far side (and everything behind) is H — exactly
         # like a wall; the door FACE (3,1) is S (the D5 wall-face rule, which
         # already treats a closed door as a wall — no new code).
-        g = safe_grid_vis(SAFE_VIS_ROWS, {"3,1": "C"})
+        g = safe_grid_vis(SAFE_VIS_ROWS, {"3,1": "U"})
         mask = build_visibility_mask(g, set(), SAFE_VIS_POS)
         self.assertEqual(cell(mask, 1, 1), "S")   # token region
         self.assertEqual(cell(mask, 2, 1), "S")   # left-room floor
@@ -646,7 +648,7 @@ class TestSafeDoorVisibility(unittest.TestCase):
         # wall-face rule walls use — (3,1) is NOT walkable (closed), so it
         # cannot be revealed by (S1); it is in the S-set only because its
         # walkable near-side neighbour (2,1) has line of sight.
-        g = safe_grid_vis(SAFE_VIS_ROWS, {"3,1": "C"})
+        g = safe_grid_vis(SAFE_VIS_ROWS, {"3,1": "U"})
         from app.pathfinding import walkable
         vis = visible_cells(g, SAFE_VIS_POS)
         self.assertIn((3, 1), vis)
@@ -666,7 +668,7 @@ class TestSafeDoorVisibility(unittest.TestCase):
         # → E (greyed memory), NOT H; monotonic within the map.
         g = safe_grid_vis(SAFE_VIS_ROWS, {"3,1": "O"})
         explored = visible_cells(g, SAFE_VIS_POS)
-        g.set_safe_door(3, 1, "C")  # the GM closes it
+        g.set_safe_door(3, 1, "U")  # the GM closes it
         mask = build_visibility_mask(g, explored, SAFE_VIS_POS)
         self.assertEqual(cell(mask, 4, 1), "E")  # explored before, not H
         self.assertEqual(cell(mask, 3, 1), "S")  # face still S (facing seen)
@@ -687,7 +689,7 @@ class TestSafeDoorVisibility(unittest.TestCase):
         mask_a = build_visibility_mask(g, set(), SAFE_VIS_POS)
         # With the normal door all-locked (the default) the far side is H —
         # identical to the closed-safe-door mask (AC4 equivalence).
-        g_closed_safe = safe_grid_vis(SAFE_VIS_ROWS, {"3,1": "C"})
+        g_closed_safe = safe_grid_vis(SAFE_VIS_ROWS, {"3,1": "U"})
         mask_b = build_visibility_mask(g_closed_safe, set(), SAFE_VIS_POS)
         self.assertEqual(mask_a, mask_b)
         self.assertEqual(visible_cells(g, SAFE_VIS_POS),
@@ -706,7 +708,7 @@ class TestSafeDoorVisibility(unittest.TestCase):
         mask = build_visibility_mask(g, set(), SAFE_VIS_POS)
         self.assertEqual(cell(mask, 4, 1), "S")
         # The closed variant hides it — the ONLY difference is the door state.
-        g2 = safe_grid_vis(SAFE_VIS_ROWS, {"3,1": "C"})
+        g2 = safe_grid_vis(SAFE_VIS_ROWS, {"3,1": "U"})
         mask2 = build_visibility_mask(g2, set(), SAFE_VIS_POS)
         self.assertEqual(cell(mask2, 4, 1), "H")
 

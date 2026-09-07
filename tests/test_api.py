@@ -505,12 +505,13 @@ class TestSafeDoorRest(ServerTestCase):
 
     def test_registered_grid_with_safe_door_carrirs_safe_disjoint(self):
         from app.main import maps_registry
-        # Register a fresh 3x3 grid with one doorway; mark it a safe door.
+        # Register a fresh 3x3 grid with one doorway; mark it a safe door
+        # (locked — the fresh-mark default; the wire now carries L/U/O).
         g = Grid(name="SafeRest", width=3, height=3,
                  cells=[["wall"] * 3,
                         ["wall", "floor", "doorway"],
                         ["wall"] * 3],
-                 safe={"2,1": "C"})
+                 safe={"2,1": "L"})
         map_id = "safe-rest-proof"
         maps_registry[map_id] = {
             "grid": g, "entities": {}, "players": {}}
@@ -520,11 +521,34 @@ class TestSafeDoorRest(ServerTestCase):
             # The additive `safe` object is present with the safe door's
             # state, and `doors` SKIPS the safe cell (disjoint, jointly
             # covering the doorway cells).
-            self.assertEqual(data.get("safe"), {"2,1": "C"})
+            self.assertEqual(data.get("safe"), {"2,1": "L"})
             # the single doorway is the safe door → doors has no entry for
             # it (it is covered by `safe` instead).
             self.assertEqual(data.get("doors"), {})
             self.assertNotIn("2,1", data.get("doors", {}))
+        finally:
+            maps_registry.pop(map_id, None)
+
+    def test_legacy_c_safe_door_loads_as_u_on_rest(self):
+        # AC7 end-to-end: a grid loaded from a pre-redesign payload
+        # (map.safe containing the legacy "C") carries "U" (unlocked
+        # closed) on the wire — never "C".
+        from app.main import maps_registry
+        legacy = Grid(name="SafeLegacy", width=3, height=3,
+                      cells=[["wall"] * 3,
+                             ["wall", "floor", "doorway"],
+                             ["wall"] * 3]).to_dict()
+        legacy["safe"] = {"2,1": "C"}
+        g = Grid.from_dict(legacy)  # the only migration point
+        self.assertEqual(g.safe, {"2,1": "U"})
+        map_id = "safe-legacy-proof"
+        maps_registry[map_id] = {
+            "grid": g, "entities": {}, "players": {}}
+        try:
+            status, _, data = self.get_json(f"/api/maps/{map_id}")
+            self.assertEqual(status, 200)
+            self.assertEqual(data.get("safe"), {"2,1": "U"})
+            self.assertNotIn("C", list(data.get("safe", {}).values()))
         finally:
             maps_registry.pop(map_id, None)
 

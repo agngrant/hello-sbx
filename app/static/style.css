@@ -23,20 +23,29 @@
   --wall-border: #20242f;
   --doorway: #d97706;
 
-  /* Door states (door-features spec §7.1): a door is a `doorway` cell + a
-     state, drawn floor-based with a state-colored border + glyph. All
-     three full-tier colors are distinct from floor and wall. */
-  --door-open: #d97706;      /* open (O): amber + arch */
-  --door-unlocked: #f59f00;  /* closed, unlocked (U): lighter amber + bar */
-  --door-locked: #e03131;    /* closed, locked (L): red + padlock glyph */
-
-  /* Safe-room doors (safe-room doors spec §7.1): a bright mint green,
-     distinct from floor, wall, the normal-door red/amber family, and the
-     party token green #2f9e44 (and the cross glyph from the token circle).
-     Open and closed share the green — the bar (drawn by the canvas) is
-     the state discriminator. The explored variant is a desaturated sage. */
-  --safe-open: #3ddc84;
-  --explored-safe-open: #8fae9c;
+  /* Door states (door-iconography spec §5.3): pictorial wooden doors —
+     a brown slab (normal) or green slab (safe), a top-right padlock when
+     locked (L), and a soft light glow when open (O: yellow normal /
+     green safe). The explored (E) tier desaturates the slab to a flat
+     grey family; a light padlock mark keeps the locked signal in memory.
+     These mirror the JS `T` palette used by the canvas renderer; the
+     legend renders them as real mini-canvases. `--doorway` (above) is
+     NOT a door-state color — it still styles the Doorway paint tool +
+     the plain doorway chip. */
+  --door-wood-brown: #9c6b3a;
+  --door-wood-brown-dark: #7a4f2a;
+  --door-wood-green: #4f9e6b;
+  --door-wood-green-dark: #3c7d53;
+  --door-padlock: #e6b422;
+  --door-padlock-shackle: #8a8f98;
+  --door-light-yellow: #ffe9a8;
+  --door-light-green: #c9f2d4;
+  --door-frame-brown: #5b4327;
+  --door-frame-green: #2f5c40;
+  --door-e-slab: #8a94a0;
+  --door-e-slab-frame: #5f6874;
+  --door-e-padlock: #cfd4db;
+  --door-e-light: #e8ecf0;
 
   /* Explored map — greyed ("E") tiers (explored-map spec §6.4). Mirrors the
      JS `T` tokens; the hidden tier reuses the canvas background. */
@@ -406,37 +415,13 @@ input[type="file"] { color: var(--text-muted); }
 .swatch.floor { background: var(--floor); }
 .swatch.wall { background: var(--wall-fill); border: 1px solid var(--wall-border); }
 .swatch.doorway { background: var(--floor); border: 2px solid var(--doorway); }
-/* Door state swatches (door-features spec §7.4): floor base + the state's
-   border color, mirroring the canvas door art (border + glyph over floor).
-   Visible to BOTH GM and players (no body.is-gm gate). */
-.swatch.door-open { background: var(--floor); border: 2px solid var(--door-open); }
-.swatch.door-unlocked { background: var(--floor); border: 2px solid var(--door-unlocked); }
-.swatch.door-locked { background: var(--floor); border: 2px solid var(--door-locked); }
-/* Safe-room door swatch (safe-room doors spec §7.4): floor base + the safe
-   green border + a small green cross (the same two marks as the canvas
-   art) so the legend shows the cross, not just a green box. Visible to
-   BOTH GM and players (no body.is-gm gate). */
-.swatch.safe-door {
-  background: var(--floor);
-  border: 2px solid var(--safe-open);
-  position: relative;
-}
-.swatch.safe-door::before,
-.swatch.safe-door::after {
-  content: "";
-  position: absolute;
-  background: var(--safe-open);
-}
-.swatch.safe-door::before { /* vertical arm */
-  left: 50%; top: 50%;
-  width: 2px; height: 6px;
-  transform: translate(-50%, -50%);
-}
-.swatch.safe-door::after { /* horizontal arm */
-  left: 50%; top: 50%;
-  width: 6px; height: 2px;
-  transform: translate(-50%, -50%);
-}
+/* Door state swatches (door-iconography spec §8.1): each chip holds a
+   16×16 <canvas> drawn by renderLegendDoorSwatches() with the ACTUAL map
+   art (floor base + drawDoorCell at tier S), so the legend is
+   pixel-identical to the door it documents. Visible to BOTH GM and
+   players (no body.is-gm gate). */
+.door-swatch { display: inline-block; width: 16px; height: 16px; border-radius: 2px; }
+.door-swatch canvas { display: block; }
 /* Explored map tiers (explored-map spec §7): "explored" = greyed floor with a
    grey wall border; "hidden" = the canvas background (nothing drawn). */
 .swatch.explored { background: var(--explored-floor); border: 1px solid var(--explored-wall); }
@@ -567,7 +552,7 @@ input[type="file"] { color: var(--text-muted); }
 .safe-action:hover:not(:disabled) { color: var(--text); background: rgba(77, 171, 247, 0.12); }
 .safe-action[aria-pressed="true"] {
   color: var(--text);
-  border-bottom-color: var(--safe-open);
+  border-bottom-color: var(--door-wood-green);
 }
 #override-wrap {
   display: inline-flex;

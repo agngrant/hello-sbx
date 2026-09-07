@@ -82,6 +82,8 @@ function makeCtx(el) {
     _fills: [],     // {x,y,w,h,style} fillRect calls in draw order
     _strokes: [],   // {style, path:[...]} per stroke() call, in draw order
     _rects: [],     // {x,y,w,h,style} strokeRect calls in draw order (door border)
+    _fillPaths: [], // {style, path} fill() calls in draw order (round-rect / leaf fills)
+    _gradients: [], // {x0,y0,r0,x1,y1,r1, stops:[[offset,color],...]} in draw order
     fillStyle: "", strokeStyle: "", lineWidth: 1, globalAlpha: 1,
     font: "", textAlign: "", textBaseline: "",
     fillRect(x, y, w, h) { this._fills.push({ x: x, y: y, w: w, h: h,
@@ -96,8 +98,21 @@ function makeCtx(el) {
     },
     rect(x, y, w, h) { path.push({ r: [x, y, w, h] }); },
     arc(cx, cy, r) { this._arcs.push([cx, cy, r]); },
-    arcTo: noop, closePath: noop,
-    fill: noop, stroke() {
+    createRadialGradient(x0, y0, r0, x1, y1, r1) {
+      // Real stub gradient object (addColorStop recorded per object) so the
+      // pictorial door glow (door-iconography spec §6.5) is testable.
+      const g = { x0, y0, r0, x1, y1, r1, stops: [], addColorStop(off, col) {
+        this.stops.push([off, col]); } };
+      this._gradients.push(g);
+      return g;
+    },
+    arcTo(x1, y1, x2, y2, r) { path.push({ a: [x1, y1, x2, y2, r] }); },
+    closePath: noop,
+    fill() {
+      this._fillPaths.push({ style: this.fillStyle, path: path.slice() });
+      path.length = 0; m = null;
+    },
+    stroke() {
       this._strokes.push({ style: this.strokeStyle, path: path.slice() });
       path.length = 0; m = null;
     },
@@ -145,11 +160,12 @@ function makeEl() {
     },
     setAttribute() {}, getAttribute() { return null; },
     setAttribute() {}, getAttribute() { return null; },
-    appendChild(c) { return c; }, removeChild() {}, remove() {},
+    children: [],
+    appendChild(c) { this.children.push(c); this.firstChild = c; return c; }, removeChild() {}, remove() {},
     insertBefore() {}, querySelector() { return null; }, querySelectorAll() { return []; },
     getBoundingClientRect() { return { left: 0, top: 0, width: 800, height: 600 }; },
     setPointerCapture() {},
-    closest() { return null; }, children: { length: 0 }, firstChild: null,
+    closest() { return null; },
   };
   // Model the `hidden` attribute (HTML semantics: the attribute is present
   // for every stubbed id, i.e. the element starts hidden — JS explicitly
@@ -172,8 +188,46 @@ function makeEl() {
   return el;
 }
 
+/* P1 join-blocking bug guard: extract the .door-swatch chips from the REAL
+   index.html (the exact <i ...> tags the browser parses) as stub elements.
+   When buildApi() is asked to (INDEX_HTML_PATH + LEGEND_SWATCHES set), it
+   attaches them to the #legend stub so
+   document.querySelector("#legend").querySelectorAll(".door-swatch")
+   returns the ACTUAL chips and renderLegendDoorSwatches' loop body really
+   runs at boot — the pre-fix code read T.floor there, before `const T` was
+   initialized (a TDZ ReferenceError that locked every real browser out of
+   the lobby, masked by this stub's ever-empty querySelectorAll).
+   (tests/test_frontend.py::TestLobbyBootRegression is the regression
+   guard. This is the team's substitute for a real-browser probe: no
+   headless browser is available in this environment — the team's own
+   qa_ui_smoke probe is a Node harness probe of the same kind.) */
+function loadLegendSwatches(indexPath) {
+  const html = fs.readFileSync(indexPath, "utf8");
+  const chips = [];
+  const re = /<i\s+class="door-swatch"([^>]*)><\/i>/g;
+  let m;
+  while ((m = re.exec(html))) {
+    const attrs = m[1];
+    const get = (name) => {
+      const am = attrs.match(new RegExp(name + '="([^"]*)"'));
+      return am ? am[1] : null;
+    };
+    const el = makeEl();
+    el.tag = "i";
+    el.dataset = { kind: get("data-kind"), state: get("data-state") };
+    chips.push(el);
+  }
+  return chips;
+}
+
 function buildApi() {
   const APPJS_PATH = process.env.APPJS_PATH;
+  const INDEX_HTML_PATH = process.env.INDEX_HTML_PATH;
+  // LEGEND_SWATCHES defaults ON when INDEX_HTML_PATH is provided (opt out
+  // with "0"): the suite wants the real lobby DOM by default.
+  const chips = INDEX_HTML_PATH && process.env.LEGEND_SWATCHES !== "0"
+    ? loadLegendSwatches(INDEX_HTML_PATH)
+    : [];
   const timer = makeTimer();
   const __SEND = makeSend();
 
@@ -182,9 +236,19 @@ function buildApi() {
     querySelector(sel) {
       const id = sel.replace("#", "");
       if (!registry[id]) { registry[id] = makeEl(); registry[id].id = id; }
-      return registry[id];
+      const el = registry[id];
+      if (el.id === "legend") {
+        // P1 join-blocking bug guard: #legend reports the REAL index.html
+        // .door-swatch chips (chips above) for ".door-swatch" so the
+        // swatch loop body executes at boot.
+        el.querySelectorAll = (s) =>
+          s === ".door-swatch" ? chips.slice() : [];
+      }
+      return el;
     },
-    querySelectorAll() { return []; },
+    querySelectorAll(sel) {
+      return sel === ".door-swatch" ? chips.slice() : [];
+    },
     createElement() { return makeEl(); },
     addEventListener() {},
     body: { classList: { add() {}, remove() {}, toggle() {} } },
@@ -238,8 +302,10 @@ function buildApi() {
     "createEntity, toggleFog, canvasHint, showGmFirstRunHint, dismissGmFirstRunHint, updateControlHint," +
     "join, connectWs, setConn, scheduleReconnect, showView, wsSend, wsUrl," +
     "uploadMap, generateMap, showUploadPreview, resetUploadForm, setSourceTab, syncTabStyles, syncGenerateButton, setGenerateBusy, setUploadBusy, syncUploadButton," +
-    "doorStateAt, validateDoors, doorColor, drawDoorGlyph, sendDoor, setTool, setDoorAction," +
-    "isSafeDoor, safeDoorStateAt, validateSafe, safeDoorColor, drawSafeDoorGlyph, sendSafeDoor, setSafeAction," +
+    "doorStateAt, validateDoors, sendDoor, setTool, setDoorAction," +
+    "drawDoorCell, renderLegendDoorSwatches, drawDoorClosed, drawPadlock, drawDoorOpen," +
+    "SAFE_STATES," +
+    "isSafeDoor, safeDoorStateAt, validateSafe, sendSafeDoor, setSafeAction," +
     "_timer: timer, _send: __SEND, _fetch: __FETCH }";
   // eslint-disable-next-line no-eval
   eval(src + EXPORTS);

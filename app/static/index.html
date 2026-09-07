@@ -158,19 +158,23 @@
           <span class="legend-chip"><i class="swatch floor"></i>floor</span>
           <span class="legend-chip"><i class="swatch wall"></i>wall</span>
           <span class="legend-chip"><i class="swatch doorway"></i>doorway</span>
-          <!-- Door states (door-features spec §7.4): visible to BOTH GM and
-               players (the GM edits doors, players open/close them) —
+          <!-- Door states (door-iconography spec §8.1): SIX states — three
+               normal (brown wood) + three safe (green wood) — each chip a
+               16×16 canvas swatch drawn from the ACTUAL map art
+               (renderLegendDoorSwatches). Visible to BOTH GM and players —
                intentionally NOT gated by body.is-gm. -->
           <span class="legend-sep legend-doors">|</span>
-          <span class="legend-chip legend-doors"><i class="swatch door-open"></i>open door</span>
-          <span class="legend-chip legend-doors"><i class="swatch door-unlocked"></i>closed (unlocked)</span>
-          <span class="legend-chip legend-doors"><i class="swatch door-locked"></i>locked</span>
-          <!-- Safe-room door (safe-room doors spec §7.4): visible to BOTH GM
-               and players (the GM edits safe doors; a player must read the
-               green cross and know they can walk on it while enemies
-               cannot) — intentionally NOT gated by body.is-gm. -->
+          <span class="legend-chip legend-doors"><i class="door-swatch" data-kind="normal" data-state="L"></i>door · locked</span>
+          <span class="legend-chip legend-doors"><i class="door-swatch" data-kind="normal" data-state="U"></i>door · closed</span>
+          <span class="legend-chip legend-doors"><i class="door-swatch" data-kind="normal" data-state="O"></i>door · open</span>
+          <!-- Safe-room door states (door-iconography spec §8.1): visible
+               to BOTH GM and players (the GM edits safe doors; a player
+               must read the states) — intentionally NOT gated by
+               body.is-gm. -->
           <span class="legend-sep legend-safe">|</span>
-          <span class="legend-chip legend-safe"><i class="swatch safe-door"></i>safe door (green cross)</span>
+          <span class="legend-chip legend-safe"><i class="door-swatch" data-kind="safe" data-state="L"></i>safe · locked</span>
+          <span class="legend-chip legend-safe"><i class="door-swatch" data-kind="safe" data-state="U"></i>safe · closed</span>
+          <span class="legend-chip legend-safe"><i class="door-swatch" data-kind="safe" data-state="O"></i>safe · open</span>
           <span class="legend-sep">|</span>
           <span class="legend-chip"><i class="dot dot-tri team-party"></i>friend</span>
           <span class="legend-chip"><i class="dot dot-circle team-neutral"></i>neutral</span>
@@ -259,14 +263,17 @@
           <button class="door-action" data-door-action="open" aria-pressed="false">Open</button>
           <button class="door-action" data-door-action="close" aria-pressed="false">Close</button>
         </span>
-        <!-- Safe door tool (safe-room doors spec §7.5): GM-only, the same
-             Door-tool idiom — pick Mark/Unmark/Open/Close, then click a
-             doorway cell to apply it. The sub-row is revealed only while
-             the Safe door tool is armed. -->
+        <!-- Safe door tool (safe-room doors spec §7.5 + door-iconography
+             spec §8.2): GM-only, the same Door-tool idiom — pick
+             Mark/Unmark/Unlock/Lock/Open/Close, then click a doorway cell
+             to apply it. The sub-row is revealed only while the Safe door
+             tool is armed. -->
         <button class="tool-btn" data-tool="safeDoor" aria-pressed="false">🛡 Safe door</button>
         <span id="safe-action-row" class="safe-action-row" hidden>
           <button class="safe-action" data-safe-action="mark" aria-pressed="true">Mark</button>
           <button class="safe-action" data-safe-action="unmark" aria-pressed="false">Unmark</button>
+          <button class="safe-action" data-safe-action="unlock" aria-pressed="false">Unlock</button>
+          <button class="safe-action" data-safe-action="lock" aria-pressed="false">Lock</button>
           <button class="safe-action" data-safe-action="open" aria-pressed="false">Open</button>
           <button class="safe-action" data-safe-action="close" aria-pressed="false">Close</button>
         </span>

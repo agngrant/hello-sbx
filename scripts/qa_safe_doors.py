@@ -6,12 +6,16 @@ Spec:  docs/design/safe-room-doors.md (model §3, state machine §4,
        §6, wire/REST §8, ACs §15).
 
 Wire:  the safe state rides inside the existing ``map`` payload as an
-       additive ``map.safe`` object ``{"<x>,<y>": "C"|"O"}`` — emitted in
-       FULL whenever the grid has >= 1 safe door, and ``map.doors`` EXCLUDES
-       the safe cells (disjoint, jointly covering every doorway). A new
-       client->server ``{type:"safe_door", x, y, action}`` (action in
-       mark/unmark/open/close) — WHOLLY GM-only. A ``door`` message on a safe
-       cell -> "not a normal door".
+       additive ``map.safe`` object ``{"<x>,<y>": "L"|"U"|"O"}`` — emitted
+       in FULL whenever the grid has >= 1 safe door, and ``map.doors``
+       EXCLUDES the safe cells (disjoint, jointly covering every doorway).
+       The client->server ``{type:"safe_door", x, y, action}`` message
+       (action in mark/unmark/unlock/lock/open/close) — WHOLLY GM-only. A
+       ``door`` message on a safe cell -> "not a normal door". A safe door
+       now carries a LOCK state (same L/U/O model as normal doors): a fresh
+       mark -> L (locked, the secure default); a legacy "C" payload migrates
+       to "U" on load (Grid.from_dict); unmark preserves the state
+       (L->L, U->U, O->O).
 
 Entity restriction (SAFE-3): only ``party`` / ``neutral`` may step onto /
 stand on a safe-room door cell. A ``hostile`` can NEVER path onto, stand on,
@@ -217,13 +221,13 @@ def main():
                   "safe" not in rest0 and rest0["doors"] == DOORS_ALL_L,
                   json.dumps(rest0.get("doors")))
 
-            # [2] mark -> C, then open -> O ----------------------------------
-            print("\n[2] mark -> closed (C), then open (O)")
+            # [2] mark -> L (locked), unlock -> U, open -> O -----------------
+            print("\n[2] mark -> locked (L), unlock -> U, open -> O")
             st = safe(gm, 5, 5, "mark")
             check("GM mark -> state broadcast carrying the safe door",
                   safe_ok(st), json.dumps(st))
-            check("map.safe == {'5,5':'C'} (closed, no lock state)",
-                  st["map"]["safe"] == {"5,5": "C"},
+            check("map.safe == {'5,5':'L'} (locked, the fresh default)",
+                  st["map"]["safe"] == {"5,5": "L"},
                   json.dumps(st["map"].get("safe")))
             check("map.doors no longer has '5,5' (disjoint partition)",
                   "5,5" not in st["map"].get("doors", {}),
@@ -232,14 +236,24 @@ def main():
                   (set(st["map"]["doors"]) & set(st["map"]["safe"])) == set()
                   and (set(st["map"]["doors"]) | set(st["map"]["safe"]))
                   == {"5,5", "10,4", "9,7"})
-            wait_safe(pl, {"5,5": "C"})  # the player's copy too
+            wait_safe(pl, {"5,5": "L"})  # the player's copy too
             rest1 = rest_map(host, port)
-            check("REST carries the additive safe (disjoint from doors)",
-                  rest1.get("safe") == {"5,5": "C"}
+            check("REST carries the additive safe (L/U/O, disjoint from "
+                  "doors)",
+                  rest1.get("safe") == {"5,5": "L"}
                   and "5,5" not in rest1.get("doors", {}),
                   json.dumps(rest1.get("safe")))
+            # A fresh safe door is LOCKED: open before unlock is rejected.
+            check("open while locked -> 'safe door is locked'",
+                  safe(gm, 5, 5, "open") ==
+                  {"type": "error", "message": "safe door is locked"})
+            st = safe(gm, 5, 5, "unlock")
+            check("GM unlock (L->U) -> map.safe == {'5,5':'U'}",
+                  safe_ok(st) and st["map"]["safe"] == {"5,5": "U"},
+                  json.dumps(st))
+            wait_safe(pl, {"5,5": "U"})
             st = safe(gm, 5, 5, "open")
-            check("GM open -> map.safe == {'5,5':'O'}",
+            check("GM open (U->O) -> map.safe == {'5,5':'O'}",
                   safe_ok(st) and st["map"]["safe"] == {"5,5": "O"},
                   json.dumps(st))
             wait_safe(pl, {"5,5": "O"})
@@ -250,10 +264,10 @@ def main():
                   safe(gm, 5, 5, "open") ==
                   {"type": "error", "message": "safe door is already open"})
             st = safe(gm, 5, 5, "close")
-            check("GM close -> map.safe back to {'5,5':'C'}",
-                  safe_ok(st) and st["map"]["safe"] == {"5,5": "C"},
+            check("GM close (O->U) -> map.safe back to {'5,5':'U'}",
+                  safe_ok(st) and st["map"]["safe"] == {"5,5": "U"},
                   json.dumps(st))
-            wait_safe(pl, {"5,5": "C"})
+            wait_safe(pl, {"5,5": "U"})
             check("close on a closed safe door -> 'safe door is already "
                   "closed'",
                   safe(gm, 5, 5, "close") ==
@@ -265,13 +279,37 @@ def main():
             check("safe_door on a floor cell -> 'not a doorway'",
                   safe(gm, 1, 1, "mark") ==
                   {"type": "error", "message": "not a doorway"})
-            # bad action (incl. lock/unlock — a safe door has NO lock state)
-            check("safe_door action 'lock' -> 'action must be one of "
-                  "mark/unmark/open/close'",
+            # bad action: an unrecognized action reports the FULL six-action
+            # list (lock/unlock are VALID safe-door actions now):
+            check("safe_door action 'explode' -> 'action must be one of "
+                  "mark/unmark/unlock/lock/open/close'",
+                  safe(gm, 5, 5, "explode") == {"type": "error",
+                                                "message":
+                                                "action must be one of "
+                                                "mark/unmark/unlock/lock/"
+                                                "open/close"})
+            # unlock on the unlocked-closed (U) door:
+            check("unlock on an unlocked-closed door -> 'safe door is "
+                  "already unlocked'",
+                  safe(gm, 5, 5, "unlock") == {"type": "error",
+                                               "message":
+                                               "safe door is already unlocked"})
+            # lock (U->L), then lock again -> "already locked":
+            st = safe(gm, 5, 5, "lock")
+            check("GM lock (U->L) -> map.safe == {'5,5':'L'}",
+                  safe_ok(st) and st["map"]["safe"] == {"5,5": "L"},
+                  json.dumps(st))
+            wait_safe(pl, {"5,5": "L"})
+            check("lock on a locked safe door -> 'safe door is already "
+                  "locked'",
                   safe(gm, 5, 5, "lock") == {"type": "error",
                                              "message":
-                                             "action must be one of "
-                                             "mark/unmark/open/close"})
+                                             "safe door is already locked"})
+            st = safe(gm, 5, 5, "unlock")
+            check("GM unlock (L->U) -> map.safe back to {'5,5':'U'}",
+                  safe_ok(st) and st["map"]["safe"] == {"5,5": "U"},
+                  json.dumps(st))
+            wait_safe(pl, {"5,5": "U"})
             check("safe_door out-of-bounds -> 'destination out of bounds'",
                   safe(gm, 99, 1, "mark") ==
                   {"type": "error", "message": "destination out of bounds"})
@@ -279,7 +317,7 @@ def main():
             check("unmark on a normal doorway -> 'not a safe door'",
                   safe(gm, 10, 4, "unmark") ==
                   {"type": "error", "message": "not a safe door"})
-            # open it again for the movement section:
+            # open it again for the movement section (U->O):
             st = safe(gm, 5, 5, "open")
             check("GM re-open (for the movement checks) -> {'5,5':'O'}",
                   safe_ok(st) and st["map"]["safe"] == {"5,5": "O"},
@@ -357,8 +395,8 @@ def main():
             # E11 contrast: a PARTY override onto a CLOSED safe door is
             # ALLOWED (ignore-walls, like a closed normal door).
             st = safe(gm, 5, 5, "close")
-            check("GM close (to test the E11 contrast) -> {'5,5':'C'}",
-                  safe_ok(st) and st["map"]["safe"] == {"5,5": "C"},
+            check("GM close (to test the E11 contrast) -> {'5,5':'U'}",
+                  safe_ok(st) and st["map"]["safe"] == {"5,5": "U"},
                   json.dumps(st))
             pl.recv_json()              # the close broadcast (player copy)
             al_ent = wa["you"]["entity_id"]
@@ -436,7 +474,7 @@ def main():
             gm7.recv_json()
             gm7.send_json({"type": "safe_door", "x": 5, "y": 5,
                            "action": "mark"})
-            gm7.recv_json()  # safe now "C"
+            gm7.recv_json()  # safe now "L" (locked, the fresh default)
             wa7 = pl7.join("Alice7", "player")
             gm7.recv_json()  # GM join broadcast
             al7 = wa7["you"]["entity_id"]
@@ -481,9 +519,16 @@ def main():
                   any(i.get("approximate") and "name" not in i
                       for i in st7["awareness"]),
                   json.dumps(st7["awareness"]))
-            # open the safe door: LOS through it -> FULL (team-agnostic).
+            # open the safe door (unlock then open — the fresh mark is
+            # locked): LOS through it -> FULL (team-agnostic).
+            st = safe(gm7, 5, 5, "unlock")
+            check("GM unlock (L->U, for the awareness FULL check) -> "
+                  "{'5,5':'U'}",
+                  safe_ok(st) and st["map"]["safe"] == {"5,5": "U"},
+                  json.dumps(st))
+            pl7.recv_json()             # the unlock broadcast (player copy)
             st = safe(gm7, 5, 5, "open")
-            check("GM open (for the awareness FULL check) -> {'5,5':'O'}",
+            check("GM open (U->O) -> {'5,5':'O'}",
                   safe_ok(st) and st["map"]["safe"] == {"5,5": "O"},
                   json.dumps(st))
             st7 = get_state(pl7)
@@ -506,8 +551,8 @@ def main():
             ever_se |= s_set(st7["visibility"], w7, h7)
             # close again: (6,5) greys to E (memory, NOT H), monotonic.
             st = safe(gm7, 5, 5, "close")
-            check("GM close (for the monotonicity check) -> {'5,5':'C'}",
-                  safe_ok(st) and st["map"]["safe"] == {"5,5": "C"},
+            check("GM close (for the monotonicity check) -> {'5,5':'U'}",
+                  safe_ok(st) and st["map"]["safe"] == {"5,5": "U"},
                   json.dumps(st))
             st7 = get_state(pl7)
             h_now = {(x, y) for y in range(h7) for x in range(w7)

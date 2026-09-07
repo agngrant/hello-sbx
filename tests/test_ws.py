@@ -965,7 +965,8 @@ class TestSafeDoorWire(unittest.TestCase):
         try:
             gm.send_json({"type": "safe_door", "x": 5, "y": 5,
                           "action": "mark"})
-            st = self._wait_state_with_safe(gm, {"5,5": "C"})
+            # AC2: a fresh mark is LOCKED ("L") — the secure default.
+            st = self._wait_state_with_safe(gm, {"5,5": "L"})
             # disjoint + jointly covering all doorways (I5/AC1):
             self.assertEqual(st["map"]["doors"], {"10,4": "L", "9,7": "L"})
             self.assertEqual(
@@ -973,22 +974,68 @@ class TestSafeDoorWire(unittest.TestCase):
                 {"5,5", "10,4", "9,7"},
             )
             # the player's broadcast copy carries the same safe state:
-            self._wait_state_with_safe(pl, {"5,5": "C"})
+            self._wait_state_with_safe(pl, {"5,5": "L"})
         finally:
             gm.close()
             pl.close()
 
-    def test_gm_mark_then_open(self):
+    def test_gm_mark_then_unlock_then_open(self):
+        # The full open flow: a fresh safe door is LOCKED, so the GM must
+        # unlock it (L→U) before opening (U→O).
         gm, pl = self._join_gm_player()
         try:
             gm.send_json({"type": "safe_door", "x": 5, "y": 5,
                           "action": "mark"})
-            self._wait_state_with_safe(gm, {"5,5": "C"})
-            self._wait_state_with_safe(pl, {"5,5": "C"})
+            self._wait_state_with_safe(gm, {"5,5": "L"})
+            self._wait_state_with_safe(pl, {"5,5": "L"})
+            # open while locked → per-client error (no broadcast):
+            gm.send_json({"type": "safe_door", "x": 5, "y": 5,
+                          "action": "open"})
+            err = gm.recv_json()
+            self.assertEqual(err, {"type": "error",
+                                   "message": "safe door is locked"})
+            gm.send_json({"type": "safe_door", "x": 5, "y": 5,
+                          "action": "unlock"})
+            self._wait_state_with_safe(gm, {"5,5": "U"})
+            self._wait_state_with_safe(pl, {"5,5": "U"})
             gm.send_json({"type": "safe_door", "x": 5, "y": 5,
                           "action": "open"})
             self._wait_state_with_safe(gm, {"5,5": "O"})
             self._wait_state_with_safe(pl, {"5,5": "O"})
+        finally:
+            gm.close()
+            pl.close()
+
+    def test_gm_lock_close_unlock_roundtrip(self):
+        # GM close (O→U) then lock (U→L), and unlock back (L→U) — the new
+        # lock-state frames over a real WS.
+        gm, pl = self._join_gm_player()
+        try:
+            gm.send_json({"type": "safe_door", "x": 5, "y": 5,
+                          "action": "mark"})
+            self._wait_state_with_safe(gm, {"5,5": "L"})
+            self._wait_state_with_safe(pl, {"5,5": "L"})
+            gm.send_json({"type": "safe_door", "x": 5, "y": 5,
+                          "action": "unlock"})
+            self._wait_state_with_safe(gm, {"5,5": "U"})
+            self._wait_state_with_safe(pl, {"5,5": "U"})
+            gm.send_json({"type": "safe_door", "x": 5, "y": 5,
+                          "action": "open"})
+            self._wait_state_with_safe(gm, {"5,5": "O"})
+            self._wait_state_with_safe(pl, {"5,5": "O"})
+            gm.send_json({"type": "safe_door", "x": 5, "y": 5,
+                          "action": "close"})
+            self._wait_state_with_safe(gm, {"5,5": "U"})
+            self._wait_state_with_safe(pl, {"5,5": "U"})
+            gm.send_json({"type": "safe_door", "x": 5, "y": 5,
+                          "action": "lock"})
+            self._wait_state_with_safe(gm, {"5,5": "L"})
+            self._wait_state_with_safe(pl, {"5,5": "L"})
+            # and unlock back to U (proves the U state frames on the wire):
+            gm.send_json({"type": "safe_door", "x": 5, "y": 5,
+                          "action": "unlock"})
+            self._wait_state_with_safe(gm, {"5,5": "U"})
+            self._wait_state_with_safe(pl, {"5,5": "U"})
         finally:
             gm.close()
             pl.close()
@@ -1012,8 +1059,8 @@ class TestSafeDoorWire(unittest.TestCase):
         try:
             gm.send_json({"type": "safe_door", "x": 5, "y": 5,
                           "action": "mark"})
-            self._wait_state_with_safe(gm, {"5,5": "C"})
-            self._wait_state_with_safe(pl, {"5,5": "C"})
+            self._wait_state_with_safe(gm, {"5,5": "L"})
+            self._wait_state_with_safe(pl, {"5,5": "L"})
             # A stray NORMAL door message on the safe cell is rejected
             # (AC13b) — a per-client error (no broadcast) — and the safe
             # record is untouched.
@@ -1024,7 +1071,7 @@ class TestSafeDoorWire(unittest.TestCase):
             # Confirm via a fresh state: the safe state is unchanged and no
             # doors entry was created on the safe cell (mutual exclusion I1).
             gm.send_json({"type": "request_state"})
-            st = self._wait_state_with_safe(gm, {"5,5": "C"})
+            st = self._wait_state_with_safe(gm, {"5,5": "L"})
             self.assertNotIn("5,5", st["map"].get("doors", {}))
         finally:
             gm.close()

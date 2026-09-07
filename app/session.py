@@ -72,11 +72,12 @@ CREATABLE_KINDS = ("npc", "enemy")
 #: ``open``/``close`` are allowed for any client while the door is unlocked.
 DOOR_ACTIONS = ("unlock", "lock", "open", "close")
 
-#: Safe-room door actions (safe-room spec §4/§18): the client→server
+#: Safe-room door actions (door-iconography spec §4/§18): the client→server
 #: ``{type:"safe_door", x, y, action}`` message. WHOLLY GM-only: a safe door
-#: is GM-controlled end-to-end (mark/unmark/open/close) — there is no
-#: player path and no lock state (it is always unlocked).
-SAFE_DOOR_ACTIONS = ("mark", "unmark", "open", "close")
+#: is GM-controlled end-to-end (mark/unmark/unlock/lock/open/close) — there
+#: is no player path, and safe doors now carry a lock state (``L``/``U``/``O``,
+#: same model as normal doors — door-iconography §3, A1).
+SAFE_DOOR_ACTIONS = ("mark", "unmark", "unlock", "lock", "open", "close")
 
 #: Safe-room spec §5.2 (D4): the safety-rule rejection — a hostile is never
 #: moved/placed/created/team-changed onto a safe-room door cell, even under
@@ -932,9 +933,9 @@ class GameSession:
 
     def _on_safe_door(self, player: Player, is_gm: bool,
                       msg: dict[str, Any]) -> dict[str, Any] | None:
-        """The safe-room door state machine + permissions (safe-room spec
-        §4) — WHOLLY GM-controlled (mark/unmark/open/close; there is no
-        lock state and no player path at all).
+        """The safe-room door state machine + permissions (door-iconography
+        spec §4) — WHOLLY GM-controlled (mark/unmark/unlock/lock/open/close;
+        there is NO player path at all).
 
         Validation is the spec's deterministic order (§4.3, AC3), first
         failure wins:
@@ -947,22 +948,31 @@ class GameSession:
           3. in bounds → ``"destination out of bounds"``
           4. the cell is a ``doorway`` → ``"not a doorway"``
           5. ``action`` is valid → ``"action must be one of
-             mark/unmark/open/close"``
+             mark/unmark/unlock/lock/open/close"``
           6. the ``(state, action)`` transition is legal → the
              state-specific error (``"already a safe door"``,
-             ``"not a safe door"``, ``"safe door is already open"``,
+             ``"not a safe door"``, ``"safe door is locked"``,
+             ``"safe door is already unlocked"``,
+             ``"safe door is already locked"``,
+             ``"safe door is already open"``,
              ``"safe door is already closed"``)
           7. occupancy: ``mark`` with a token on the cell → ``"cannot mark
              a safe door with a token on it"``; ``close`` with a token on
-             the cell → ``"cannot close a door with a token on it"``.
+             the cell → ``"cannot close a door with a token on it"``
+             (``lock`` from ``open`` force-closes but is NOT guarded — the
+             door was already open/walkable, matching the normal door's
+             A5 nuance; a hostile can't be on an open safe door anyway).
 
-        ``mark`` turns a (normal) doorway into a safe door, starting ``C``
-        (closed; the recorded normal-door state, if any, is dropped — the
-        two records are mutually exclusive, I1). ``unmark`` reverts a safe
-        door to a NORMAL door preserving open/closed (``C``→``U``,
-        ``O``→``O``). On success there is NO per-client reply — the ``state
-        broadcast carries the new ``map.safe`` (and updated ``map.doors``
-        for mark/unmark).
+        ``mark`` turns a (normal) doorway into a safe door in state ``L``
+        (locked — the secure fresh default, §3.4; the recorded normal-door
+        state, if any, is dropped — the two records are mutually exclusive,
+        I1). ``unmark`` reverts a safe door to a NORMAL door preserving the
+        state (``L``→``L``, ``U``→``U``, ``O``→``O``). The state machine
+        (the normal-door machine + the mark/unmark conversions): ``L
+        ─unlock→ U ─open→ O ─close→ U``; GM ``lock`` from ``U`` or ``O``
+        (force-closes ``O``) → ``L``. On success there is NO per-client
+        reply — the ``state`` broadcast carries the new ``map.safe`` (and
+        updated ``map.doors`` for mark/unmark).
         """
         # GM-only, FIRST (the safe-door surface has NO player path — §4.2).
         if not is_gm:
@@ -981,7 +991,8 @@ class GameSession:
             if action not in SAFE_DOOR_ACTIONS:
                 return {"type": "error",
                         "message": (
-                            "action must be one of mark/unmark/open/close")}
+                            "action must be one of "
+                            "mark/unmark/unlock/lock/open/close")}
             is_safe = self.grid.is_safe_door(x, y)
             key = f"{x},{y}"
             if action == "mark":
@@ -994,30 +1005,49 @@ class GameSession:
                                 "cannot mark a safe door with a token on it")}
                 # Conversion: a recorded NORMAL door is dropped (mutual
                 # exclusion, I1) before the safe record is written — the
-                # new safe door STARTS CLOSED ("C", I2).
+                # new safe door STARTS LOCKED ("L", the secure default, §3.4).
                 if (self.grid.doors or {}).get(key) is not None:
                     self.grid.doors = dict(self.grid.doors)
                     del self.grid.doors[key]
-                self.grid.set_safe_door(x, y, "C")
+                self.grid.set_safe_door(x, y, "L")
             elif action == "unmark":
                 if not is_safe:
                     return {"type": "error", "message": "not a safe door"}
-                self.grid.unmark_safe_door(x, y)  # revert to normal (A6)
-            else:  # open / close
+                self.grid.unmark_safe_door(x, y)  # preserves L/U/O (§3.5)
+            else:  # unlock / lock / open / close
                 if not is_safe:
                     return {"type": "error", "message": "not a safe door"}
-                cur = self.grid.safe_door_state_at(x, y)  # "C" | "O"
+                cur = self.grid.safe_door_state_at(x, y)  # "L" | "U" | "O"
                 if action == "open" and cur == "O":
                     return {"type": "error",
                             "message": "safe door is already open"}
-                if action == "close" and cur == "C":
+                if action == "open" and cur == "L":
+                    return {"type": "error",
+                            "message": "safe door is locked"}
+                if action == "close" and cur != "O":
                     return {"type": "error",
                             "message": "safe door is already closed"}
                 if action == "close" and self._any_entity_at(x, y):
                     return {"type": "error",
                             "message": (
                                 "cannot close a door with a token on it")}
-                self.grid.set_safe_door(x, y, "O" if action == "open" else "C")
+                if action == "unlock" and cur != "L":
+                    return {"type": "error",
+                            "message": "safe door is already unlocked"}
+                if action == "lock" and cur == "L":
+                    return {"type": "error",
+                            "message": "safe door is already locked"}
+                # NOTE: ``lock`` from ``O`` force-closes and is NOT
+                # occupancy-guarded (A14 / E11 — the door was already
+                # open/walkable; a hostile can't be on it anyway).
+                new_state = {
+                    ("unlock", "L"): "U",
+                    ("lock", "U"): "L",
+                    ("lock", "O"): "L",
+                    ("open", "U"): "O",
+                    ("close", "O"): "U",
+                }[(action, cur)]
+                self.grid.set_safe_door(x, y, new_state)
             self._run_b(self._broadcast())
         return None
 
