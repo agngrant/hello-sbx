@@ -1,8 +1,8 @@
 # LittleDungeons — Team TODO
 
-_Kept current by the orchestrator. Branch: **`main`** @ `753dfcb` (feat/safe-room-doors fast-forward-merged + pushed this session; QA re-run on main PASS)._ 
+_Kept current by the orchestrator. Branch: **`main`** @ `4462f62` (feat/pan-zoom fast-forward-merged + pushed this session; QA re-run on main PASS; feature branch deleted local + remote)._ 
 
-## IN PROGRESS — Pan & Zoom (map viewport navigation)
+## Completed — Pan & Zoom (map viewport navigation) — **shipped on `main`** ✅
 
 **Owner spec:** maps bigger than the viewport; pan via clickable arrows (right-hand control
 panel) + cursor keys; zoom via control-panel buttons + `+`/`-` keys; max zoom = 6×5 grid
@@ -14,20 +14,21 @@ squares visible, min zoom = 60×50. Shared plan: `pan-zoom` (rev 1+).
 | Design spec `docs/design/pan-zoom.md` | ✅ done — 22 ACs (AC1–AC22), `#nav-panel` in right sidebar, 3 control states |
 | Frontend build (view state, transform, controls, tests) | ✅ done — 8 files, 170 frontend / 680 pytest green. Flags for QA: **A2 arrow keys now pan (token nudge retired)**; `cellFromEvent` in-bounds = visible window (per ACs); spec AC1 example off-by-one corrected to pan(54,55) |
 | QA verification + sign-off `docs/qa/qa-signoff-pan-zoom.md` | ✅ done — pytest **680 passed** / unittest **680 OK** / e2e **all ✓** / live smoke (ephemeral port 8771, released) **21/21 ✓** / `TestPanZoom` **31 OK**; AC1–AC22 all PASS; **0 bugs** (BUG-012/013 are retracted placeholders); **VERDICT PASS** |
-| Commit on `feat/pan-zoom` | ✅ `7233e83` (12 files, +2164/−106) + fix `51200a6` (zoom buttons/keys were inverted — `−` now zooms OUT=see more, `+` zooms IN=more detail; regression test added). **Not merged, not pushed; awaiting owner decision** |
+| Release | ✅ **`main` @ `4462f62`** (ff-merged `feat/pan-zoom`, pushed local + remote; full suite re-run on main: **681 pytest / 681 unittest / e2e all ✓**); feature branch deleted local + remote; tag `safe-doors-v1` intact |
 
 ## Branch baseline (verified this session)
 
 | Item | Value |
 |---|---|
-| Branch / HEAD | **`feat/pan-zoom`** @ `7233e83` (pan/zoom feature commit on top of `main` @ `61e30ac6`). `main` @ `61e30ac6` — 2 docs-only commits ahead of `753dfcb`; local + remote in sync |
+| Branch / HEAD | **`main`** @ `4462f62` (local + `origin/main` in sync) — the only branch |
 | Tag | `safe-doors-v1` @ `7190b3f` (pre-door-iconography baseline; local + remote) |
-| Branches deleted this session | `feat/safe-room-doors` (merged @ `753dfcb`), `feat/explored-map` (merged @ `d4a1cd5`) |
-| Uncommitted (local only) | `TODO.md`, `docker-agent.yaml` (team config, deliberately uncommitted), `docs/websearch-investigation.md` (untracked) |
+| Branches deleted this session | `feat/safe-room-doors` (merged @ `753dfcb`), `feat/explored-map` (merged @ `d4a1cd5`), **`feat/pan-zoom` (merged @ `4462f62`)** |
+| Uncommitted (local only) | `TODO.md` (this doc), `docker-agent.yaml` (team config, deliberately uncommitted), `docs/websearch-investigation.md` (untracked) |
 
 **Features on `main`:** core v3.0, awareness ring + per-player radius, GM-generated BSP maps,
 explored map (S/E/H fog with memory), Openable/Closable Doors, **GM Safe-Room Doors with lock state
-(L/U/O)**, and the **pictorial door iconography** (6 states) — all QA-verified on main.
+(L/U/O)**, the **pictorial door iconography** (6 states), and **Pan & Zoom** (discrete zoom 6×5→60×50,
+right-hand Map view panel, keyboard pan/zoom, retired arrow-key nudge) — all QA-verified on main.
 
 ## Completed
 
@@ -87,7 +88,8 @@ byte-identical (AC17).
 
 ### Carried over (still true this session)
 
-- [ ] Server **RUNNING** on `feat/pan-zoom` @ `51200a6` (pan/zoom + zoom fix build): PID **64752**, bound **0.0.0.0:8000**, `/health` ok, log `/tmp/little-dungeons-server.log` (restarted after zoom fix). Stop with: `kill 64752`. Restart later with:
+- [ ] Server **STOPPED** (killed PID 64752 during the pan/zoom release; port 8000 free, no
+      `app.main` processes). Working branch: `main` @ `4462f62`. Restart with:
       `cd /Users/agrant3/agentteam && nohup .venv/bin/python -m app.main --host 0.0.0.0 --port 8000 > /tmp/little-dungeons-server.log 2>&1 &`
 
 ### Committed + pushed this session
