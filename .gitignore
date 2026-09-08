@@ -24,6 +24,9 @@ dist/
 .cache/
 .DS_Store
 
+# Agent test/build logs (never committed)
+.logs/
+
 # Runtime server artifacts (launched process)
 server.log
 server.pid
