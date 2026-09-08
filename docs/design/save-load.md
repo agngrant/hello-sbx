@@ -1,11 +1,31 @@
 # Design — Save / Load Map State (GM saves, rejoin by name)
 
-**Status:** build-ready spec, branch `feat/save-load`.
+**Status:** build-ready spec, branch `feat/save-load`. **QA-verified and
+committed** (`feat/save-load` @ `b49a373`; 18/18 ACs, live restart smoke
+PASS — see `docs/qa/qa-signoff-save-load.md`).
 **Source of truth:** `PROJECT.md`. Where this doc and `PROJECT.md` diverge,
 `PROJECT.md` wins. This spec resolves the v1 limitation *"No session
 save/load to disk"* (README §Limitations) and promotes it from
 PROJECT.md §1 *soft/nice-to-have* to a shipped feature. *"No zoom/pan"* is
 already resolved (pan-zoom feature) and is out of scope here.
+
+**Consistency note (superseded sub-specs).** Two follow-up sub-specs amend
+this one and **win over the text below** where they differ:
+* `docs/design/save-load-delete-modal.md` (AC1–AC14) replaces the
+delete-confirmation UX — delete confirm is now a **full-screen modal**,
+not an in-row confirm. The in-row bar (`save-load-delete-confirm.md`) is
+a superseded artifact; both are kept for the record. Where this doc says
+"inline confirm in the row" (e.g. the §7.2/§7.3 Delete bullets), read it
+as *the full-screen modal* described by that spec.
+* The GM "saved as <name>" marker is driven by the server-issued
+**`owner`** field on GM entity items (not a new `owner_name` field on the
+wire); the wire stays frozen (see §8).
+
+**Final UI↔API contract** (fields per action, for backend + frontend —
+full reference in §12): `GET /api/saves` (any) · `POST /api/saves` (GM,
+`{name?, id?}`) · `POST /api/saves/{id}/load` (GM, `{}`) ·
+`DELETE /api/saves/{id}` (GM). All error bodies are `{"error": "<msg>"}`.
+No WebSocket messages are added (§8).
 
 **Code referenced (read, not modified by the spec):** `app/server.py`
 (REST routes + error shapes), `app/session.py` (authoritative state, `join`,
@@ -191,9 +211,13 @@ Error shape follows the existing server convention: `{"error": "<message>"}`.
 
 ### 5.2 `POST /api/saves` — **GM only**
 
-Body: `{"name": str?}` — the **user label**. Absent/blank ⇒ the current
-map's name. Validation order: role → session exists → body is a JSON
-object (if present) → name string (≤ 40 chars if present).
+Body: `{"name": str?, "id": str?}` — `name` is the **user label**
+(absent/blank ⇒ the current map's name); `id` is an **optional explicit
+save id to overwrite** an existing save in place (E2 "Overwrite"; when
+present it must be a valid id string and the server replaces that file;
+absent ⇒ a fresh `<slug>-<ts>` id is minted). Validation order: role →
+session exists → body is a JSON object (if present) → name string (≤ 40
+chars if present) → id string (valid id charset if present).
 
 | Outcome | Status | Body |
 |---|---|---|
@@ -348,12 +372,13 @@ if effective_role == "player":
      server restart (the headline scenario, E8).
 
 Shared styling contract: sidebar panel = existing `.panel` +
-`.section-label`; rows use the same 12px dense-list type as `#awareness-list`;
+`.section-label`; rows use the same dense-list type as `#awareness-list`;
 buttons use `.btn` / `.btn-small` / `.btn-danger`; the tab bar reuses
-`.map-source-tabs` / `.tab-btn`; the empty state reuses `.empty-state`
-copy style; error toasts reuse `toast(msg, "error")`. **No new design
-tokens** — only the existing palette (`--panel-bg`, `--accent`,
-`--danger`, `--text-muted`).
+`.map-source-tabs` / `.tab-btn`; the list empty state is a muted line
+(`.saves-empty`) and the rejoin note a distinct muted/`--accent` line
+(`.saves-rejoin-note`); error toasts reuse `toast(msg, "error")`.
+**No new design tokens for the list/panels** — only the existing palette
+(`--panel-bg`, `--accent`, `--danger`, `--text-muted`).
 
 ### 7.2 Wireframe — `Saves` panel (map view, GM sidebar)
 
@@ -391,9 +416,12 @@ tokens** — only the existing palette (`--panel-bg`, `--accent`,
 
 * List state: **`#saves-empty`** ("No saves yet.") shows iff the list is
   empty (E1); otherwise the rows render, most recent first (API order).
-* Row layout (two lines): line 1 = save **name** (bold); line 2 muted =
-  `map_name · W×H`; line 3 muted = `N tokens · <date>`; line 4 = right-
-  aligned `[ Load ]` (`.btn-small`) + `[ Delete ]` (`.btn-small .btn-danger`).
+* Row layout: the header line = save **name** (`.save-row-name`, bold)
+  on the left + `[ Load ]` (`.btn-small`) + `[ Delete ]` (`.btn-small
+  .btn-danger`) on the right; a muted meta line = `map_name · W×H ·
+  N tokens · <date>` (e.g. `The Gilded Crypt · 24×16 · 4 tokens ·
+  Jan 1 12:00`). Corrupt rows (A12) show `name ⚠ corrupt` and **Delete
+  only** (no Load, no meta line).
 * Row for a corrupt save (if listed, A12): name + `⚠ corrupt` in
   `--danger`, **Delete only** (Load hidden/disabled).
 * "Save current map" (`.btn` in the panel, not small — the primary save
@@ -420,9 +448,14 @@ tokens** — only the existing palette (`--panel-bg`, `--accent`,
   `state` broadcast then re-fits the view if dimensions changed (existing
   `applyState` behavior). On 404 → error toast `Save not found: <id>` and
   the row is dropped from the local list (re-GET).
-* **Delete:** click → inline confirm in the row (`Delete "<name>"?` +
-  `[ Delete ] [ Cancel ]`) → `DELETE /api/saves/<id>` → row removed, toast
-  `Deleted "<name>".`
+* **Delete:** click → the **full-screen delete-confirmation modal**
+  (centered `role="alertdialog"` over a backdrop: title `Delete save?`,
+  the save name + meta, `[ Cancel ]` + `[ Delete ]` danger) → Confirm →
+  `DELETE /api/saves/<id>` → row removed, toast `Deleted "<name>".` See
+  `docs/design/save-load-delete-modal.md` (backdrop-click = Cancel,
+  Escape = Cancel, focus trap + restore, in-flight `Deleting…` no-op
+  dismissal, ghost-save guard). This replaces the original in-row confirm
+  (`save-load-delete-confirm.md`, superseded artifact).
 * List refresh triggers: panel first shown, after each save/load/delete,
   and on successful `use_map` (cheap: one small `GET`).
 * Players: the whole panel is absent (`.gm-only` — display:none for
@@ -456,14 +489,15 @@ tokens** — only the existing palette (`--panel-bg`, `--accent`,
                 #preview-title = "Loaded map", grid drawn on
                 #preview-canvas, #pane-source hidden when grid.image is
                 null (image file not persisted, A7) else shown as
-                placeholder note "source image not saved",
-                #preview-note = the rejoin note (§7.5),
+                placeholder note "source image not saved";
+                #preview-note = the rejoin note (§7.5) when the save
+                carries characters, else the standard preview note,
                 #btn-start-map enabled ("Open map in session").
            ──► GM clicks "Open map in session" → openUploadedMap() →
                 wsSend({type:"use_map", map_id}) → #map-view.
                 (The registered map already carries its entities, §5.3.)
 
-   Delete ──► same inline confirm + DELETE as the sidebar panel.
+   Delete ──► same full-screen confirm modal + DELETE as the sidebar panel.
 ```
 
 * The tab is **GM-reachable**: the New map view is only entered by the GM
@@ -501,12 +535,15 @@ tokens** — only the existing palette (`--panel-bg`, `--accent`,
    `Loaded "<name>". <N> character(s) saved as <Name1>, <Name2>, … are GM-
    controlled until a player joins with that exact name.` (N = count of
    entities with non-null `owner_name`; cap the name list at 4 + "…".)
-   Plus a **persistent** affordance: in GM Tools' selected-entity area and
-   in the entity sidebar, any GM-controlled entity whose saved
-   `owner_name` is set shows a small muted badge
-   `saved as <owner_name>` (driven by a new additive field in the GM's
-   `entities` items, A5) so the GM always sees who each orphan is waiting
-   on. When a player claims one, the badge disappears in the next snapshot.
+      Plus **persistent affordances** so the GM always sees who each orphan
+   is waiting on: (a) a **muted `saved as <name>` marker** on the GM
+token/entity row for every GM-controlled entity the server tags with a
+   saved player name (an additive, GM-only `owner` field on the GM's
+   `entities` items — §8/A5), which disappears in the next snapshot once a
+   player claims it; and (b) the **persistent rejoin note** in the Saves
+   panel and the Saved maps tab — `Players must join with the same names
+   to reclaim their characters — N character(s) are GM-controlled until
+   then.` (hidden when N = 0 or when a non-save map is opened).
 
 ### 7.5 Rejoin UX (R4)
 
@@ -535,8 +572,10 @@ never both run for one join.
   `use_map`, `move`, … are byte-identical.
 * `welcome`/`state` payloads keep their exact shapes. Two **additive**
   points, both optional fields existing clients ignore:
-  * GM `entities` items may carry `owner_name` (string|null) — used only
-    for the `saved as …` badge (A5). Players' `entities` is `[]` as today;
+  * GM `entities` items may carry an additive `owner` (string|null) — the
+    saved controlling player's NAME (set only on a save-loaded map;
+    cleared once a player claims the token) — used only for the `saved as
+    …` GM marker (A5). Players' `entities` is `[]` as today;
     `you_entity` shape unchanged.
   * Nothing new on the `map` object.
 * All new UI traffic is plain **REST** (§5), fetched via `fetch` like the
@@ -562,8 +601,9 @@ never both run for one join.
   server answers the same 404 shape (the menu cannot distinguish and
   should not — it just shows `Save not found: <id>`), the file is left on
   disk untouched, no exception escapes (route try/except), **no crash**,
-  no partial registration. Optional: the list marks it `corrupt: true`
-  (row shows ⚠ + Delete only, A12).
+  no partial registration. The list marks it `corrupt: true`
+  (row shows `⚠ corrupt` + Delete only, A12) so the GM can see and
+  delete it.
 * **E4 — Map with doors + safe doors + mixed entities.** Save captures the
   full `doors` + `safe` objects plus every entity (player-owned with
   `owner_name`, GM-owned with `null`). Load reproduces byte-for-byte:
@@ -687,7 +727,9 @@ Every AC is testable with the existing harness: `tests/` (REST via
   `#awareness`; `#save-name` + Save button enabled. After a player
   welcome, `#saves-panel` is hidden (`.gm-only`). `#map-source-tabs`
   contains a third tab; selecting it shows the save rows; rows render
-  name / map name / `W×H` / token count / date + Load + Delete buttons.
+  name / map name / `W×H` / token count / date + Load + Delete buttons;
+  Delete opens the full-screen confirm modal (save-load-delete-modal
+  spec) and a corrupt row shows `⚠ corrupt` + Delete only.
 * **AC14 — Post-Load flow reuses `use_map` (F1/BUG-002).** Lobby Load →
   preview → "Open map in session" and sidebar Load both result in exactly
   one `use_map` on the GM's **existing** socket (no new WS, no
@@ -773,6 +815,113 @@ Every AC is testable with the existing harness: `tests/` (REST via
 * **A16 — Date formatting.** `created_at` stored ISO-8601 (local, second
   precision); UI renders a compact local form (e.g. `Jan 1 12:00`) in the
   list rows.
+
+---
+
+## 12. Final UI↔API contract (fields per action — build reference)
+
+This is the single reference for backend_engineer + frontend_engineer. It
+mirrors §5/§7 and is **frozen**: additive-only, NO WebSocket changes, GM is
+the only actor with save/load/delete rights. All bodies/responses are JSON;
+every error body is exactly `{"error": "<message>"}` (the server's verbatim
+string is what the UI toasts).
+
+### 12.1 `GET /api/saves` — any role (no join required)
+* **Request:** none.
+* **200 →** `{ "saves": [ <save-record>, ... ] }` — sorted `created_at`
+  desc, then `id` desc.
+* **`save-record` fields:**
+  | field | type | meaning |
+  |---|---|---|
+  | `id` | str | save id (`<slug>-<ts>`), the load/delete key |
+  | `name` | str | user label (blank ⇒ the map name was stored) |
+  | `map_name` | str | the map's name at save time |
+  | `width` | int | grid width (cells) |
+  | `height` | int | grid height (cells) |
+  | `created_at` | str | ISO-8601 local, second precision |
+  | `entity_count` | int | number of saved entities |
+  | `corrupt` | bool? | **present & true only** for a file that failed to parse (A12/E3) — UI then shows `⚠ corrupt` + Delete only |
+* **Empty/missing dir →** `{"saves": []}` (E1).
+
+### 12.2 `POST /api/saves` — **GM only**
+* **Request body:** `{ "name"?: str, "id"?: str }`
+  * `name` — the user label; **absent/blank ⇒ the current map's name**; a
+    string of **≤ 40 chars** when present.
+  * `id` — **optional explicit save id to overwrite** (E2 "Overwrite").
+    When present it must be a valid id string; the server **replaces that
+    file** in place. **Absent ⇒ a fresh `<slug>-<ts>` id is minted**
+    (collision-bumped so two saves in the same second stay distinct).
+* **200 →** `{ "ok": true, "id": <actual id written>, "name": <label or map
+  name>, "map_name": <map name>, "width": int, "height": int,
+  "created_at": <new>, "entity_count": int }` — the record that now exists
+  on disk. `id` is the id actually written (the explicit `id` if given,
+  else the freshly minted one).
+* **Errors (validation order: role → session → body → name → id → write):**
+  | status | condition | `error` string |
+  |---|---|---|
+  | 401 | a player is joined (non-GM caller) | `only the GM can save` |
+  | 409 | no live (default) session yet | `no active map session — join as GM and open a map first` |
+  | 400 | body not a JSON object | `request body must be a JSON object` |
+  | 400 | `name` present, not a string / > 40 chars | `'name' must be a string` |
+  | 400 | `id` present, empty / invalid charset | `'id' must be a valid save id` |
+* **Snapshot semantics (F1/E11):** taken under the session lock; `owner_name`
+  on each entity = the controlling player's **name** (null for
+  GM-controlled / stale ids); frozen copy — later moves don't touch it.
+
+### 12.3 `POST /api/saves/{id}/load` — **GM only**
+* **Request body:** none, or `{}`.
+* **Path param `id`:** the save id; must be a bare, safe filename stem
+  (charset `[A-Za-z0-9._-]`, never `.`/`..`, no separators — no traversal).
+* **Behavior:** reads + validates the bundle; registers it in the map
+  registry under a **FRESH** `smap-<ts>` id (every load is an independent
+  copy — A10); the registry entry carries the per-entity `owner_name` list
+  for the `use_map` rebind. **No live-session change** (F1) — the GM opens
+  it via the existing `use_map` flow.
+* **200 →** `{ "ok": true, "id": <fresh registry map id>, "save_id": <id>,
+  "name": <map_name>, "width": int, "height": int, "entity_count": int }`
+  * `id` = the **new** map id the client then sends as
+    `use_map.map_id` (or previews via `GET /api/maps/<id>`).
+  * `entity_count` = the number of loaded entities the client uses for the
+    rejoin note/toast.
+* **Errors:**
+  | status | condition | `error` string |
+  |---|---|---|
+  | 401 | a player is joined (non-GM caller) | `only the GM can load` |
+  | 404 | **missing OR corrupt** file (one shape for both, E3) | `save not found: <id>` |
+  * 404 leaves the file untouched, registers nothing, never 500s, never
+    crashes. A loaded save stays listed until the GM deletes it.
+
+### 12.4 `DELETE /api/saves/{id}` — **GM only**
+* **Request body:** none. **Path param `id`:** as in §12.3.
+* **200 →** `{ "ok": true }` — file removed; `GET /api/saves` then omits it.
+* **Errors:** 401 non-GM (`only the GM can delete` / same 401 family); 404
+  `save not found: <id>` (deleting an already-deleted id). Deleting a save
+  that is **currently loaded in the session** does NOT affect the
+  in-memory map (AC18).
+
+### 12.5 Client-side flow (what the UI does with the above)
+* **List/refresh:** `GET /api/saves` → `state.saves`; render both surfaces
+  from this one fetch (panel first shown, after each save/load/delete).
+* **Save:** `onSaveCurrentMapClick()` — trim `#save-name`; if it matches an
+  existing save's `name`, show the inline **Save as new / Overwrite**
+  confirm (E2); otherwise `POST /api/saves` with `name` (blank ⇒ omit, server
+  defaults to map name). "Overwrite" ⇒ `POST /api/saves` with `id: <that
+  save's id>`. On 200: toast `Saved "<name>" (N tokens).`, clear the input,
+  re-`GET`, scroll the new row into view.
+* **Load (sidebar):** `POST /api/saves/<id>/load` → on 200, on the **same**
+  WS socket `wsSend({type:"use_map", map_id: <resp.id>})` (BUG-002-safe),
+  stay in the map view; fire the rejoin note (§7.4/§7.5). On 404 → toast +
+  re-`GET` (row drops).
+* **Load (lobby tab):** `POST /api/saves/<id>/load` → on 200 `GET
+  /api/maps/<resp.id>` → the shared preview pane → **Open map in session**
+  → `use_map` (same socket). The preview shows grid + thumbnail, a "source
+  image not saved" note, and the rejoin note.
+* **Delete:** open the full-screen modal → Confirm → `DELETE
+  /api/saves/<id>` → close on resolution, re-`GET`, toast
+  `Deleted "<name>".` (modal specifics in save-load-delete-modal spec).
+* **Wire is frozen (§8):** `use_map`/`state`/`welcome` are unchanged;
+  the only additive surface is the GM `entities` item's `owner` field
+  (saved-name marker) and `you.rebound` on a rebind welcome (BUG-014).
 
 ---
 
