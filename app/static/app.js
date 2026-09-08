@@ -113,6 +113,15 @@ const els = {
   doorActionRow: $("#door-action-row"),
   safeActionRow: $("#safe-action-row"),
   scrim: $("#scrim"),
+  // save-delete modal (save-load-delete-modal spec §6): static full-screen
+  // shell — #scrim-style, but body-level (covers map view AND the upload
+  // view's Saved maps tab). JS never creates it; it fills the body's text
+  // per open and toggles `hidden`.
+  saveDeleteModal: $("#save-delete-modal"),
+  saveDeleteModalDialog: $("#save-delete-modal-dialog"),
+  saveDeleteModalBody: $("#save-delete-modal-body"),
+  saveDeleteModalCancel: $("#save-delete-modal-cancel"),
+  saveDeleteModalConfirm: $("#save-delete-modal-confirm"),
 };
 
 /* ───────────────────────────── App state ───────────────────────────── */
@@ -161,6 +170,13 @@ const state = {
   // surfaces render from this one fetch) + the in-flight save preview.
   saves: null,          // latest GET /api/saves payload rows (null = unfetched)
   savesLoaded: false,   // list fetched at least once (refresh-on-first-show)
+  confirmingSaveId: null, // the save (app-wide; one open at a time) whose
+                          // delete-confirmation MODAL is open — save-load-
+                          // delete-modal spec §3: derived state rendered by
+                          // syncSaveModal() (rows stay in normal shape)
+  savesDeleteBusy: false, // the in-flight DELETE sub-state of the open modal
+                          // (transient; cleared in the same finally as
+                          // confirmingSaveId)
   lastLoadedSave: null, // {id (save id), name, entityCount} — the rejoin note
 };
 
@@ -2308,8 +2324,18 @@ function toggleFog() {
    ignored with ANY modifier (never fight browser zoom/shortcuts);
    only when the map view is visible, joined, and a map exists.
    No other keys are bound (no "0"=fit, no wheel zoom, no Home/End, A5).
-   Guarded/capped presses are silent no-ops (no toast). */
+   Guarded/capped presses are silent no-ops (no toast).
+   SAVE-DELETE MODAL (save-load-delete-modal spec rule 4): while the
+   confirmation is open, EVERY key is swallowed by the very first guard —
+   Escape closes it (unless the DELETE is in flight) and ONLY closes it
+   (the rest of the Escape behavior — selectEntity(null) / setDrawer(false)
+   / showView("map") — must NOT run), arrows do not pan, +/- do not zoom,
+   Enter does not select an awareness row. */
 document.addEventListener("keydown", (ev) => {
+  if (state.confirmingSaveId) {
+    if (ev.key === "Escape" && !state.savesDeleteBusy) cancelSaveDelete();
+    return;
+  }
   if (ev.key === "Escape") {
     if (!els.mapView.hidden) selectEntity(null);
     setDrawer(false);
@@ -2660,7 +2686,13 @@ function formatSaveDate(iso) {
 /* One row of the shared save list. ``surface`` "sidebar" (dense, stacked
    lines, spec §7.2) or "tab" (one line + inline Load/Delete, spec §7.3).
    A corrupt save (E3/A12) renders name + ⚠ corrupt and a Delete button
-   ONLY — Load is absent (its load would 404 anyway). */
+   ONLY — Load is absent (its load would 404 anyway).
+
+   Rows render in NORMAL shape at ALL times (Load + Delete, or Delete-only
+   for corrupt rows) — the delete confirmation is a FULL-SCREEN MODAL
+   (save-load-delete-modal spec §3), not an in-row surface: there is no
+   per-row confirm DOM and no confirming row modifier; state.confirmingSaveId
+   drives only syncSaveModal(). */
 function buildSaveRow(save, surface) {
   const row = document.createElement("div");
   row.className = ("save-row" + (save.corrupt ? " is-corrupt" : "")).trim();
@@ -2681,10 +2713,12 @@ function buildSaveRow(save, surface) {
       else loadSave(save.id);
     }));
   }
-  // Delete on every row (corrupt rows are Delete-only, E3/A12).
+  // Delete on every row (corrupt rows are Delete-only, E3/A12) — it opens
+  // the full-screen confirmation modal (never deletes directly).
   actions.appendChild(saveRowAction("Delete", "save-row-del", () => {
     confirmDeleteSave(save.id);
   }));
+  actions.hidden = false;   // the harness stub starts every element hidden
 
   const header = document.createElement("div");
   header.className = "save-row-head";
@@ -2722,12 +2756,16 @@ function clearContainer(el) {
   }
 }
 
-/* Both list containers render from state.saves — the one shared fetch. */
+/* Both list containers render from state.saves — the one shared fetch.
+   Every render path funnels through syncSaveModal() (the single restore
+   path, save-load-delete-modal spec §3) so the modal — including the
+   ghost-save check (rule 5) — stays consistent with the rows. */
 function renderSaves() {
   const list = state.saves || [];
   clearContainer(els.savesList);
   for (const save of list) els.savesList.appendChild(buildSaveRow(save, "sidebar"));
   els.savesEmpty.hidden = list.length !== 0;
+  syncSaveModal();
 }
 
 function renderSavesTab() {
@@ -2736,6 +2774,7 @@ function renderSavesTab() {
   for (const save of list) els.savesTabList.appendChild(buildSaveRow(save, "tab"));
   els.savesTabEmpty.hidden = list.length !== 0;
   els.savesTabEmpty.textContent = SAVE_EMPTY_TAB_COPY;
+  syncSaveModal();
 }
 
 /* GET /api/saves (any role) — the shared list fetch (spec §7.1). Newest
@@ -2955,34 +2994,138 @@ function showLoadedSavePreview(map) {
   toast(`Save “${m.name}” loaded — open it in the session to play it.`);
 }
 
-/* ── Delete a save ────────────────────────────────────────────────────────
-   Inline confirm in the row (Delete "<name>"? + [ Delete ] [ Cancel ]) →
-   DELETE /api/saves/<id> → 200 {ok:true} → row removed + toast. 404 →
-   error toast + re-GET. */
+/* ── Delete a save (save-load-delete-modal spec §3/§4) ─────────────────────────
+   FULL-SCREEN MODAL, derived state: state.confirmingSaveId (one open
+   app-wide) drives the static #save-delete-modal shell via syncSaveModal();
+   state.savesDeleteBusy marks the in-flight DELETE (sub-state of the open
+   modal). The rows stay in their normal shape at all times — the modal is
+   the only confirmation surface. There is NO code path that calls
+   deleteSave without the GM passing through the modal: an unknown id
+   toasts `save not found: <id>` and stops. */
+let saveModalReturnFocusId = null; // restore target (rule 3b); rows are
+                                   // rebuilt on re-render, so the BUTTON is
+                                   // looked up later, never stored
+let saveModalFocusBtn = null;      // Tab-cycle tracker (A6 — never
+                                   // document.activeElement)
+
+/* Enter the confirmation for saveId (rule 1). Role guard (A9), membership
+   check, open the modal, focus Cancel (guarded — the harness stub has no
+   focus()). Programmatic re-entry for the same id is idempotent (E1). */
 function confirmDeleteSave(saveId) {
+  if (state.role !== "gm") return;   // A9 defensive guard (surfaces .gm-only)
+  // Membership check FIRST — never delete without the GM passing through
+  // the modal (E11: an unknown id toasts and opens nothing).
   const save = (state.saves || []).find((s) => s.id === saveId);
-  const name = save ? save.name : saveId;
-  // Replace the row's buttons with the inline confirm (both surfaces).
-  const row = [els.savesList, els.savesTabList]
-    .find((c) => c && c.querySelector &&
-      c.querySelector(`.save-row[data-id="${saveId}"]`));
-  if (!row) {
-    // No rendered row to confirm in — confirm via the sidebar empty area.
-    deleteSave(saveId);
+  if (!save) {
+    toast(`save not found: ${saveId}`, "error");
     return;
   }
-  const rowEl = row.querySelector(`.save-row[data-id="${saveId}"]`);
-  const actions = rowEl.querySelector(".save-row-actions");
-  if (!actions) return;
-  actions.textContent = `Delete "${name}"? `;
-  const del = saveRowAction("Delete", "save-row-del-confirm", () => deleteSave(saveId));
-  const cancel = saveRowAction("Cancel", "save-row-cancel", () => {
-    // Re-render both lists from state to restore the original buttons.
-    renderSaves();
-    renderSavesTab();
-  });
-  actions.appendChild(del);
-  actions.appendChild(cancel);
+  state.confirmingSaveId = saveId;   // one open confirmation app-wide
+  state.savesDeleteBusy = false;
+  saveModalReturnFocusId = saveId;
+  saveModalFocusBtn = els.saveDeleteModalCancel;
+  renderSaves();      // rows re-render in normal shape (+ syncSaveModal)
+  renderSavesTab();
+  syncSaveModal();    // fills the dialog text + un-hides the shell
+  if (els.saveDeleteModalCancel.focus) els.saveDeleteModalCancel.focus();
+}
+
+/* Dismiss the open modal (Cancel / Escape / backdrop) — rule 3: a DELETE
+   already in flight is never aborted (busy guard); no request is sent. */
+function cancelSaveDelete() {
+  if (state.savesDeleteBusy) return;
+  state.confirmingSaveId = null;
+  renderSaves();
+  renderSavesTab();
+  syncSaveModal();
+  restoreSaveModalFocus();
+}
+
+/* Render the modal as a pure function of
+   state.confirmingSaveId + state.saves + state.savesDeleteBusy (idempotent;
+   called from renderSaves/renderSavesTab and directly). */
+function syncSaveModal() {
+  const modal = els.saveDeleteModal;
+  if (!modal) return;
+  if (state.confirmingSaveId === null) {
+    state.savesDeleteBusy = false;
+    els.saveDeleteModalConfirm.disabled = false;
+    els.saveDeleteModalConfirm.textContent = "Delete";
+    els.saveDeleteModalDialog.classList.remove("is-busy");
+    modal.hidden = true;
+    return;
+  }
+  const save = (state.saves || []).find((s) => s.id === state.confirmingSaveId);
+  if (!save) {
+    // Rule 5 — ghost save: the confirmed row is gone (e.g. the list was
+    // refreshed and another GM's client deleted it). Close WITHOUT
+    // deleting; no DELETE is ever fired on this path.
+    toast(`save not found: ${state.confirmingSaveId}`, "error");
+    state.confirmingSaveId = null;
+    state.savesDeleteBusy = false;
+    els.saveDeleteModalConfirm.disabled = false;
+    els.saveDeleteModalConfirm.textContent = "Delete";
+    els.saveDeleteModalDialog.classList.remove("is-busy");
+    modal.hidden = true;
+    return;
+  }
+  // Body: textContent only (XSS-safe). Corrupt saves (E6): name + ⚠ flag,
+  // NO meta line (a corrupt record carries no width/height/count/date),
+  // note kept.
+  clearContainer(els.saveDeleteModalBody);
+  const nameP = document.createElement("p");
+  nameP.className = "save-modal-name";
+  nameP.textContent = 'Delete "' + (save.name || "(unnamed)") + '"?'
+    + (save.corrupt ? " ⚠ corrupt" : "");
+  els.saveDeleteModalBody.appendChild(nameP);
+  if (!save.corrupt) {
+    const metaP = document.createElement("p");
+    metaP.className = "save-modal-meta";
+    metaP.textContent = `${save.map_name || "—"} · ${save.width}×${save.height} ` +
+      `· ${save.entity_count} tokens · ${formatSaveDate(save.created_at)}`;
+    els.saveDeleteModalBody.appendChild(metaP);
+  }
+  const noteP = document.createElement("p");
+  noteP.className = "save-modal-note";
+  noteP.textContent = ("The save file will be removed. A map already loaded " +
+    "from this save is not affected.");
+  els.saveDeleteModalBody.appendChild(noteP);
+  modal.hidden = false;   // the harness stub starts hidden=true
+  // Busy sub-state (E2): the in-flight DELETE locks every dismissal path
+  // (Cancel / Escape / backdrop) and disables Confirm with `Deleting…`.
+  els.saveDeleteModalDialog.classList.toggle("is-busy", state.savesDeleteBusy);
+  els.saveDeleteModalConfirm.disabled = state.savesDeleteBusy;
+  els.saveDeleteModalConfirm.textContent = state.savesDeleteBusy
+    ? "Deleting…" : "Delete";
+}
+
+/* Walk the freshly re-rendered lists (plain .children arrays — the harness
+   querySelector returns null, so never query) for saveId's row and return
+   its Delete button (the actions span's last child), or null. */
+function findSaveRowDeleteButton(saveId) {
+  for (const list of [els.savesList, els.savesTabList]) {
+    if (!list || !list.children) continue;
+    for (const row of list.children) {
+      if (row.dataset.id !== saveId) continue;
+      const head = row.children[0];
+      if (!head || !head.children || head.children.length < 2) continue;
+      const actions = head.children[1];
+      return actions.children.length ? actions.children[actions.children.length - 1] : null;
+    }
+  }
+  return null;
+}
+
+/* Rule 3b: focus returns to the confirmed row's Delete button in the
+   freshly rendered list (A11/A6: guarded — if the row is gone (deleted /
+   ghost-closed) the restore is simply skipped; never focus a detached
+   element). */
+function restoreSaveModalFocus() {
+  const btn = saveModalReturnFocusId
+    ? findSaveRowDeleteButton(saveModalReturnFocusId)
+    : null;
+  saveModalReturnFocusId = null;
+  if (btn && btn.parentNode && btn.focus) btn.focus();
 }
 
 async function deleteSave(saveId) {
@@ -3084,6 +3227,43 @@ if (els.btnSaveMapState) {
     saveCurrentMap(label, { busyElement: els.btnSaveMapState });
   });
 }
+
+/* Save-delete modal (save-load-delete-modal spec §6 startup wiring):
+   Cancel → cancelSaveDelete(); the backdrop root → Cancel ONLY when the
+   click landed on the backdrop itself (ev.target check — a click anywhere
+   inside the dialog, buttons included, never cancels, rule 3c/A4); the
+   dialog's keydown → two-element Tab cycle (A6/E5); Confirm → the rule-2
+   async sequence (busy guard → deleteSave → close on resolution, A5). */
+els.saveDeleteModalCancel.addEventListener("click", () => cancelSaveDelete());
+els.saveDeleteModal.addEventListener("click", (ev) => {
+  if (ev.target === els.saveDeleteModal) cancelSaveDelete();
+});
+els.saveDeleteModalDialog.addEventListener("keydown", (ev) => {
+  if (ev.key !== "Tab" || state.savesDeleteBusy) return;
+  ev.preventDefault();
+  const next = saveModalFocusBtn === els.saveDeleteModalCancel
+    ? els.saveDeleteModalConfirm
+    : els.saveDeleteModalCancel;
+  if (next.focus) next.focus();
+  saveModalFocusBtn = next;
+});
+els.saveDeleteModalConfirm.addEventListener("click", async () => {
+  const id = state.confirmingSaveId;
+  if (!id || state.savesDeleteBusy) return;   // double-click guard (E2)
+  state.savesDeleteBusy = true;
+  syncSaveModal();   // Confirm disabled + `Deleting…`; dismissals locked
+  try {
+    await deleteSave(id);
+  } finally {
+    // The modal closes on the request's RESOLUTION (A5), success or error.
+    state.savesDeleteBusy = false;
+    state.confirmingSaveId = null;
+    renderSaves();
+    renderSavesTab();
+    syncSaveModal();
+    restoreSaveModalFocus();
+  }
+});
 
 setConn("offline", "Offline");
 syncLobbyButtons();

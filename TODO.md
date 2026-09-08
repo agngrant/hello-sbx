@@ -1,6 +1,6 @@
 # LittleDungeons — Team TODO
 
-_Kept current by the orchestrator. Branch: **`main`** @ `4462f62` (feat/pan-zoom fast-forward-merged + pushed this session; QA re-run on main PASS; feature branch deleted local + remote)._ 
+_Kept current by the orchestrator. Branch: **`feat/save-load`** @ `5b8e6de` (W4 erratum spec-only commit; save/load work + door-tap UX guard `c1ac353c` on top of `1bb8326`, unpushed, awaiting owner's go for push + merge). Previous mainline: `main` @ `4462f62` (feat/pan-zoom merged)._ 
 
 ## IN PROGRESS — Save / Load Map State (session persistence)
 
@@ -15,8 +15,38 @@ Shared plan: `save-load` (rev 1+).
 | Backend: saves.py + REST routes + name rebinding + tests | ✅ done — 4 additive REST routes, `owner_name` rebind, 730 green, e2e all-✓ |
 | Frontend: GM save/load menu + tests | ✅ done — 2 GM surfaces, rejoin note, GM gating, 763 green |
 | QA verification + sign-off `docs/qa/qa-signoff-save-load.md` | ✅ PASS — 18/18 AC, live restart smoke 74/74 (3 server runs), 0 P1; BUG-014 (P2 dead toast) fixed via additive `you.rebound` welcome flag + e2e re-verified all-✓; BUG-015 (P3) documented as spec-compliant. Final suites: **766 pytest / 766 unittest / 206 frontend / e2e all-✓** |
-| Commit + merge cycle | ⏳ pending (on owner's go) — `feat/save-load` uncommitted, unpushed |
+| Commit + merge cycle | ⏳ pending push + merge (on owner's go) — `feat/save-load` local: mitigation commit **`c1ac353c`** (`fix(ui): door-tap UX guard (hint toast on letterbox/tool-miss taps) + pan-zoom door-tap test coverage` — app.js +48/−12, tests +129, TODO) on top of the save/load work; branch unpushed |
 | **Door-manipulation regression report** (owner: pan-zoom + save-load broke door UI) | ⚠️ **investigated (frontend_engineer) — no code defect found.** Door interaction chain, `cellFromEvent` pan/zoom math, save-load state re-application, and DOM/event layering are **byte-identical to QA-signed-off main @4462f62**; save-load app.js hunks all live in saves/lobby/rejoin code, none touch canvas events. Live harness probe under a real transform (L4 16×13, pan(2,3)): player tap, GM door tool, GM safe-door tool, paint-over-doorway all emit correct wire frames; letterbox tap correctly no-ops. Full suite green. **Leading hypotheses:** (a) stale deployment / browser cache (old app.js vs new server or vice versa), (b) taps landing in the letterbox / out-of-window region (spec-conformant no-op, easy to mistake for "doors do nothing"). **Resolved: owner confirmed doors work on the clean run** (server `feat/save-load` @ `bb3e4b0` on 0.0.0.0:8000) → stale client cache / environment, no code defect. Both approved mitigations **done + QA PASS**: (1) UX guard — `tapHint()` in app.js: debounced (2.5s) hint toast on letterbox/out-of-window taps ("Nothing there — outside the visible map") and GM door/safe-door tool misses on non-doorway cells ("Nothing to select here — not a doorway"); success paths and paint tools never toast; (2) 4 new `TestPanZoom` tests in tests/test_frontend.py driving the real `cellFromEvent` under a real view transform (player U→open / O→close / L→open-attempt, letterbox double-tap → zero frames + one debounced toast, GM tool non-doorway miss). **QA verdict PASS** (independent re-run: 770 pytest / 210 frontend+31 subtests / e2e 142✓ / live smoke 8791 with `tapHint` served; 0 bugs). Uncommitted — part of the pending `feat/save-load` commit cycle. |
+
+## Map-Delete Confirmation → Full-Screen Modal (owner-reported UI bug) — **QA PASS, uncommitted** ✅
+
+**Owner report (this session):** the delete confirmation still appears "mixed over the load/delete box" — the
+in-row confirmation bar from the rework below is not visually separated enough. New requirement: make the
+delete confirmation a **modal dialog over the whole GM screen** (full-screen backdrop + centered dialog box),
+then test.
+
+| Item | Status |
+|---|---|
+| Design spec `docs/design/save-load-delete-modal.md` (designer) | ✅ done — AC1–AC14 + E1–E12 + A1–A12: body-level modal shell (small additive `index.html` change), fixed full-screen backdrop `--modal-z:100` above drawer/scrim/toasts, centered `role="alertdialog"` dialog (title, save name + meta line, Cancel + danger Delete), interaction lock (map/panel blocked, Escape superseded by modal), backdrop click = Cancel, focus trap + restore, in-flight dismissal = no-op until response lands (busy "Deleting…"), ghost-save guard, re-targeting isolation, in-row approach fully removed. **PM-approved designer defaults (owner silent):** backdrop click = Cancel (safe direction), in-flight Escape/Cancel/backdrop are no-ops until DELETE response | 
+| Backend | N/A ✅ — spec is frontend-only; `DELETE /api/saves/<id>` already exists and is QA-verified from the save/load build (no backend changes expected; QA re-runs full suites anyway) |
+| Frontend build (frontend_engineer) | ✅ done — `app/static/app.js` +201/−28 (derived `syncSaveModal()` render, `confirmDeleteSave`/`cancelSaveDelete` rewritten w/ role+membership+busy guards, interaction lock in document keydown, focus trap 2-button cycle + restore to row Delete btn, backdrop `ev.target` check, in-flight busy `Deleting…`), `app/static/index.html` +17 (body-level `#save-delete-modal` shell, `role="alertdialog"`/`aria-modal`/labelled, real `<button>`s), `app/static/style.css` +36 (`--modal-backdrop`, `--modal-z:100` above drawer 50/#scrim 40/toasts; old `.save-row.is-confirming`/`.save-row-confirm*` removed), `tests/js/harness.js` ±1 (`syncSaveModal` export), `tests/test_frontend.py` +753/−2 (`TestSavesDelete` rewritten: 14 old in-row tests → 23 mapped to AC1–AC14 + E6). In-row artifacts 0; `deleteSave(` = 2; `window.confirm` 0. Suites: **791 pytest / 791 unittest / 231 frontend, 0 failed**. Deviations: AC2 static title/buttons asserted in AC11 (harness doesn't parse index.html — no coverage lost); AC12d hooks `createElement` to spy focus restore |
+| QA verification (qa) | ✅ **PASS** — independent re-run: **793 pytest / 793 unittest / 233 frontend** (after BUG-016 tests; all 0 failed); regression spot (PanZoom + all TestSaves*) 76 OK; live smoke `scripts/qa_modal_smoke.py` + 3 Node drivers **29/29** (ephemeral port, released): real GM session → real `app.js` modal Confirm → genuine HTTP DELETE 200, file gone, row removed both lists, toast `Deleted "QA Modal Smoke".`; 404/error paths return verbatim server message; pan/zoom/drawer regression OK; modal re-open key lock + Escape-closes-only verified. AC1–AC14 all PASS. **BUG-016 (P3, test-coverage only): CLOSED** — 2 new tests added (`test_e1_same_id_reentry_idempotent`, `test_e11_unknown_id_no_modal`, test-only diff, QA re-verified: 793/233 green). Sign-off: `docs/qa/qa-signoff-delete-modal.md` (incl. addendum) + `docs/qa/BUG-016.md` (closed) + `scripts/qa_modal_*` probes |
+
+Uncommitted — joins the pending `feat/save-load` commit cycle (previous in-row rework also still uncommitted).
+
+## Save-Row Delete-Confirmation Rework (owner-reported UI issue) — **QA PASS, uncommitted** ✅
+
+**Owner report (this session):** in the GM Saves panel, the delete-confirmation text/controls
+bled into the same area as the row's Load/Delete controls — confusing. Fix: redo the confirmation
+so it is a clearly separate region. Spec: `docs/design/save-load-delete-confirm.md` (designer; AC1–AC8).
+
+| Item | Status |
+|---|---|
+| Spec `docs/design/save-load-delete-confirm.md` | ✅ done — in-row **confirmation bar as derived state** (`state.confirmingSaveId`): separate danger-colored `.save-row-confirm` bar below the row head; `.save-row-actions` (Load/Delete) hidden while confirming; Confirm fires DELETE, Cancel/Escape restore via shared re-render; per-row isolation (one confirmation open at a time) |
+| Frontend build (frontend_engineer) | ✅ done — `app/static/app.js` +111 (net +86): derived state, separate confirm bar (no more in-place mutation of `.save-row-actions`), `confirmDeleteSave` rewritten with membership check + `save not found` toast (old silent-delete-when-row-not-found fallback **removed**), new `cancelSaveDelete()`, Escape hook, guarded focus, real `<button>`s + `role="alert"`; `app/static/style.css` +19 (`.save-row.is-confirming` + `.save-row-confirm*`, existing tokens `--danger`/`--s2`/`--s3`/`--r-control`); `tests/js/harness.js` ±1 (`cancelSaveDelete` in EXPORTS); `index.html` unchanged. 12 new tests in `TestSavesDelete` (14 total) mapped to AC1–AC8 |
+| QA verification (qa) | ✅ **PASS** — independent re-run: **782 pytest / 153 subtests / 0 failed**, frontend **222 passed**, `TestSavesDelete` **14/14**; live smoke (ephemeral 8799, freed): served app.js/style.css byte-identical to working tree with new markers present; AC1–AC8 all PASS incl. AC6 static proof (`deleteSave(` exactly 2× — definition + confirm-bar call site, no unconfirmed-delete path); reported deviation (`actions.hidden` set in both states) judged harmless/harness-required. 0 bugs. Sign-off: this table (short enough to skip a separate sign-off file; say the word if you want `docs/qa/qa-signoff-delete-confirm.md`) |
+
+Uncommitted — joins the pending `feat/save-load` commit cycle.
 
 ## Completed — Pan & Zoom (map viewport navigation) — **shipped on `main`** ✅
 
@@ -104,7 +134,7 @@ byte-identical (AC17).
 
 ### Carried over (still true this session)
 
-- [ ] Server **STOPPED** (killed PID 167535; port 8000 free, no `app.main` processes). Working branch: `feat/save-load` (uncommitted working tree). Restart with:
+- [x] Server **STOPPED** this session (SIGTERM to PID 19065; clean "Shutting down" in log; port 8000 free, no `app.main` processes) — stopped on owner's request after the delete-confirmation rework. Working branch: `feat/save-load` (uncommitted working tree incl. the delete-confirm rework, pending commit cycle). Restart with:
       `cd /Users/agrant3/agentteam && nohup .venv/bin/python -m app.main --host 0.0.0.0 --port 8000 > /tmp/little-dungeons-server.log 2>&1 &`
 
 ### Committed + pushed this session
@@ -167,8 +197,12 @@ push — a trivial doc tweak, not yet committed).
       GM must unlock a safe door before it can be walked through; fresh `mark`→`L`;
       legacy `"C"`→`"U"` on load. Recorded in `docs/design/door-iconography.md` §1.2/§11, and
       committed + pushed as `2b81059` on `main` (`docs: A1 owner sign-off...`).
-- [ ] `docs/design/explored-map.md` §3.2 W4 literal erratum (superseded by
-      corrected test fixture — spec-only fix)
+- [x] `docs/design/explored-map.md` §3.2 W4 literal erratum — **fixed + committed**
+      **`5b8e6de`** on `feat/save-load` (spec-only, 1 file 18+/12−): row y=6 cell
+      (6,6) S→H, counts 69 S/123 H → 68 S/124 H, breakdown + qualitative-facts line
+      + AC2 count updated, one-line erratum note; authoritative source
+      `tests/test_visibility.py::TestWorkedExampleW4::test_spawn_mask_literal_exact`
+      (W4_MASK) — doors closed+locked by default don't transmit sight.
 - [ ] BUG-DOORS-001 structural option: per-session grid copy for unregistered
       session ids (only if cross-session door isolation is ever needed)
 - [ ] Optional: room-density / loop-probability params for generated maps

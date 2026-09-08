@@ -4711,9 +4711,98 @@ class TestBug014PlayerRejoinToast(SavesBase):
 
 
 class TestSavesDelete(SavesBase):
-    """AC18 — delete fires DELETE /api/saves/{id}; 200 removes + toasts.
+    """Delete confirmation as a FULL-SCREEN MODAL (docs/design/save-load-delete-modal.md).
+
+    The in-row confirmation bar (save-load-delete-confirm spec) is fully
+    removed; the modal is the ONLY confirmation surface. ``state.confirmingSaveId``
+    (one open app-wide) + the transient ``state.savesDeleteBusy`` sub-state
+    drive the static ``#save-delete-modal`` shell via ``syncSaveModal()``;
+    rows render in normal shape at all times.
+
+    AC mapping (spec §8):
+      AC1  test_ac1_normal_state_modal_hidden_rows_ordinary
+      AC2  test_ac2_row_delete_click_opens_modal
+      AC3  test_ac3_full_screen_layer_and_stacking_static
+      AC4  test_ac4_interaction_lock_while_open
+      AC5  test_ac5_confirm_fires_delete_success_path
+      AC6  test_ac6a_cancel_click_restores_no_request /
+           test_ac6b_escape_closes_no_request
+      AC7  test_ac7a_backdrop_click_cancels / test_ac7b_dialog_click_does_not
+      AC8  test_ac8_api_error_on_confirm
+      AC9  test_ac9_ghost_save_no_delete
+      AC10 test_ac10_one_modal_retargeting
+      AC11 test_ac11_accessible_shell_static
+      AC12 test_ac12a_focus_open_guarded / test_ac12b_focus_moves_into_dialog /
+           test_ac12c_tab_cycles_two_buttons / test_ac12d_focus_restore_row_present /
+           test_ac12e_focus_restore_row_gone
+      AC13 test_ac13a_non_gm_role_guard_noop (static gating is
+           TestSavesGmGating, unchanged)
+      AC14 test_ac14a_no_inrow_artifacts_no_unconfirmed_delete_static (+ the
+           kept deleteSave-direct tests below)
+
+    BUG-016 (P3, test-only — the two §9 edge cases QA probed directly but
+    that had no dedicated harness test):
+      E1   test_e1_same_id_reentry_idempotent
+      E11  test_e11_unknown_id_no_modal
+
+    Harness-quirk notes (spec §11): elements start hidden=true (the app sets
+    hidden explicitly); children are plain arrays and querySelector returns
+    null — every probe is render-driven (walk api.els.*.children); clicks
+    dispatch with a stopPropagation no-op; keys go through
+    api.document.dispatch('keydown', ...) (with a preventDefault no-op where
+    the handler calls it); there is no el.focus() on stubs (the app's focus
+    calls are guarded); api._fetch.responses queues the DELETE -> re-GET
+    sequences; settleModal polls the microtask queue until the modal hides
+    (the confirm chain needs several ticks).
     """
 
+    # Re-GET payloads: JSON-serializable copies of the fixture records.
+    _NORMAL_REC = {"id": "act-1", "name": "Act Three",
+                   "map_name": "The Gilded Crypt", "width": 24,
+                   "height": 16, "created_at": "2025-01-01T12:00:00",
+                   "entity_count": 4}
+    _NORMAL2_REC = {"id": "old-1", "name": "Opening Night",
+                    "map_name": "The Gilded Crypt", "width": 24,
+                    "height": 16, "created_at": "2024-12-30T22:14:00",
+                    "entity_count": 2}
+
+    def _row_shape_js(self):
+        """Snapshot a rendered row — harness-quirk-safe (walks .children,
+        reads hidden as a property, never querySelector). Rows are in
+        NORMAL shape only: .save-row-head [+ .save-row-meta for
+        non-corrupt], never a confirm element."""
+        return (
+            "function rowShape(r){const head=r.children[0];"
+            "const actions=head.children[1];"
+            "const btns=[];for(const b of actions.children)btns.push(b.textContent);"
+            "return {id:r.dataset.id,btns:btns,"
+            "actionsHidden:actions.hidden,"
+            "corrupt:r.className.indexOf('is-corrupt')>=0,"
+            "n:r.children.length};"
+            "}"
+        )
+
+    @staticmethod
+    def _settle_js():
+        """JS: a poller that yields to the microtask queue until the modal
+        is hidden (the confirm chain needs several ticks: DELETE ->
+        refresh re-GET -> trailing re-render). Returns null if it never
+        settles within ~40 ticks."""
+        return (
+            "function settleModal(n){if(api.els.saveDeleteModal.hidden)"
+            "return 1;if(n<=0)return null;"
+            "return Promise.resolve().then(function(){return settleModal(n-1);});}"
+        )
+
+    def _body_js(self):
+        return (
+            "function modalBody(){const kids=api.els.saveDeleteModalBody.children;"
+            "const out=[];for(const k of kids)out.push({cls:k.className,"
+            "txt:k.textContent});"
+            "return out;}"
+        )
+
+    # ── deleteSave-direct (spec AC14b — unchanged functions) ─────────────
     def test_delete_fires_delete(self):
         expr = self._gm(
             "api.state.saves=[%s];" % self._NORMAL +
@@ -4732,7 +4821,7 @@ class TestSavesDelete(SavesBase):
         self.assertEqual(d["gone"], 0)
 
     def test_delete_404_toasts(self):
-        # Deleting an unknown id → 404 → the server's error toasts.
+        # Deleting an unknown id -> 404 -> the server's error toasts.
         expr = self._gm(
             "api._fetch.reset();"
             "api._fetch.responses=["
@@ -4746,6 +4835,776 @@ class TestSavesDelete(SavesBase):
         )
         d = json.loads(js(expr))
         self.assertTrue(d["fired"])
+
+    # ── AC1 — normal state: no modal, ordinary rows ──────────────────────
+    def test_ac1_normal_state_modal_hidden_rows_ordinary(self):
+        expr = self._gm(
+            self._row_shape_js() +
+            "api.state.saves=[%s,%s,%s];" % (self._NORMAL, self._NORMAL2,
+                                             self._CORRUPT) +
+            "api.renderSaves();api.renderSavesTab();"
+            "const out=[];for(const r of api.els.savesList.children)"
+            "out.push(rowShape(r));"
+            "const tout=[];for(const r of api.els.savesTabList.children)"
+            "tout.push(rowShape(r));"
+            "return {rows:out,tabRows:tout,"
+            "confirming:api.state.confirmingSaveId,"
+            "modalHidden:api.els.saveDeleteModal.hidden};"
+        )
+        d = json.loads(js(expr))
+        self.assertIsNone(d["confirming"])
+        self.assertTrue(d["modalHidden"], "the modal is hidden by default")
+        self.assertEqual([r["id"] for r in d["rows"]],
+                         ["act-1", "old-1", "bad-1"])
+        for r in (d["rows"][0], d["rows"][1]):
+            self.assertEqual(r["btns"], ["Load", "Delete"])
+            self.assertFalse(r["actionsHidden"])
+            self.assertFalse(r["corrupt"])
+            self.assertEqual(r["n"], 2, "head + meta only, no confirm element")
+        corrupt = d["rows"][2]
+        self.assertEqual(corrupt["btns"], ["Delete"])
+        self.assertTrue(corrupt["corrupt"])
+        self.assertEqual(corrupt["n"], 1, "corrupt rows carry head only")
+        # Tab surface renders the same normal rows.
+        self.assertEqual(d["tabRows"][0]["btns"], ["Load", "Delete"])
+
+    # ── AC2 — row Delete click opens the modal ───────────────────────────
+    def test_ac2_row_delete_click_opens_modal(self):
+        # The static title/buttons/classes live in index.html (proven by the
+        # AC11 static test); the harness stub parses NO static children, so
+        # here we assert what the app BUILDS at runtime: the shell un-hides,
+        # the flag is set, the body carries name+meta+note, and the rows
+        # underneath stay in normal shape.
+        expr = self._gm(
+            self._row_shape_js() + self._body_js() +
+            "api.state.saves=[%s,%s];" % (self._NORMAL, self._NORMAL2) +
+            "api.renderSaves();api.renderSavesTab();"
+            "const r=api.els.savesList.children.find("
+            "x=>x.dataset.id==='act-1');"
+            # row.children[0] = head; head.children[1] = .save-row-actions;
+            # its last child = [ Delete ] (real click handler).
+            "const actions=r.children[0].children[1];"
+            "actions.children[actions.children.length-1].dispatchEvent("
+            "{type:'click',stopPropagation(){}});"
+            "return {hidden:api.els.saveDeleteModal.hidden,"
+            "confirming:api.state.confirmingSaveId,"
+            "busy:api.state.savesDeleteBusy,"
+            "body:modalBody(),"
+            "row:rowShape(api.els.savesList.children.find("
+            "x=>x.dataset.id==='act-1')),"
+            "other:rowShape(api.els.savesList.children.find("
+            "x=>x.dataset.id==='old-1'))};"
+        )
+        d = json.loads(js(expr))
+        self.assertFalse(d["hidden"], "the modal opens on the row's Delete")
+        self.assertEqual(d["confirming"], "act-1")
+        self.assertFalse(d["busy"], "freshly opened modal is not busy")
+        self.assertEqual(len(d["body"]), 3, "name + meta + note lines")
+        self.assertEqual(d["body"][0]["cls"], "save-modal-name")
+        self.assertIn('Delete "Act Three"?', d["body"][0]["txt"])
+        self.assertNotIn("corrupt", d["body"][0]["txt"])
+        self.assertEqual(d["body"][1]["cls"], "save-modal-meta")
+        self.assertIn("The Gilded Crypt", d["body"][1]["txt"])
+        self.assertIn("24×16", d["body"][1]["txt"])
+        self.assertIn("4 tokens", d["body"][1]["txt"])
+        self.assertIn("Jan 1 12:00", d["body"][1]["txt"])
+        self.assertEqual(d["body"][2]["cls"], "save-modal-note")
+        self.assertIn("The save file will be removed.", d["body"][2]["txt"])
+        # Rows underneath stay in normal shape (Load + Delete visible, no
+        # confirming marker of any kind).
+        self.assertEqual(d["row"]["btns"], ["Load", "Delete"])
+        self.assertFalse(d["row"]["actionsHidden"])
+        self.assertEqual(d["row"]["n"], 2)
+        self.assertEqual(d["other"]["btns"], ["Load", "Delete"])
+
+    # ── AC3 — full-screen layer + stacking (static) ──────────────────────
+    def test_ac3_full_screen_layer_and_stacking_static(self):
+        css_path = os.path.join(os.path.dirname(INDEX), "style.css")
+        with open(css_path, encoding="utf-8") as fh:
+            css = fh.read()
+        # Tokens (spec §6.2).
+        self.assertIn("--modal-z: 100;", css,
+                      "--modal-z must be 100 (above drawer 50 / scrim 40)")
+        self.assertIn("--modal-backdrop:", css)
+        # Full-viewport fixed layer + centered dialog.
+        m = re.search(r"#save-delete-modal\s*\{[^}]*\}", css)
+        self.assertIsNotNone(m, "#save-delete-modal rule missing")
+        block = m.group(0)
+        self.assertIn("position: fixed;", block)
+        self.assertIn("inset: 0;", block)
+        self.assertIn("z-index: var(--modal-z);", block)
+        self.assertIn("display: flex;", block)
+        self.assertIn("align-items: center;", block)
+        self.assertIn("justify-content: center;", block)
+        self.assertIn("background: var(--modal-backdrop);", block)
+        # Stacking: 100 is above the drawer (50) and #scrim (40).
+        self.assertGreater(100, 50)
+        self.assertGreater(100, 40)
+        # Dialog styling (panel bg / danger top border / panel radius).
+        m = re.search(r"\.save-modal-dialog\s*\{[^}]*\}", css)
+        self.assertIsNotNone(m, ".save-modal-dialog rule missing")
+        dlg = m.group(0)
+        self.assertIn("background: var(--panel-bg);", dlg)
+        self.assertIn("border-top: 3px solid var(--danger);", dlg)
+        self.assertIn("border-radius: var(--r-panel);", dlg)
+        # The superseded in-row approach is gone from the stylesheet.
+        self.assertNotIn(".save-row-confirm", css)
+        self.assertNotIn(".save-row.is-confirming", css)
+        self.assertNotIn("save-row-confirm-name", css)
+
+    # ── AC4 — interaction lock while open ─────────────────────────────────
+    def test_ac4_interaction_lock_while_open(self):
+        expr = (
+            "(()=>{"
+            "const map=" + _floor_map_js(20, 17) + ";"
+            "api.onWelcome({type:'welcome',"
+            "you:{id:'p1',name:'G',role:'gm',entity_id:null},"
+            "map,entities:[],players:[],awareness:[],fog:false});"
+            "api.els.canvasWrap.clientWidth=816;"
+            "api.els.canvasWrap.clientHeight=416;"
+            "api.state.view.level=4;api.state.view.panX=2;"
+            "api.state.view.panY=3;api.layoutCanvas();"
+            "api.state.saves=[%s];" % self._NORMAL +
+            "api.renderSaves();api.renderSavesTab();"
+            "api.confirmDeleteSave('act-1');"
+            "api._send.reset();"
+            "api.document.dispatch('keydown',{key:'ArrowLeft',"
+            "preventDefault(){}});"
+            "const locked={view:JSON.parse(JSON.stringify(api.state.view)),"
+            "sent:api._send.sent.length};"
+            "api.state.selectedEntityId='fake';"
+            "api.document.dispatch('keydown',{key:'Escape',"
+            "preventDefault(){}});"
+            "const afterEsc={hidden:api.els.saveDeleteModal.hidden,"
+            "confirming:api.state.confirmingSaveId,"
+            "selected:api.state.selectedEntityId};"
+            "api.document.dispatch('keydown',{key:'ArrowLeft',"
+            "preventDefault(){}});"
+            "const afterSecond={view:JSON.parse(JSON.stringify(api.state.view))};"
+            "return {locked,afterEsc,afterSecond};"
+            "})()"
+        )
+        d = json.loads(js(expr))
+        # (a) arrows are swallowed while the modal is open: no pan, no frame.
+        self.assertEqual(d["locked"]["view"], {"level": 4, "panX": 2, "panY": 3},
+                         "ArrowLeft must NOT pan while the modal is open")
+        self.assertEqual(d["locked"]["sent"], 0,
+                         "no WS frame may be sent for a locked key")
+        # (b) Escape closes the modal ONLY — the old handler's
+        # selectEntity(null) / setDrawer(false) / showView('map') must not
+        # run (the rule-4 early return).
+        self.assertTrue(d["afterEsc"]["hidden"])
+        self.assertIsNone(d["afterEsc"]["confirming"])
+        self.assertEqual(d["afterEsc"]["selected"], "fake",
+                         "Escape must NOT deselect while the modal is open")
+        # (c) the guard releases: the next ArrowLeft pans one step (L4: 2).
+        self.assertEqual((d["afterSecond"]["view"]["panX"],
+                          d["afterSecond"]["view"]["panY"]), (0, 3),
+                         "ArrowLeft pans normally once the modal is closed")
+
+    # ── AC5 — Confirm fires DELETE; success path ─────────────────────────
+    def test_ac5_confirm_fires_delete_success_path(self):
+        # E2: the probe attempts every dismissal path WHILE the DELETE is
+        # in flight — none may abort the committed request. Snapshot
+        # IMMEDIATELY (synchronously) afterwards: in flight, dismissal
+        # locked, then settle and assert the resolved outcome.
+        expr = self._gm(
+            self._settle_js() +
+            "api.state.saves=[%s];" % self._NORMAL +
+            "api.renderSaves();api.renderSavesTab();"
+            "api.confirmDeleteSave('act-1');"
+            "api._fetch.reset();"
+            "api._fetch.responses=["
+            + self._fetch_resp({"ok": True}) + ","
+            + self._fetch_resp({"saves": []}) + "]"
+            ";api.els.saveDeleteModalConfirm.dispatchEvent("
+            "{type:'click',stopPropagation(){}});"
+            "api.document.dispatch('keydown',{key:'Escape',"
+            "preventDefault(){}});"
+            "api.els.saveDeleteModalCancel.dispatchEvent("
+            "{type:'click',stopPropagation(){}});"
+            "api.els.saveDeleteModal.dispatchEvent("
+            "{type:'click',target:api.els.saveDeleteModal});"
+            "const inFlight={hidden:api.els.saveDeleteModal.hidden,"
+            "busy:api.state.savesDeleteBusy,"
+            "confirming:api.state.confirmingSaveId,"
+            "disabled:api.els.saveDeleteModalConfirm.disabled,"
+            "label:api.els.saveDeleteModalConfirm.textContent};"
+            "return settleModal(40).then(function(settled){"
+            "const del=api._fetch.sent.find(s=>"
+            "s.url==='/api/saves/act-1'&&s.opts&&s.opts.method==='DELETE');"
+            "return {settled:!!settled,inFlight:inFlight,"
+            "del:del?del.url:null,"
+            "hidden:api.els.saveDeleteModal.hidden,"
+            "confirming:api.state.confirmingSaveId,"
+            "busy:api.state.savesDeleteBusy,"
+            "disabled:api.els.saveDeleteModalConfirm.disabled,"
+            "label:api.els.saveDeleteModalConfirm.textContent,"
+            "sidebar:api.els.savesList.children.length,"
+            "tab:api.els.savesTabList.children.length,"
+            "toasts:api.els.toasts.children.map(t=>"
+            "t.children&&t.children[0]?t.children[0].textContent:null)};});"
+        )
+        d = json.loads(js(expr))
+        f = d["inFlight"]
+        self.assertFalse(f["hidden"],
+                         "the modal stays open while in flight (E2: "
+                         "Escape/Cancel/backdrop are no-ops mid-DELETE)")
+        self.assertTrue(f["busy"])
+        self.assertEqual(f["confirming"], "act-1",
+                         "no dismissal may clear the confirmation mid-DELETE")
+        self.assertTrue(f["disabled"], "Confirm is disabled while busy")
+        self.assertEqual(f["label"], "Deleting…")
+        self.assertTrue(d["settled"], "the success path must settle")
+        # After the promise resolves:
+        self.assertEqual(d["del"], "/api/saves/act-1")
+        self.assertTrue(d["hidden"], "the modal closes on resolution")
+        self.assertIsNone(d["confirming"])
+        self.assertFalse(d["busy"])
+        self.assertFalse(d["disabled"])
+        self.assertEqual(d["label"], "Delete")
+        self.assertEqual(d["sidebar"], 0, "row gone from the sidebar list")
+        self.assertEqual(d["tab"], 0, "row gone from the tab list")
+        self.assertTrue(any(t and 'Deleted "Act Three"' in t
+                            for t in d["toasts"]),
+                        "success toast 'Deleted \"<name>\".' is required")
+
+    # ── AC6 — Cancel and Escape restore; no request ──────────────────────
+    def test_ac6a_cancel_click_restores_no_request(self):
+        expr = self._gm(
+            self._row_shape_js() +
+            "api.state.saves=[%s,%s];" % (self._NORMAL, self._NORMAL2) +
+            "api.renderSaves();api.renderSavesTab();"
+            "api.confirmDeleteSave('act-1');"
+            "api._fetch.reset();"
+            "api.els.saveDeleteModalCancel.dispatchEvent("
+            "{type:'click',stopPropagation(){}});"
+            "return {confirming:api.state.confirmingSaveId,"
+            "hidden:api.els.saveDeleteModal.hidden,"
+            "sent:api._fetch.sent.length,"
+            "rows:api.els.savesList.children.length,"
+            "row:rowShape(api.els.savesList.children[0]),"
+            "tabRow:rowShape(api.els.savesTabList.children[0]),"
+            "confirmLabel:api.els.saveDeleteModalConfirm.textContent,"
+            "confirmDisabled:api.els.saveDeleteModalConfirm.disabled};"
+        )
+        d = json.loads(js(expr))
+        self.assertIsNone(d["confirming"])
+        self.assertTrue(d["hidden"])
+        self.assertEqual(d["sent"], 0, "Cancel must not send ANY request")
+        self.assertEqual(d["rows"], 2)
+        self.assertEqual(d["row"]["btns"], ["Load", "Delete"])
+        self.assertFalse(d["row"]["actionsHidden"])
+        self.assertEqual(d["tabRow"]["btns"], ["Load", "Delete"])
+        self.assertEqual(d["confirmLabel"], "Delete")
+        self.assertFalse(d["confirmDisabled"])
+
+    def test_ac6b_escape_closes_no_request(self):
+        expr = self._gm(
+            self._row_shape_js() +
+            "api.state.saves=[%s];" % self._NORMAL +
+            "api.renderSaves();api.renderSavesTab();"
+            "api.confirmDeleteSave('act-1');"
+            "api._fetch.reset();"
+            "api.document.dispatch('keydown',{key:'Escape',"
+            "preventDefault(){}});"
+            "return {confirming:api.state.confirmingSaveId,"
+            "hidden:api.els.saveDeleteModal.hidden,"
+            "sent:api._fetch.sent.length,"
+            "row:rowShape(api.els.savesList.children[0])};"
+        )
+        d = json.loads(js(expr))
+        self.assertIsNone(d["confirming"])
+        self.assertTrue(d["hidden"])
+        self.assertEqual(d["sent"], 0, "Escape must not send any request")
+        self.assertEqual(d["row"]["btns"], ["Load", "Delete"])
+        self.assertFalse(d["row"]["actionsHidden"])
+
+    # ── AC7 — backdrop click cancels; dialog click does not ──────────────
+    def test_ac7a_backdrop_click_cancels(self):
+        expr = self._gm(
+            "api.state.saves=[%s];" % self._NORMAL +
+            "api.renderSaves();api.renderSavesTab();"
+            "api.confirmDeleteSave('act-1');"
+            "api._fetch.reset();"
+            "api.els.saveDeleteModal.dispatchEvent("
+            "{type:'click',target:api.els.saveDeleteModal});"
+            "return {confirming:api.state.confirmingSaveId,"
+            "hidden:api.els.saveDeleteModal.hidden,"
+            "sent:api._fetch.sent.length};"
+        )
+        d = json.loads(js(expr))
+        self.assertIsNone(d["confirming"])
+        self.assertTrue(d["hidden"], "a backdrop click cancels")
+        self.assertEqual(d["sent"], 0)
+
+    def test_ac7b_dialog_click_does_not(self):
+        expr = self._gm(
+            "api.state.saves=[%s];" % self._NORMAL +
+            "api.renderSaves();api.renderSavesTab();"
+            "api.confirmDeleteSave('act-1');"
+            "api._fetch.reset();"
+            # A click inside the dialog (its padding): target = dialog.
+            "api.els.saveDeleteModal.dispatchEvent("
+            "{type:'click',target:api.els.saveDeleteModalDialog});"
+            "return {confirming:api.state.confirmingSaveId,"
+            "hidden:api.els.saveDeleteModal.hidden,"
+            "sent:api._fetch.sent.length};"
+        )
+        d = json.loads(js(expr))
+        self.assertEqual(d["confirming"], "act-1",
+                         "a dialog click must NOT cancel (ev.target check)")
+        self.assertFalse(d["hidden"])
+        self.assertEqual(d["sent"], 0)
+
+    # ── AC8 — API error on Confirm ───────────────────────────────────────
+    def test_ac8_api_error_on_confirm(self):
+        expr = self._gm(
+            self._settle_js() +
+            "api.state.saves=[%s];" % self._NORMAL +
+            "api.renderSaves();api.renderSavesTab();"
+            "api.confirmDeleteSave('act-1');"
+            "api._fetch.reset();"
+            "api._fetch.responses=["
+            "{ok:false,status:404,json:async()=>"
+            '({error:"save not found: act-1"})},'
+            + self._fetch_resp({"saves": [self._NORMAL_REC]}) + "]"
+            ";api.els.saveDeleteModalConfirm.dispatchEvent("
+            "{type:'click',stopPropagation(){}});"
+            "const inFlight={hidden:api.els.saveDeleteModal.hidden,"
+            "busy:api.state.savesDeleteBusy};"
+            "return settleModal(40).then(function(settled){"
+            "const regets=api._fetch.sent.filter("
+            "s=>s.url==='/api/saves'&&!s.opts).length;"
+            "const dels=api._fetch.sent.filter(s=>s.opts&&"
+            "s.opts.method==='DELETE').length;"
+            "return {settled:!!settled,inFlight:inFlight,regets:regets,"
+            "dels:dels,"
+            "hidden:api.els.saveDeleteModal.hidden,"
+            "confirming:api.state.confirmingSaveId,"
+            "busy:api.state.savesDeleteBusy,"
+            "disabled:api.els.saveDeleteModalConfirm.disabled,"
+            "label:api.els.saveDeleteModalConfirm.textContent,"
+            "sidebar:api.els.savesList.children.length,"
+            "rowId:api.els.savesList.children.length?"
+            "api.els.savesList.children[0].dataset.id:null,"
+            "toasts:api.els.toasts.children.map(t=>"
+            "t.children&&t.children[0]?t.children[0].textContent:null)};});"
+        )
+        d = json.loads(js(expr))
+        self.assertFalse(d["inFlight"]["hidden"],
+                         "the modal stays open while the DELETE is in flight")
+        self.assertTrue(d["inFlight"]["busy"])
+        self.assertTrue(d["settled"], "the error path must settle")
+        self.assertEqual(d["dels"], 1, "exactly one DELETE was recorded")
+        self.assertEqual(d["regets"], 1, "a re-GET follows the 404")
+        self.assertTrue(d["hidden"], "the modal closes on resolution")
+        self.assertIsNone(d["confirming"])
+        self.assertFalse(d["busy"])
+        self.assertFalse(d["disabled"])
+        self.assertEqual(d["label"], "Delete")
+        self.assertEqual(d["sidebar"], 1,
+                         "the row is back in the list per the re-GET payload")
+        self.assertEqual(d["rowId"], "act-1")
+        self.assertTrue(any(t and "save not found: act-1" in t
+                            for t in d["toasts"]),
+                        "the server's 404 message must toast verbatim")
+
+    # ── AC9 — ghost save: confirmed row no longer exists ─────────────────
+    def test_ac9_ghost_save_no_delete(self):
+        expr = self._gm(
+            self._settle_js() +
+            "api.state.saves=[%s,%s];" % (self._NORMAL, self._NORMAL2) +
+            "api.renderSaves();api.renderSavesTab();"
+            "api.confirmDeleteSave('act-1');"
+            "api._fetch.reset();"
+            # The list loses the confirmed save (another GM's client
+            # deleted it): the re-render path must notice.
+            "api.state.saves=[%s];" % self._NORMAL2 +
+            "api._fetch.responses=["
+            + self._fetch_resp({"saves": [self._NORMAL2_REC]}) + "]"
+            ";api.refreshSaves();"
+            "return Promise.resolve().then(function(){"
+            "return Promise.resolve().then(function(){"
+            "return Promise.resolve().then(function(){"
+            "return Promise.resolve().then(function(){"
+            "const dels=api._fetch.sent.filter(s=>s.opts&&"
+            "s.opts.method==='DELETE').length;"
+            "return {confirming:api.state.confirmingSaveId,"
+            "hidden:api.els.saveDeleteModal.hidden,dels:dels,"
+            "rowId:api.els.savesList.children.length?"
+            "api.els.savesList.children[0].dataset.id:null,"
+            "toasts:api.els.toasts.children.map(t=>"
+            "t.children&&t.children[0]?t.children[0].textContent:null)};});});});});"
+        )
+        d = json.loads(js(expr))
+        self.assertIsNone(d["confirming"])
+        self.assertTrue(d["hidden"], "the modal closes on the ghost path")
+        self.assertEqual(d["dels"], 0, "NO DELETE may be fired on this path")
+        self.assertEqual(d["rowId"], "old-1", "the surviving row re-renders")
+        self.assertTrue(any(t and t == "save not found: act-1"
+                            for t in d["toasts"]),
+                        "the ghost must toast 'save not found: <id>'")
+
+    # ── AC10 — one modal; re-targeting ───────────────────────────────────
+    def test_ac10_one_modal_retargeting(self):
+        expr = self._gm(
+            self._body_js() +
+            "api.state.saves=[%s,%s];" % (self._NORMAL, self._NORMAL2) +
+            "api.renderSaves();api.renderSavesTab();"
+            "api.confirmDeleteSave('act-1');"
+            "api.confirmDeleteSave('old-1');"
+            "const root=api.els.saveDeleteModal;"
+            "return {hidden:root.hidden,"
+            "confirming:api.state.confirmingSaveId,"
+            "rootId:root.id,"
+            "body:modalBody(),"
+            "toasts:api.els.toasts.children.map(t=>"
+            "t.children&&t.children[0]?t.children[0].textContent:null)};"
+        )
+        d = json.loads(js(expr))
+        self.assertFalse(d["hidden"])
+        self.assertEqual(d["confirming"], "old-1",
+                         "the same modal re-targets to B")
+        self.assertEqual(d["rootId"], "save-delete-modal")
+        name = d["body"][0]["txt"]
+        self.assertIn("Opening Night", name)
+        self.assertNotIn("Act Three", name)
+        self.assertEqual(d["body"][1]["cls"], "save-modal-meta")
+        self.assertIn("2 tokens", d["body"][1]["txt"])
+        self.assertFalse(any(t and "save not found" in str(t)
+                             for t in d["toasts"]),
+                         "re-targeting must not double-toast")
+
+    # ── BUG-016 / E1 — programmatic same-id re-entry is idempotent ──────
+    def test_e1_same_id_reentry_idempotent(self):
+        # Spec §9 E1: a second programmatic call for the SAME id while the
+        # modal is already open is a no-op — same flag, the same single
+        # static modal instance, the body built exactly once, no request.
+        expr = self._gm(
+            self._row_shape_js() + self._body_js() +
+            "api.state.saves=[%s];" % self._NORMAL +
+            "api.renderSaves();api.renderSavesTab();"
+            "api._fetch.reset();"
+            "api.confirmDeleteSave('act-1');"
+            "api.confirmDeleteSave('act-1');"
+            "const root=api.els.saveDeleteModal;"
+            "return {hidden:root.hidden,"
+            "confirming:api.state.confirmingSaveId,"
+            "rootId:root.id,"
+            "sent:api._fetch.sent.length,"
+            "body:modalBody(),"
+            "row:rowShape(api.els.savesList.children[0]),"
+            "toasts:api.els.toasts.children.map(t=>"
+            "t.children&&t.children[0]?t.children[0].textContent:null)};"
+        )
+        d = json.loads(js(expr))
+        self.assertFalse(d["hidden"], "the modal is open after re-entry")
+        self.assertEqual(d["confirming"], "act-1",
+                         "the flag keeps the same id")
+        self.assertEqual(d["rootId"], "save-delete-modal",
+                         "the single static shell — no duplicated element")
+        self.assertEqual(d["sent"], 0, "re-entry must not fire a request")
+        body = d["body"]
+        self.assertEqual(len(body), 3,
+                         "name + meta + note, built exactly once")
+        self.assertEqual(body[0]["cls"], "save-modal-name")
+        self.assertIn('Delete "Act Three"?', body[0]["txt"])
+        self.assertEqual(body[0]["txt"].count("Act Three"), 1,
+                         "the name line is not rebuilt/duplicated")
+        self.assertEqual(body[1]["cls"], "save-modal-meta")
+        self.assertEqual(body[2]["cls"], "save-modal-note")
+        self.assertEqual(d["row"]["btns"], ["Load", "Delete"],
+                         "the row stays in normal shape under the modal")
+        self.assertFalse(any(t and "save not found" in str(t)
+                             for t in d["toasts"]),
+                         "re-entry must not toast (no duplication)")
+
+    # ── BUG-016 / E11 — unknown id never enters the confirmation ────────
+    def test_e11_unknown_id_no_modal(self):
+        # Spec §9 E11: a stale/unknown id not in state.saves — no modal
+        # opens, the error toast `save not found: <id>` fires, and NO
+        # request is issued (the "no unconfirmed delete" guard on the
+        # entry path; mirrors the AC9 ghost test, which covers the
+        # re-render path for the same invariant).
+        expr = self._gm(
+            self._body_js() +
+            "api.state.saves=[%s];" % self._NORMAL +
+            "api.renderSaves();api.renderSavesTab();"
+            "api._fetch.reset();"
+            "api.confirmDeleteSave('ghost-99');"
+            "return {confirming:api.state.confirmingSaveId,"
+            "hidden:api.els.saveDeleteModal.hidden,"
+            "sent:api._fetch.sent.length,"
+            "body:modalBody(),"
+            "toasts:api.els.toasts.children.map(t=>"
+            "t.children&&t.children[0]?t.children[0].textContent:null)};"
+        )
+        d = json.loads(js(expr))
+        self.assertIsNone(d["confirming"],
+                          "an unknown id must never enter the confirmation")
+        self.assertTrue(d["hidden"], "no modal opens for an unknown id")
+        self.assertEqual(d["sent"], 0,
+                         "no DELETE may be fired without the modal")
+        self.assertEqual(d["body"], [], "the dialog body is never filled")
+        self.assertTrue(any(t and t == "save not found: ghost-99"
+                            for t in d["toasts"]),
+                        "the guard must toast 'save not found: <id>'")
+
+    # ── AC11 — accessible shell (static, index.html) ─────────────────────
+    def test_ac11_accessible_shell_static(self):
+        with open(INDEX, encoding="utf-8") as fh:
+            html = fh.read()
+        shell = re.search(r'<div id="save-delete-modal"[^>]*>', html)
+        self.assertIsNotNone(shell, "the #save-delete-modal shell is missing")
+        self.assertIn("hidden", shell.group(0),
+                      "the modal shell must be hidden by default")
+        dialog = re.search(
+            r'<div class="save-modal-dialog" id="save-delete-modal-dialog"'
+            r'[^>]*>', html)
+        self.assertIsNotNone(dialog, "the dialog box is missing")
+        attrs = dialog.group(0)
+        self.assertIn('role="alertdialog"', attrs,
+                      "role=alertdialog (a blocking decision dialog, not "
+                      "role=alert — spec §6.3)")
+        self.assertIn('aria-modal="true"', attrs)
+        self.assertIn('aria-labelledby="save-delete-modal-title"', attrs)
+        self.assertIn('aria-describedby="save-delete-modal-body"', attrs)
+        title = re.search(
+            r'<h2 class="save-modal-title" id="save-delete-modal-title">'
+            r'([^<]*)</h2>', html)
+        self.assertIsNotNone(title, "the h2 title with its id is missing")
+        self.assertEqual(title.group(1), "Delete save?")
+        cancel = re.search(
+            r'<button id="save-delete-modal-cancel" class="btn">([^<]*)'
+            r'</button>', html)
+        self.assertIsNotNone(cancel,
+                             "Cancel must be a real <button class=btn>")
+        self.assertEqual(cancel.group(1), "Cancel")
+        confirm = re.search(
+            r'<button id="save-delete-modal-confirm" class="([^"]+)">'
+            r'([^<]*)</button>', html)
+        self.assertIsNotNone(confirm, "Confirm must be a real <button>")
+        self.assertIn("btn-danger", confirm.group(1))
+        self.assertEqual(confirm.group(2), "Delete")
+        self.assertIn('id="save-delete-modal-body"', html)
+
+    # ── AC12 — focus in/out + Tab cycle ──────────────────────────────────
+    def test_ac12a_focus_open_guarded(self):
+        # The harness stubs have NO focus(): opening must complete without
+        # throwing — proof every focus call is guarded (A6).
+        expr = self._gm(
+            "api.state.saves=[%s];" % self._NORMAL +
+            "api.renderSaves();"
+            "api.confirmDeleteSave('act-1');"
+            "return {ok:true,hidden:api.els.saveDeleteModal.hidden,"
+            "confirming:api.state.confirmingSaveId};"
+        )
+        d = json.loads(js(expr))
+        self.assertTrue(d["ok"], "opening the modal must not throw")
+        self.assertFalse(d["hidden"])
+        self.assertEqual(d["confirming"], "act-1")
+
+    def test_ac12b_focus_moves_into_dialog(self):
+        expr = self._gm(
+            "let cancelFocusCalls=0;"
+            "api.els.saveDeleteModalCancel.focus=()=>{cancelFocusCalls++;};"
+            "api.state.saves=[%s,%s];" % (self._NORMAL, self._NORMAL2) +
+            "api.renderSaves();"
+            "api.confirmDeleteSave('act-1');"
+            "return {cancelFocusCalls,"
+            "confirming:api.state.confirmingSaveId};"
+        )
+        d = json.loads(js(expr))
+        self.assertEqual(d["cancelFocusCalls"], 1,
+                         "focus must move to the dialog's Cancel button "
+                         "on open")
+        self.assertEqual(d["confirming"], "act-1")
+
+    def test_ac12c_tab_cycles_two_buttons(self):
+        expr = self._gm(
+            "let cancelFocusCalls=0;let confirmFocusCalls=0;"
+            "api.els.saveDeleteModalCancel.focus=()=>{cancelFocusCalls++;};"
+            "api.els.saveDeleteModalConfirm.focus=()=>{confirmFocusCalls++;};"
+            "api.state.saves=[%s];" % self._NORMAL +
+            "api.renderSaves();"
+            "api.confirmDeleteSave('act-1');"
+            "const cancelAfterOpen=cancelFocusCalls;"
+            "const dialog=api.els.saveDeleteModalDialog;"
+            "dialog.dispatchEvent({type:'keydown',key:'Tab',"
+            "preventDefault(){}});"
+            "const after1={c:cancelFocusCalls,k:confirmFocusCalls};"
+            "dialog.dispatchEvent({type:'keydown',key:'Tab',"
+            "preventDefault(){}});"
+            "const after2={c:cancelFocusCalls,k:confirmFocusCalls};"
+            "dialog.dispatchEvent({type:'keydown',key:'Tab',"
+            "preventDefault(){}});"
+            "const after3={c:cancelFocusCalls,k:confirmFocusCalls};"
+            "return {cancelAfterOpen,after1,after2,after3};"
+        )
+        d = json.loads(js(expr))
+        self.assertEqual(d["cancelAfterOpen"], 1,
+                         "open focuses Cancel (the safe default)")
+        # Two-element cycle: each Tab (either direction) moves focus to the
+        # OTHER button — focus cannot escape into the background.
+        self.assertEqual(d["after1"], {"c": 1, "k": 1},
+                         "first Tab moves to Confirm")
+        self.assertEqual(d["after2"], {"c": 2, "k": 1},
+                         "second Tab cycles back to Cancel")
+        self.assertEqual(d["after3"], {"c": 2, "k": 2},
+                         "third Tab returns to Confirm")
+
+    def test_ac12d_focus_restore_row_present(self):
+        # Cancel closes the modal; the restore path runs against the
+        # freshly re-rendered row's Delete button (lookup by data-id).
+        # The close re-render builds FRESH row buttons, so the probe hooks
+        # document.createElement to install focus spies on freshly built
+        # buttons and asserts the restore focused the new row's Delete.
+        expr = self._gm(
+            "let focusedEls=[];"
+            "const origCreate=api.document.createElement;"
+            "api.document.createElement=function(tag){"
+            "const el=origCreate.call(api.document,tag);"
+            "if(tag==='button')el.focus=function(){focusedEls.push(el);};"
+            "return el;};"
+            "api.state.saves=[%s];" % self._NORMAL +
+            "api.renderSaves();"
+            "api.confirmDeleteSave('act-1');"
+            "api.els.saveDeleteModalCancel.dispatchEvent("
+            "{type:'click',stopPropagation(){}});"
+            "return {hidden:api.els.saveDeleteModal.hidden,"
+            "nFocused:focusedEls.length,"
+            "cls:focusedEls.length?focusedEls[0].className:null,"
+            "rowId:focusedEls.length&&focusedEls[0].parentNode&&"
+            "focusedEls[0].parentNode.parentNode&&"
+            "focusedEls[0].parentNode.parentNode.parentNode?"
+            "focusedEls[0].parentNode.parentNode.parentNode.dataset.id:null};"
+        )
+        d = json.loads(js(expr))
+        self.assertTrue(d["hidden"])
+        self.assertEqual(d["nFocused"], 1,
+                         "the restore must focus exactly one element")
+        self.assertIn("save-row-del", d["cls"],
+                      "focus must land on a row Delete button")
+        self.assertEqual(d["rowId"], "act-1",
+                         "...on the confirmed save's row (by data-id)")
+
+    def test_ac12e_focus_restore_row_gone(self):
+        # The row is already gone when the restore runs (deleted /
+        # ghost-closed, A11): the restore is skipped — no throw, no
+        # focus on a detached element.
+        expr = self._gm(
+            self._settle_js() +
+            "api.state.saves=[%s];" % self._NORMAL +
+            "api.renderSaves();api.renderSavesTab();"
+            "api.confirmDeleteSave('act-1');"
+            "api._fetch.responses=["
+            + self._fetch_resp({"ok": True}) + ","
+            + self._fetch_resp({"saves": []}) + "]"
+            ";api.deleteSave('act-1');"
+            "return settleModal(40).then(function(settled){"
+            "return {settled:!!settled,"
+            "rows:api.els.savesList.children.length,"
+            "hidden:api.els.saveDeleteModal.hidden,"
+            "confirming:api.state.confirmingSaveId};});"
+        )
+        d = json.loads(js(expr))
+        self.assertTrue(d["settled"])
+        self.assertEqual(d["rows"], 0, "the row is deleted")
+        self.assertTrue(d["hidden"])
+        self.assertIsNone(d["confirming"])
+
+    # ── AC13 — non-GM never reaches the modal ────────────────────────────
+    def test_ac13a_non_gm_role_guard_noop(self):
+        # (b) runtime defensive role guard (A9): a PLAYER welcome, then a
+        # programmatic confirmDeleteSave is a no-op — no modal, no request.
+        # (a) static gating is unchanged: TestSavesGmGating proves the two
+        # surfaces are .gm-only (the only Delete triggers live inside
+        # GM-only containers).
+        expr = (
+            "(()=>{"
+            "const map=" + _floor_map_js(6, 4) + ";"
+            "api.onWelcome({type:'welcome',"
+            "you:{id:'p2',name:'Alice',role:'player',entity_id:'e2'},"
+            "map,entities:[],you_entity:{id:'e2',name:'Alice',"
+            "kind:'player',team:'party',x:1,y:1},players:[],"
+            "awareness:[],fog:false});"
+            "api.state.saves=[%s];" % self._NORMAL +
+            "api._fetch.reset();"
+            "api.confirmDeleteSave('act-1');"
+            "return {role:api.state.role,"
+            "confirming:api.state.confirmingSaveId,"
+            "hidden:api.els.saveDeleteModal.hidden,"
+            "sent:api._fetch.sent.length};"
+            "})()"
+        )
+        d = json.loads(js(expr))
+        self.assertEqual(d["role"], "player")
+        self.assertIsNone(d["confirming"],
+                          "a non-GM must never open the confirmation")
+        self.assertTrue(d["hidden"], "the modal stays hidden for players")
+        self.assertEqual(d["sent"], 0, "no request without the role")
+
+    # ── AC14 — no regressions; in-row approach removed ───────────────────
+    def test_ac14a_no_inrow_artifacts_no_unconfirmed_delete_static(self):
+        with open(APPJS, encoding="utf-8") as fh:
+            src = fh.read()
+        self.assertNotIn("save-row-confirm", src,
+                         "the in-row confirm bar is fully removed")
+        self.assertNotIn("is-confirming", src,
+                         "the confirming row modifier is gone")
+        # Strip comments before the window.confirm check: app.js PROSE
+        # mentions "No window.confirm — ..."; the guard is that no CALL
+        # exists outside comments.
+        no_comments = re.sub(r"/\*.*?\*/", "", src, flags=re.S)
+        no_comments = re.sub(r"^\s*//.*$", "", no_comments, flags=re.M)
+        self.assertNotIn("window.confirm", no_comments,
+                         "no native confirm dialog (A10)")
+        self.assertEqual(src.count("deleteSave("), 2,
+                         "deleteSave must have exactly one call site "
+                         "(the modal Confirm) besides its definition — "
+                         "the 'no unconfirmed delete' guard")
+
+    # ── E6 — corrupt save gets the identical modal flow ──────────────────
+    def test_corrupt_save_modal_flow(self):
+        # Corrupt rows share the modal flow (their only trigger is Delete):
+        # name line `Delete "Broken"? ⚠ corrupt`, meta line OMITTED (no
+        # width/height/count/date), note kept; Confirm deletes the corrupt
+        # file via the same endpoint.
+        expr = self._gm(
+            self._settle_js() + self._body_js() +
+            "api.state.saves=[%s];" % self._CORRUPT +
+            "api.renderSaves();api.renderSavesTab();"
+            "const r=api.els.savesList.children[0];"
+            "const actions=r.children[0].children[1];"
+            "actions.children[actions.children.length-1].dispatchEvent("
+            "{type:'click',stopPropagation(){}});"
+            "const body=modalBody();"
+            "api._fetch.reset();"
+            "api._fetch.responses=["
+            + self._fetch_resp({"ok": True}) + ","
+            + self._fetch_resp({"saves": []}) + "]"
+            ";api.els.saveDeleteModalConfirm.dispatchEvent("
+            "{type:'click',stopPropagation(){}});"
+            "return settleModal(40).then(function(settled){"
+            "const del=api._fetch.sent.find(s=>"
+            "s.url==='/api/saves/bad-1'&&s.opts&&s.opts.method==='DELETE');"
+            "return {settled:!!settled,body:body,del:del?del.url:null,"
+            "hidden:api.els.saveDeleteModal.hidden,"
+            "rows:api.els.savesList.children.length};});"
+        )
+        d = json.loads(js(expr))
+        self.assertTrue(d["settled"])
+        body = d["body"]
+        self.assertEqual(len(body), 2, "corrupt: name + note, NO meta line")
+        self.assertEqual(body[0]["cls"], "save-modal-name")
+        self.assertIn('Delete "Broken"?', body[0]["txt"])
+        self.assertIn("⚠ corrupt", body[0]["txt"])
+        self.assertEqual(body[1]["cls"], "save-modal-note")
+        self.assertEqual(d["del"], "/api/saves/bad-1",
+                         "the corrupt file is deleted via the same endpoint")
+        self.assertTrue(d["hidden"])
+        self.assertEqual(d["rows"], 0)
 
 
 class TestSavesTabFlow(SavesBase):
@@ -4862,6 +5721,7 @@ class TestSavesSaveMapState(SavesBase):
         )
         d = json.loads(js(expr))
         self.assertTrue(d["disabled"], "players never get Save map state")
+
 
 
 if __name__ == '__main__':

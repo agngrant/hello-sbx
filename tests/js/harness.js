@@ -385,7 +385,7 @@ function buildApi() {
     "SAFE_STATES," +
     "isSafeDoor, safeDoorStateAt, validateSafe, sendSafeDoor, setSafeAction," +
     // Save / Load menu (save-load spec §7): list + save + load + delete.
-    "refreshSaves, renderSaves, renderSavesTab, buildSaveRow, formatSaveDate, saveCurrentMap, loadSave, loadSaveFromTab, deleteSave, confirmDeleteSave, findSaveByName, showSaveConfirm, hideSaveConfirm, announceLoadedSaveRejoin, showRejoinNote, hideRejoinNote, showLoadedSavePreview, onSaveCurrentMapClick, syncSaveMapStateButton," +
+    "refreshSaves, renderSaves, renderSavesTab, buildSaveRow, formatSaveDate, saveCurrentMap, loadSave, loadSaveFromTab, deleteSave, confirmDeleteSave, cancelSaveDelete, syncSaveModal, findSaveByName, showSaveConfirm, hideSaveConfirm, announceLoadedSaveRejoin, showRejoinNote, hideRejoinNote, showLoadedSavePreview, onSaveCurrentMapClick, syncSaveMapStateButton," +
     // Pan & Zoom (pan-zoom spec): view math + controls.
     "LEVELS, fitLevel, viewStep, viewBounds, applyView, applyViewNow, fitToMap," +
     "panBy, zoomBy, syncNavControls, focusInField, cellFromEvent," +

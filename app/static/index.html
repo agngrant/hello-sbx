@@ -357,6 +357,24 @@
     <div id="scrim" hidden></div>
   </section>
 
+  <!-- Save-delete confirm (save-load-delete-modal spec): full-screen modal
+       layer — a body-level sibling of the views, covering map view AND the
+       upload view (Saved maps tab). Static shell: the app fills the body's
+       text per open (textContent only) and toggles `hidden`. hidden by
+       default; players never reach it (.gm-only triggers + role guard). -->
+  <div id="save-delete-modal" hidden>
+    <div class="save-modal-dialog" id="save-delete-modal-dialog" role="alertdialog"
+         aria-modal="true" aria-labelledby="save-delete-modal-title"
+         aria-describedby="save-delete-modal-body">
+      <h2 class="save-modal-title" id="save-delete-modal-title">Delete save?</h2>
+      <div id="save-delete-modal-body"></div>
+      <div class="save-modal-actions">
+        <button id="save-delete-modal-cancel" class="btn">Cancel</button>
+        <button id="save-delete-modal-confirm" class="btn btn-danger">Delete</button>
+      </div>
+    </div>
+  </div>
+
   <script src="app.js"></script>
 </body>
 </html>
