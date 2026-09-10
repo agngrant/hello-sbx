@@ -304,8 +304,12 @@ def build_app() -> FastAPI:
         # Any role, no join required: the list comes from the saves/ dir
         # scan (spec 4.1/E1/A12), newest first; corrupt bundles are listed
         # with "corrupt": true (row shows warning + Delete only).
+        # list_saves() scans saves/*.json (os.listdir + a json read per
+        # file) — blocking I/O; offload it so a slow disk can never stall
+        # the event loop (off-loop I/O fix, pass 3).
+        saves = await asyncio.to_thread(save_store.list_saves)
         return JSONResponse(
-            {"saves": save_store.list_saves()},
+            {"saves": saves},
             headers={"Cache-Control": "no-store"},
         )
 
@@ -376,7 +380,11 @@ def build_app() -> FastAPI:
                 "created_at": save_store._now_iso(),
                 "entity_count": len(entity_dicts),
             }
-        actual_id = save_store.save_bundle(record, grid, entity_dicts)
+        # save_bundle: open("w") of the temp file + json.dump + os.fsync +
+        # os.replace — all blocking I/O; run it off the event loop.
+        actual_id = await asyncio.to_thread(
+            save_store.save_bundle, record, grid, entity_dicts
+        )
         record["id"] = actual_id  # the id actually written (fresh or explicit)
         return JSONResponse(
             {"ok": True, **record}, headers={"Cache-Control": "no-store"})
@@ -395,7 +403,11 @@ def build_app() -> FastAPI:
         if _save_role_state() == "player":
             return _error_json(401, "only the GM can load")
         try:
-            grid, entities = save_store.load_bundle(save_id)
+            # load_bundle: open + json.load + full validation — blocking
+            # I/O; run it off the event loop.
+            grid, entities = await asyncio.to_thread(
+                save_store.load_bundle, save_id
+            )
         except (ValueError, OSError):
             return _error_json(404, f"save not found: {save_id}")
         map_id = _unique_map_id(f"smap-{int(time.time())}")
@@ -422,7 +434,8 @@ def build_app() -> FastAPI:
         if _save_role_state() == "player":
             return _error_json(401, "only the GM can delete")
         try:
-            save_store.delete_save(save_id)
+            # delete_save: os.remove — blocking I/O; run it off-loop.
+            await asyncio.to_thread(save_store.delete_save, save_id)
         except FileNotFoundError:
             return _error_json(404, f"save not found: {save_id}")
         except ValueError:
@@ -617,7 +630,12 @@ async def _handle_upload(request: Any) -> JSONResponse:
         return _error_json(400, f"bad base64: {exc}")
 
     try:
-        grid = detect_grid(
+        # detect_grid = Pillow decode (Image.open + RGBA conversion) +
+        # resize + Otsu + 3x3 majority — CPU-bound; offload the WHOLE unit
+        # to a worker thread (the 32 MB upload case included) so the event
+        # loop is never blocked (off-loop I/O fix, pass 3).
+        grid = await asyncio.to_thread(
+            detect_grid,
             image_bytes,
             name=name.strip(),
             cols=cols,
@@ -640,7 +658,9 @@ async def _handle_upload(request: Any) -> JSONResponse:
                 "width": grid.width,
                 "height": grid.height,
                 "cells": grid.cells,
-                "thumbnail": grid_to_thumbnail_png(grid),
+                "thumbnail": await asyncio.to_thread(
+                    grid_to_thumbnail_png, grid
+                ),
             },
             grid,
         ),
@@ -691,7 +711,12 @@ async def _handle_generate(request: Any) -> JSONResponse:
         return _error_json(400, "'seed' must be an integer")
 
     try:
-        grid = generate_grid(cols, rows, name.strip(), seed)
+        # generate_grid: pure-CPU BSP generation + door placement — offload
+        # the whole unit to a worker thread so a heavy map (60x60) can
+        # never block the event loop (off-loop I/O fix, pass 3).
+        grid = await asyncio.to_thread(
+            generate_grid, cols, rows, name.strip(), seed
+        )
     except ValueError as exc:
         # Belt-and-braces: the endpoint checks first, but a defensive
         # ValueError from the generator maps to 400 like upload's does.
@@ -709,7 +734,9 @@ async def _handle_generate(request: Any) -> JSONResponse:
                 "width": grid.width,
                 "height": grid.height,
                 "cells": grid.cells,
-                "thumbnail": grid_to_thumbnail_png(grid),
+                "thumbnail": await asyncio.to_thread(
+                    grid_to_thumbnail_png, grid
+                ),
             },
             grid,
         ),
