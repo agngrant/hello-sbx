@@ -18,9 +18,11 @@
 
 Threading model: all state reads/writes run under the session's
 :class:`~threading.RLock`; the session itself is SYNCHRONOUS and is called
-from the uvicorn event-loop thread (``app/server.py`` bridges it: WS I/O is
-async, message handling runs in a worker thread via ``starlette.concurrency
-to_thread``). Outbound JSON for a given connection goes through an ASYNC
+from the uvicorn event-loop thread (``app/server.py`` bridges it: the WS
+endpoint calls ``handle_message`` inline on the loop — deliberately NOT via
+``to_thread`` — and only the blocking REST map I/O is offloaded off the loop
+via ``asyncio.to_thread``). Outbound JSON for a given connection goes through
+an ASYNC
 SENDER coroutine bound to that connection (registered by the server via
 :meth:`attach_async`): uvicorn serialises sends per WebSocket connection,
 so no per-connection send lock is needed — a broadcast can never interleave
@@ -529,10 +531,13 @@ class GameSession:
 
         STAYS SYNCHRONOUS on purpose: the in-process unit tests
         (``tests/test_session.py``) drive it directly with fake sockets. It
-        is called from the uvicorn event-loop thread (the WS endpoint runs
-        it via ``starlette.concurrency.to_thread`` — off the loop, so the
-        blocking RLock serialises all state access against the REST
-        threadpool and any other session work). For message types that
+        is called from the uvicorn event-loop thread — the WS endpoint runs
+        it inline on the loop (deliberately NOT via ``to_thread``: the
+        broadcast scheduling needs the running loop, and the RLock is held
+        only milliseconds), so the blocking RLock serialises all state
+        access; the REST handlers offload only their blocking *I/O* (file
+        reads/writes) to a worker thread via ``asyncio.to_thread``. For
+        message types that
         broadcast (``join`` and all mutations), the async broadcast coroutine
         is scheduled on the running event loop (it is created on that loop,
         so awaiting the senders inside is valid); when no loop is running
@@ -599,13 +604,6 @@ class GameSession:
         return {"type": "error", "message": UNKNOWN_TYPE}
 
     # -- helpers ------------------------------------------------------------
-
-    @staticmethod
-    def _send_coro(sender: Any, payload: dict[str, Any]) -> Any:
-        """One-shot async sender frame: awaits ``sender(payload)`` and
-        swallows transport errors (a dead/broken connection is dropped —
-        teardown detaches it), never affecting state."""
-        return sender(payload)
 
     @staticmethod
     def _run_b(coro: Any) -> None:

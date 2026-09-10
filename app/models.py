@@ -11,13 +11,10 @@ REST/WS payloads are exactly the shapes the frontend already consumes:
 * ``Grid``:      ``{"name", "width", "height", "cells", "image"}``
 * ``Entity``:    ``{"id", "name", "kind", "team", "x", "y", "owner", "color"}``
 * ``Player``:    ``{"id", "name", "role", "entity_id", "awareness_radius"}``
-* ``Session``:   ``{"id", "map", "entities", "players", "fog"}`` — the full
-  snapshot broadcast on any mutation (PROJECT.md §9).
 """
 
 from __future__ import annotations
 
-import dataclasses
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -544,53 +541,3 @@ class Player:
             awareness_radius=radius,
         )
 
-
-# ---------------------------------------------------------------------------
-# Session
-# ---------------------------------------------------------------------------
-
-
-@dataclass
-class Session:
-    """Authoritative session state (Iteration 5 owns the live instance).
-
-    ``to_dict`` produces the full snapshot broadcast on any mutation
-    (PROJECT.md §9): ``{"id", "map", "entities", "players", "fog"}``.
-    """
-
-    id: str
-    grid: Grid
-    entities: dict[str, Entity] = field(default_factory=dict)
-    players: dict[str, Player] = field(default_factory=dict)
-    fog: bool = False
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "id": self.id,
-            "map": self.grid.to_dict(),
-            "entities": [e.to_dict() for e in self.entities.values()],
-            "players": [p.to_dict() for p in self.players.values()],
-            "fog": self.fog,
-        }
-
-    @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> "Session":
-        return cls(
-            id=data["id"],
-            grid=Grid.from_dict(data["map"]),
-            entities={eid: Entity.from_dict(d) for eid, d in data["entities"].items()},
-            players={pid: Player.from_dict(d) for pid, d in data["players"].items()},
-            fog=bool(data.get("fog", False)),
-        )
-
-
-# ---------------------------------------------------------------------------
-# Generic asdict helper (plain-dict conversion for dataclasses).
-# ---------------------------------------------------------------------------
-
-
-def asdict(obj: Any) -> dict[str, Any]:
-    """Shallow plain-dict form of a dataclass instance (values passed through)."""
-    if not dataclasses.is_dataclass(obj):
-        raise TypeError(f"{obj!r} is not a dataclass")
-    return dataclasses.asdict(obj)

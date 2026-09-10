@@ -245,8 +245,9 @@ def build_app() -> FastAPI:
         get-or-create session (module-level registry in ``app.main``). The
         client drives the protocol: it sends ``{type:"join",name,role}``
         first; ``session.handle_message`` (SYNCHRONOUS — the RLock still
-        serialises all state) runs in a worker thread off the event loop
-        (``to_thread``) and returns a per-client reply, or ``None`` when the
+        serialises all state) runs inline on the event-loop thread
+        (deliberately NOT via ``to_thread``) and returns a per-client reply,
+        or ``None`` when the
         session itself broadcast the frames via the connection's async
         sender (registered below — uvicorn serialises sends per connection,
         so a reply can never interleave with a broadcast on the same socket).
@@ -458,31 +459,13 @@ def build_app() -> FastAPI:
     return app
 
 
-def _map_doors(grid: Grid) -> dict[str, str] | None:
-    """The additive ``doors`` object for a REST map response (spec §8.2).
-
-    Emitted as the FULL materialized object (per A9/I5/AC10, every doorway's
-    current state, unrecorded doorways defaulting to "L") whenever the grid
-    has a doorway cell; ``None`` (the key is omitted) for a grid with NO
-    doorway cells. Uses ``grid.doors_for_wire()`` — the wire policy (differs
-    from ``Grid.to_dict``, which emits the key only when recorded state
-    exists). Safe-room doors (safe-room spec §8.1) ride in the ``safe``
-    object instead: ``doors_for_wire`` SKIPS safe cells, so ``doors`` and
-    ``safe`` are disjoint and jointly cover every doorway. Absent/None on
-    the wire => the client treats every door as locked (the safe default,
-    A2). For a grid with NO safe doors nothing is skipped — byte-identical
-    output to the pre-feature build.
-    """
-    return grid.doors_for_wire()
-
-
 def _with_doors(payload: dict[str, Any], grid: Grid) -> dict[str, Any]:
     """Return ``payload`` with the additive ``doors`` key (if any) and the
     additive ``safe`` key (safe-room spec §8.2: emitted in full whenever the
     grid has >= 1 safe door; absent ⇒ no safe doors, so fresh upload/
     generate responses are byte-identical to today) added. ``doors`` skips
     safe cells, so the two never overlap on the wire."""
-    doors = _map_doors(grid)
+    doors = grid.doors_for_wire()
     if doors is not None:
         payload["doors"] = doors
     safe = grid.safe_for_wire()
@@ -522,8 +505,14 @@ def _make_maps_detail_route() -> Any:
             "height": grid.height,
             "image": grid.image,
             "cells": grid.cells,
-            "entities": list(entry["entities"].values()),
-            "players": list(entry["players"].values()),
+            # The registry's per-map ``entities``/``players`` dicts are never
+            # populated (``GameSession`` keeps its own live entities/players
+            # and never writes them back), so ``list(...values())`` always
+            # serialised to ``[]``. Emit the deterministic empty list
+            # directly — the wire shape (key present, value ``[]``) is
+            # unchanged.
+            "entities": [],
+            "players": [],
         }
         return JSONResponse(
             _with_doors(body, grid),
@@ -533,18 +522,6 @@ def _make_maps_detail_route() -> Any:
     # Take just the single route we registered so it can be spliced into the
     # main app in registration order (before the static mount).
     return probe.routes[-1]
-
-
-def _route_get_404(path: str) -> bool:
-    """Mirror the old ``_route_get`` "api_404" classification."""
-    if path.startswith("/api/maps/"):
-        rest = path[len("/api/maps/"):]
-        if rest and "/" not in rest:
-            return False  # this is a maps_detail (valid single segment)
-        return True  # empty or nested → api_404
-    if path.startswith("/api/"):
-        return True
-    return False
 
 
 # ---------------------------------------------------------------------------
