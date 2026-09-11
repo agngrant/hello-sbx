@@ -89,8 +89,10 @@ def get_cell(grid: Grid, x: int, y: int) -> str:
 def set_cell(grid: Grid, x: int, y: int, cell_type: str) -> str:
     """Set the cell at ``(x, y)`` and return the new value.
 
-    Mutates ``grid`` in place (the GM ``paint`` action in Iteration 4 will
-    route through here). Raises ``IndexError`` if out of bounds.
+    Mutates ``grid`` in place. Test helper only: the live GM ``paint`` path
+    writes ``grid.cells[y][x]`` directly (``app/session.py`` and the REST
+    paint route) rather than routing through here. Raises ``IndexError`` if
+    out of bounds.
     """
     if not in_bounds(grid, x, y):
         raise IndexError(
