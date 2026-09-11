@@ -42,7 +42,7 @@ import threading
 from typing import Any
 
 from app.awareness import AWARENESS_MAX, AWARENESS_MIN, build_awareness
-from app.models import CELL_TYPES, TEAMS, Entity, Grid, Player
+from app.models import CELL_TYPES, DOOR_STATES, TEAMS, Entity, Grid, Player
 from app.pathfinding import find_path
 from app.visibility import build_visibility_mask, visible_cells
 
@@ -203,7 +203,7 @@ class GameSession:
     # Joins (PROJECT.md §8)
     # ------------------------------------------------------------------
 
-    def join(self, sock: Any, name: str, role: str | None) -> tuple[Player | None, str | None]:
+    def join(self, sock: Any, name: str | None, role: str | None) -> tuple[Player | None, str | None]:
         """Register ``sock`` in the session.
 
         Returns ``(player, None)`` on success or ``(None, error)``. Rules:
@@ -413,7 +413,7 @@ class GameSession:
         safe_wire = self.grid.safe_for_wire()
         if safe_wire is not None:
             map_dict["safe"] = safe_wire
-        payload = {
+        payload: dict[str, Any] = {
             "type": "state",
             "map": map_dict,
             "players": [p.to_dict() for p in self.players.values()],
@@ -634,6 +634,8 @@ class GameSession:
         """
         name = msg.get("name")
         role = msg.get("role")
+        if name is not None and not isinstance(name, str):
+            return None, {"type": "error", "message": "name must be a string"}
         if role is not None and not isinstance(role, str):
             return None, {"type": "error", "message": "role must be a string"}
         with self._lock:
@@ -688,12 +690,12 @@ class GameSession:
                 # Team-aware A* (safe-room spec §5.3): the restriction is
                 # judged by the MOVING entity's team — a hostile treats an
                 # open safe door as a wall, party/neutral walk through it.
-                path = find_path(self.grid, (entity.x, entity.y), (x, y),
-                                 team=entity.team)
-                if path is None:
+                coords = find_path(self.grid, (entity.x, entity.y), (x, y),
+                                   team=entity.team)
+                if coords is None:
                     return {"type": "error", "message": NO_ROUTE}
                 entity.x, entity.y = x, y
-                path = [{"x": px, "y": py} for (px, py) in path]
+                path = [{"x": px, "y": py} for (px, py) in coords]
 
             # The path frame + the per-viewer state snapshot go to EVERYONE
             # (including the sender, who gets them in this order so its
@@ -950,13 +952,16 @@ class GameSession:
             if action == "lock" and cur == "O" and self._any_entity_at(x, y):
                 return {"type": "error",
                         "message": "cannot close a door with a token on it"}
+            if action not in DOOR_ACTIONS or cur not in DOOR_STATES:
+                return {"type": "error",
+                        "message": "illegal door transition"}
             new_state = {
                 ("unlock", "L"): "U",
                 ("open", "U"): "O",
                 ("close", "O"): "U",
                 ("lock", "U"): "L",
                 ("lock", "O"): "L",
-            }[(action, cur)]
+            }[(action, cur)]  # type: ignore[invalid-index]
             self.grid.set_door(x, y, new_state)
             self._run_b(self._broadcast())
         return None
@@ -1037,8 +1042,9 @@ class GameSession:
                 # exclusion, I1) before the safe record is written — the
                 # new safe door STARTS LOCKED ("L", the secure default, §3.4).
                 if (self.grid.doors or {}).get(key) is not None:
+                    assert self.grid.doors is not None
                     self.grid.doors = dict(self.grid.doors)
-                    del self.grid.doors[key]
+                    del self.grid.doors[key]  # type: ignore[index]
                 self.grid.set_safe_door(x, y, "L")
             elif action == "unmark":
                 if not is_safe:
@@ -1048,6 +1054,9 @@ class GameSession:
                 if not is_safe:
                     return {"type": "error", "message": "not a safe door"}
                 cur = self.grid.safe_door_state_at(x, y)  # "L" | "U" | "O"
+                if cur is None:
+                    return {"type": "error",
+                            "message": "not a safe door"}
                 if action == "open" and cur == "O":
                     return {"type": "error",
                             "message": "safe door is already open"}
@@ -1061,6 +1070,9 @@ class GameSession:
                     return {"type": "error",
                             "message": (
                                 "cannot close a door with a token on it")}
+                if not isinstance(cur, str):
+                    return {"type": "error",
+                            "message": "safe door state unavailable"}
                 if action == "unlock" and cur != "L":
                     return {"type": "error",
                             "message": "safe door is already unlocked"}
@@ -1076,7 +1088,7 @@ class GameSession:
                     ("lock", "O"): "L",
                     ("open", "U"): "O",
                     ("close", "O"): "U",
-                }[(action, cur)]
+                }[(action, cur)]  # type: ignore[invalid-index]
                 self.grid.set_safe_door(x, y, new_state)
             self._run_b(self._broadcast())
         return None
