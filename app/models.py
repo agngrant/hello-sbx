@@ -367,7 +367,7 @@ class Grid:
     def safe_door_state_at(self, x: int, y: int) -> str | None:
         """The safe-door state at ``(x, y)`` — ``"L"|"U"|"O"`` for a safe
         door, ``None`` for any non-safe cell."""
-        if not self.is_safe_door(x, y):
+        if not self.is_safe_door(x, y) or self.safe is None:
             return None
         return self.safe[f"{x},{y}"]
 
@@ -408,7 +408,7 @@ class Grid:
         ``O``→``"O"`` reversion. Raises ``ValueError`` if not a safe door.
         """
         key = f"{x},{y}"
-        if not self.is_safe_door(x, y):
+        if not self.is_safe_door(x, y) or self.safe is None:
             raise ValueError(f"no safe door at ({x},{y})")
         st = self.safe[key]  # "L" | "U" | "O"
         self.safe = dict(self.safe)
