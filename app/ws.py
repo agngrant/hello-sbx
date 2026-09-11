@@ -206,9 +206,9 @@ def read_frame(sock: socket.socket, pre: bytearray | None = None) -> tuple[int, 
         elif length == 127:
             (length,) = struct.unpack(">Q", _recv_exact(sock, 8, pre))
 
-        mask = _recv_exact(sock, 4, pre) if masked else None
+        mask: bytes | None = _recv_exact(sock, 4, pre) if masked else None
         payload = _recv_exact(sock, length, pre) if length else b""
-        if masked and payload:
+        if masked and mask is not None and payload:
             mask4 = struct.pack("<I", int.from_bytes(mask, "little"))
             # XOR-unmask in 4-byte aligned chunks (fast on 3.11+; correct on all).
             payload = bytes(b ^ mask4[i & 3] for i, b in enumerate(payload))
