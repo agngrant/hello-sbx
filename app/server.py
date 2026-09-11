@@ -129,7 +129,7 @@ def _save_role_state() -> str:
     return "player"
 
 
-def not_found_handler(request: Any, exc: HTTPException) -> PlainTextResponse:
+def not_found_handler(request: Any, exc: HTTPException) -> JSONResponse:
     """404 in the legacy shape for EVERYTHING: unknown ``/api/*`` paths,
     unknown map ids, and missing static files (``test_api.py`` pins both
     the ``{"error": "not found"}`` body and the 404 status for
