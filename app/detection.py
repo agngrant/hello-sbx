@@ -171,7 +171,7 @@ def grid_to_thumbnail_png(grid: Grid, cell_px: int = 4) -> str:
         "floor": _THUMB_FLOOR,
         "doorway": _THUMB_DOOR,
     }
-    rows: list[tuple[int, int, int]] = []
+    rows: list[list[tuple[int, int, int]]] = []
     for _y in range(grid.height * cell_px):
         src_y = min(grid.height - 1, _y // cell_px)
         row: list[tuple[int, int, int]] = []
@@ -180,5 +180,5 @@ def grid_to_thumbnail_png(grid: Grid, cell_px: int = 4) -> str:
             r, g, b, _a = palette[grid.cells[src_y][src_x]]
             row.append((r, g, b))
         rows.append(row)
-    png = encode_png(grid.width * cell_px, grid.height * cell_px, rows)
+    png = encode_png(grid.width * cell_px, grid.height * cell_px, rows)  # type: ignore[arg-type]  # imaging.encode_png expects flat pixel list (invariant)
     return "data:image/png;base64," + base64.b64encode(png).decode("ascii")
