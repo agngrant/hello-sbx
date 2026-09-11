@@ -34,7 +34,7 @@ import json
 import os
 import re
 import time
-from typing import Any
+from typing import Any, TypeGuard
 
 from app.models import ENTITY_KINDS, TEAMS, Grid
 
@@ -83,12 +83,8 @@ def fresh_save_id(name: str) -> str:
     "Save as new" always yields a distinct row, even when two saves land
     in the same wall-clock second): the base ``<slug>-<ts>`` id bumped on
     its timestamp until the file name is free."""
-    save_id = id_for_name(name)
-    slug, _, ts = save_id.rpartition("-")
-    try:
-        ts = int(ts)
-    except ValueError:
-        ts = int(time.time())
+    slug = _slug(name)
+    ts: int = int(time.time())
     while os.path.exists(os.path.join(SAVES_DIR, f"{slug}-{ts}.json")):
         ts += 1
     return f"{slug}-{ts}"
@@ -226,7 +222,7 @@ def save_bundle(record: dict[str, Any], grid: Grid, entities: list[dict[str, Any
 # ---------------------------------------------------------------------------
 
 
-def _as_strict_int(value: Any) -> bool:
+def _as_strict_int(value: Any) -> TypeGuard[int]:
     """True iff ``value`` is a real int (bools rejected)."""
     return not isinstance(value, bool) and isinstance(value, int)
 
