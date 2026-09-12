@@ -93,7 +93,9 @@ def _recv_exact(sock: socket.socket, n: int, pre: bytearray | None = None) -> by
 def compute_accept(key: str) -> str:
     """``Sec-WebSocket-Accept`` = base64(sha1(key + magic)) (RFC 6455 §4.2.2)."""
     return base64.b64encode(
-        hashlib.sha1((key.strip() + WS_MAGIC).encode("ascii")).digest()
+        hashlib.sha1(
+            (key.strip() + WS_MAGIC).encode("ascii"), usedforsecurity=False
+        ).digest()
     ).decode("ascii")
 
 
