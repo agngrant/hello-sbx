@@ -57,7 +57,7 @@ from __future__ import annotations
 from typing import Any
 
 from app.models import Entity, Grid, Player, TEAM_COLORS
-from app.pathfinding import has_line_of_sight
+from app.pathfinding import _closed_doors, has_line_of_sight
 
 # ---------------------------------------------------------------------------
 # Player visibility model constants (§5)
@@ -212,11 +212,14 @@ def build_awareness(
     radius = viewer.awareness_radius
     if isinstance(radius, bool) or not isinstance(radius, int):
         radius = APPROX_RADIUS
+    # 5a: compute the closed-doors set ONCE per snapshot and reuse it in
+    # every LOS call below (instead of a full-grid rescan per entity).
+    closed_doors = _closed_doors(grid)
     for entity_id in sorted(entities):
         if entity_id == viewer.entity_id:
             continue
         entity = entities[entity_id]
-        if has_line_of_sight(grid, (own.x, own.y), (entity.x, entity.y)):
+        if has_line_of_sight(grid, (own.x, own.y), (entity.x, entity.y), closed_doors):
             items.append(_full_item(entity))
         elif _chebyshev(own.x, own.y, entity.x, entity.y) <= radius:
             approx_count += 1
