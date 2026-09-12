@@ -99,7 +99,7 @@ def decode_image(data: bytes) -> tuple[int, int, list[list[tuple[int, int, int, 
 def encode_png(
     width: int,
     height: int,
-    rows: list[tuple[int, int, int] | tuple[int, int, int, int]],
+    rows: list[list[tuple[int, int, int] | tuple[int, int, int, int]]],
 ) -> bytes:
     """Encode 8-bit RGB pixels as a PNG (alpha dropped → opaque RGB).
 
