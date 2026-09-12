@@ -327,6 +327,15 @@ def build_app() -> FastAPI:
             return _error_json(401, "only the GM can save")
         from app.main import sessions
         session = sessions.get("default")
+        if session is None:
+            # Defensive mirror of the "none" branch below: mypy cannot
+            # narrow `session` via `state`, and no await separates
+            # _save_role_state() from this get(), so this is unreachable
+            # at runtime — pure narrowing for the type checker.
+            return _error_json(
+                409,
+                "no active map session — join as GM and open a map first",
+            )
         if state == "none":
             # A8/E9: no live (or empty) session yet (no GM has joined/
             # opened a map in this server run) — clear, actionable.
