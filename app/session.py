@@ -125,6 +125,59 @@ DOOR_TRANSITIONS: dict[tuple[str, str], _DoorTransition] = {
     ("close", "O"): _DoorTransition(to_state="U", occupancy_guard=True),
 }
 
+
+class _SafeDoorTransition:
+    """One row of the safe-door transition table (door-iconography spec §4).
+
+    Mirrors ``_DoorTransition``: ``error`` is the deterministic
+    first-failure message (``None`` = legal), ``to_state`` the post-
+    transition state (``None`` when an error pre-empts it), and
+    ``occupancy_guard`` the force-close token check (``close`` only — a
+    GM ``lock`` from ``open`` force-closes unguarded, A14/E11).
+    """
+
+    __slots__ = ("error", "occupancy_guard", "to_state")
+
+    def __init__(
+        self,
+        error: str | None = None,
+        to_state: str | None = None,
+        occupancy_guard: bool = False,
+    ) -> None:
+        self.error = error
+        self.to_state = to_state
+        self.occupancy_guard = occupancy_guard
+
+
+#: Safe-door (stateful) transition table, keyed ``(action, current_state)``
+#: — extracted from the inline branches of ``_on_safe_door`` (stage 4b) so
+#: that method becomes a thin dispatcher. ``mark``/``unmark`` are stateless
+#: conversions (no ``current_state``), so they are handled in the dispatcher
+#: before the table lookup. The spec's §4.3 evaluation order is preserved by
+#: the dispatcher, not the table: state-legality error first, then the
+#: occupancy guard. (Note: ``(close, "L")`` reports "already closed", not
+#: "locked" — the original inline order checked ``close`` against non-``O``
+#: states before the lock-specific errors; behavior is preserved verbatim.)
+SAFE_DOOR_TRANSITIONS: dict[tuple[str, str], _SafeDoorTransition] = {
+    ("unlock", "L"): _SafeDoorTransition(to_state="U"),
+    ("unlock", "U"): _SafeDoorTransition(
+        error="safe door is already unlocked"),
+    ("unlock", "O"): _SafeDoorTransition(
+        error="safe door is already unlocked"),
+    ("lock", "L"): _SafeDoorTransition(error="safe door is already locked"),
+    ("lock", "U"): _SafeDoorTransition(to_state="L"),
+    ("lock", "O"): _SafeDoorTransition(to_state="L"),
+    ("open", "L"): _SafeDoorTransition(error="safe door is locked"),
+    ("open", "U"): _SafeDoorTransition(to_state="O"),
+    ("open", "O"): _SafeDoorTransition(error="safe door is already open"),
+    ("close", "L"): _SafeDoorTransition(
+        error="safe door is already closed"),
+    ("close", "U"): _SafeDoorTransition(
+        error="safe door is already closed"),
+    ("close", "O"): _SafeDoorTransition(
+        to_state="U", occupancy_guard=True),
+}
+
 #: Safe-room spec §5.2 (D4): the safety-rule rejection — a hostile is never
 #: moved/placed/created/team-changed onto a safe-room door cell, even under
 #: GM override.
@@ -1023,11 +1076,12 @@ class GameSession:
         state, if any, is dropped — the two records are mutually exclusive,
         I1). ``unmark`` reverts a safe door to a NORMAL door preserving the
         state (``L``→``L``, ``U``→``U``, ``O``→``O``). The state machine
-        (the normal-door machine + the mark/unmark conversions): ``L
-        ─unlock→ U ─open→ O ─close→ U``; GM ``lock`` from ``U`` or ``O``
-        (force-closes ``O``) → ``L``. On success there is NO per-client
-        reply — the ``state`` broadcast carries the new ``map.safe`` (and
-        updated ``map.doors`` for mark/unmark).
+        (the normal-door machine + the mark/unmark conversions) is driven
+        by the ``SAFE_DOOR_TRANSITIONS`` table: ``L ─unlock→ U ─open→ O
+        ─close→ U``; GM ``lock`` from ``U`` or ``O`` (force-closes ``O``)
+        → ``L``. On success there is NO per-client reply — the ``state``
+        broadcast carries the new ``map.safe`` (and updated ``map.doors``
+        for mark/unmark).
         """
         # GM-only, FIRST (the safe-door surface has NO player path — §4.2).
         if not is_gm:
@@ -1049,68 +1103,75 @@ class GameSession:
                             "action must be one of "
                             "mark/unmark/unlock/lock/open/close")}
             is_safe = self.grid.is_safe_door(x, y)
-            key = f"{x},{y}"
             if action == "mark":
-                if is_safe:
-                    return {"type": "error",
-                            "message": "already a safe door"}
-                if self._any_entity_at(x, y):
-                    return {"type": "error",
-                            "message": (
-                                "cannot mark a safe door with a token on it")}
-                # Conversion: a recorded NORMAL door is dropped (mutual
-                # exclusion, I1) before the safe record is written — the
-                # new safe door STARTS LOCKED ("L", the secure default, §3.4).
-                if (self.grid.doors or {}).get(key) is not None:
-                    assert self.grid.doors is not None
-                    self.grid.doors = dict(self.grid.doors)
-                    del self.grid.doors[key]  # type: ignore[index]
-                self.grid.set_safe_door(x, y, "L")
+                err = self._safe_door_mark(x, y, is_safe)
             elif action == "unmark":
-                if not is_safe:
-                    return {"type": "error", "message": "not a safe door"}
-                self.grid.unmark_safe_door(x, y)  # preserves L/U/O (§3.5)
-            else:  # unlock / lock / open / close
-                if not is_safe:
-                    return {"type": "error", "message": "not a safe door"}
-                cur = self.grid.safe_door_state_at(x, y)  # "L" | "U" | "O"
-                if cur is None:
-                    return {"type": "error",
-                            "message": "not a safe door"}
-                if action == "open" and cur == "O":
-                    return {"type": "error",
-                            "message": "safe door is already open"}
-                if action == "open" and cur == "L":
-                    return {"type": "error",
-                            "message": "safe door is locked"}
-                if action == "close" and cur != "O":
-                    return {"type": "error",
-                            "message": "safe door is already closed"}
-                if action == "close" and self._any_entity_at(x, y):
-                    return {"type": "error",
-                            "message": (
-                                "cannot close a door with a token on it")}
-                if not isinstance(cur, str):
-                    return {"type": "error",
-                            "message": "safe door state unavailable"}
-                if action == "unlock" and cur != "L":
-                    return {"type": "error",
-                            "message": "safe door is already unlocked"}
-                if action == "lock" and cur == "L":
-                    return {"type": "error",
-                            "message": "safe door is already locked"}
-                # NOTE: ``lock`` from ``O`` force-closes and is NOT
-                # occupancy-guarded (A14 / E11 — the door was already
-                # open/walkable; a hostile can't be on it anyway).
-                new_state = {
-                    ("unlock", "L"): "U",
-                    ("lock", "U"): "L",
-                    ("lock", "O"): "L",
-                    ("open", "U"): "O",
-                    ("close", "O"): "U",
-                }[(action, cur)]  # type: ignore[invalid-index]
-                self.grid.set_safe_door(x, y, new_state)
+                err = self._safe_door_unmark(x, y, is_safe)
+            else:  # unlock / lock / open / close — table-driven (§4.3)
+                err = self._safe_door_set(x, y, action)
+            if err is not None:
+                return err
             self._run_b(self._broadcast())
+        return None
+
+    def _safe_door_mark(
+        self, x: int, y: int, is_safe: bool
+    ) -> dict[str, Any] | None:
+        """``mark``: record the doorway as a safe door, STARTING LOCKED
+        ("L", the secure default, §3.4); returns an error dict or None.
+
+        A recorded NORMAL door is dropped first (mutual exclusion, I1) —
+        the two records are mutually exclusive.
+        """
+        key = f"{x},{y}"
+        if is_safe:
+            return {"type": "error", "message": "already a safe door"}
+        if self._any_entity_at(x, y):
+            return {"type": "error",
+                    "message": "cannot mark a safe door with a token on it"}
+        if (self.grid.doors or {}).get(key) is not None:
+            assert self.grid.doors is not None
+            self.grid.doors = dict(self.grid.doors)
+            del self.grid.doors[key]  # type: ignore[index]
+        self.grid.set_safe_door(x, y, "L")
+        return None
+
+    def _safe_door_unmark(
+        self, x: int, y: int, is_safe: bool
+    ) -> dict[str, Any] | None:
+        """``unmark``: revert the safe door to a NORMAL door, preserving the
+        state (``L``→``L``, ``U``→``U``, ``O``→``O``); returns an error dict
+        or None.
+        """
+        if not is_safe:
+            return {"type": "error", "message": "not a safe door"}
+        self.grid.unmark_safe_door(x, y)  # preserves L/U/O (§3.5)
+        return None
+
+    def _safe_door_set(self, x: int, y: int, action: Any) -> dict[str, Any] | None:
+        """Table-driven unlock/lock/open/close on the safe door at
+        ``(x, y)`` (state machine, spec §4.3); returns an error dict or None.
+        """
+        cur = self.grid.safe_door_state_at(x, y)  # "L" | "U" | "O"
+        if cur is None:
+            return {"type": "error", "message": "not a safe door"}
+        # The table is exhaustive: ``safe_door_state_at`` only returns
+        # ``"L" | "U" | "O" | None`` and the action is one of the four
+        # set-actions, so every ``(action, cur)`` has a row — a KeyError
+        # here would signal a corrupt table, not a reachable state.
+        row = SAFE_DOOR_TRANSITIONS[(action, cur)]
+        if row.error is not None:
+            return {"type": "error", "message": row.error}
+        if row.occupancy_guard and self._any_entity_at(x, y):
+            return {"type": "error",
+                    "message": "cannot close a door with a token on it"}
+        # ``to_state`` is always a str on a non-error row (``error`` and
+        # ``to_state`` are mutually exclusive per row) — type-checker only.
+        assert row.to_state is not None
+        # NOTE: ``lock`` from ``O`` force-closes and is NOT occupancy-guarded
+        # (A14 / E11 — the door was already open/walkable; a hostile can't
+        # be on it anyway).
+        self.grid.set_safe_door(x, y, row.to_state)
         return None
 
     def _any_entity_at(self, x: int, y: int) -> bool:
