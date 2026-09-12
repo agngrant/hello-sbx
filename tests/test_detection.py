@@ -10,7 +10,7 @@ from __future__ import annotations
 import unittest
 
 from app.detection import classify_doors, detect_grid
-from app.imaging import decode_image, encode_png, to_gray
+from app.imaging import encode_png, to_gray
 from app.models import Grid
 
 # Reuse the hand-crafted multi-channel PNG builder from the imaging tests

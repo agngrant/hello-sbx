@@ -55,9 +55,7 @@ from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException
-from starlette.responses import PlainTextResponse
 from starlette.staticfiles import StaticFiles
-from starlette.types import Receive, Scope, Send
 
 from app.detection import detect_grid, grid_to_thumbnail_png
 from app.generation import GEN_MAX_EDGE, GEN_MIN_EDGE, generate_grid
@@ -75,7 +73,6 @@ from app.main import (
     _unique_map_id,
 )
 from app.models import CELL_TYPES, Grid
-from app.session import GameSession
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 STATIC_DIR = os.path.join(BASE_DIR, "static")

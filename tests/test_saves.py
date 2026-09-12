@@ -20,7 +20,6 @@ test cleanup owns it).
 
 from __future__ import annotations
 
-import asyncio
 import json
 import os
 import shutil
@@ -28,7 +27,7 @@ import tempfile
 import unittest
 
 from app import saves as save_store
-from app.models import ENTITY_KINDS, Entity, Grid, Player, TEAMS
+from app.models import Entity, Grid
 from app.session import GameSession
 from tests.test_session import FakeConn, attach, drive
 

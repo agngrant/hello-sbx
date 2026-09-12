@@ -15,7 +15,6 @@ from __future__ import annotations
 import unittest
 
 from app.grid import build_sample_map
-from app.models import Grid
 from app.session import GameSession, NO_ROUTE
 from tests.test_session import (
     FakeConn,
