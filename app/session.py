@@ -42,7 +42,7 @@ import threading
 from typing import Any
 
 from app.awareness import AWARENESS_MAX, AWARENESS_MIN, build_awareness
-from app.models import CELL_TYPES, DOOR_STATES, TEAMS, Entity, Grid, Player
+from app.models import CELL_TYPES, TEAMS, Entity, Grid, Player
 from app.pathfinding import find_path
 from app.visibility import build_visibility_mask, visible_cells
 
@@ -80,6 +80,50 @@ DOOR_ACTIONS = ("unlock", "lock", "open", "close")
 #: is no player path, and safe doors now carry a lock state (``L``/``U``/``O``,
 #: same model as normal doors — door-iconography §3, A1).
 SAFE_DOOR_ACTIONS = ("mark", "unmark", "unlock", "lock", "open", "close")
+
+
+class _DoorTransition:
+    """One row of the door transition table (door-features spec §4.1).
+
+    ``error``: deterministic first-failure message (``None`` = the transition
+    is legal). ``to_state``: the post-transition door state (``None`` when an
+    error pre-empts it). ``occupancy_guard``: the transition force-closes the
+    door, so a token on it is rejected (A5) — set for ``close`` and GM
+    ``lock`` from ``open`` only.
+    """
+
+    __slots__ = ("error", "occupancy_guard", "to_state")
+
+    def __init__(
+        self,
+        error: str | None = None,
+        to_state: str | None = None,
+        occupancy_guard: bool = False,
+    ) -> None:
+        self.error = error
+        self.to_state = to_state
+        self.occupancy_guard = occupancy_guard
+
+
+#: Door transition table, keyed ``(action, current_state)`` — extracted from
+#: the inline branches of ``_on_door`` (stage 4a) so that method becomes a
+#: thin dispatcher. The spec's §4.3 evaluation order is preserved by the
+#: dispatcher, not the table: state-legality error first, then the GM-only
+#: role gate, then the occupancy guard.
+DOOR_TRANSITIONS: dict[tuple[str, str], _DoorTransition] = {
+    ("unlock", "L"): _DoorTransition(to_state="U"),
+    ("unlock", "U"): _DoorTransition(error="door is already unlocked"),
+    ("unlock", "O"): _DoorTransition(error="door is already unlocked"),
+    ("lock", "L"): _DoorTransition(error="door is already locked"),
+    ("lock", "U"): _DoorTransition(to_state="L"),
+    ("lock", "O"): _DoorTransition(to_state="L", occupancy_guard=True),
+    ("open", "L"): _DoorTransition(error="door is locked"),
+    ("open", "U"): _DoorTransition(to_state="O"),
+    ("open", "O"): _DoorTransition(error="door is already open"),
+    ("close", "L"): _DoorTransition(error="door is locked"),
+    ("close", "U"): _DoorTransition(error="door is already closed"),
+    ("close", "O"): _DoorTransition(to_state="U", occupancy_guard=True),
+}
 
 #: Safe-room spec §5.2 (D4): the safety-rule rejection — a hostile is never
 #: moved/placed/created/team-changed onto a safe-room door cell, even under
@@ -918,51 +962,27 @@ class GameSession:
                 return {"type": "error",
                         "message": "action must be one of unlock/lock/open/close"}
             cur = self.grid.door_state_at(x, y)  # "L" | "U" | "O"
-            # Transition legality (before role, so a state failure is the
-            # more informative one — spec §4.3). The occupancy guard runs
-            # AFTER the role check (§4.3 orders role #6 before occupancy
-            # #7): it fires on exactly the transitions that make the door
-            # CLOSED (``close``, and GM ``lock`` from ``open`` — A5), never
-            # on ``lock`` from ``unlocked`` (already closed).
-            if action == "open" and cur == "O":
-                return {"type": "error", "message": "door is already open"}
-            if action == "open" and cur == "L":
-                return {"type": "error", "message": "door is locked"}
-            if action == "close" and cur == "L":
-                return {"type": "error", "message": "door is locked"}
-            if action == "close" and cur != "O":
-                return {"type": "error", "message": "door is already closed"}
-            if action == "close" and self._any_entity_at(x, y):
-                return {"type": "error",
-                        "message": "cannot close a door with a token on it"}
-            if action == "unlock" and cur != "L":
-                return {"type": "error", "message": "door is already unlocked"}
-            if action == "lock" and cur == "L":
-                return {"type": "error", "message": "door is already locked"}
-            # Role: unlock/lock are GM-only (open/close already gated by the
-            # locked/unlocked state above, so a locked door reports
-            # "door is locked" even for a player). §4.3 orders this BEFORE
-            # occupancy, so a player `lock` on an open+token door reports
-            # "not allowed", never the occupancy string (BUG-DOORS-002).
+            # Non-None here: the doorway + non-safe-door guards above are the
+            # only two cases door_state_at returns None for (type narrowing).
+            assert cur is not None
+            # Table dispatch: state-legality first (§4.3), then the GM-only
+            # role gate (BEFORE occupancy, BUG-DOORS-002), then the
+            # occupancy guard for force-closing transitions (A5).
+            row = DOOR_TRANSITIONS.get((str(action), cur))
+            if row is None:
+                return {"type": "error", "message": "illegal door transition"}
+            if row.error is not None:
+                return {"type": "error", "message": row.error}
             if action in ("unlock", "lock") and not is_gm:
                 return {"type": "error", "message": NOT_ALLOWED}
-            # Occupancy (A5, §4.3 #7): `lock` from `open` force-closes →
-            # same occupancy guard as `close`. Only a GM can reach this —
-            # the role check above runs first.
-            if action == "lock" and cur == "O" and self._any_entity_at(x, y):
+            if row.occupancy_guard and self._any_entity_at(x, y):
                 return {"type": "error",
                         "message": "cannot close a door with a token on it"}
-            if action not in DOOR_ACTIONS or cur not in DOOR_STATES:
-                return {"type": "error",
-                        "message": "illegal door transition"}
-            new_state = {
-                ("unlock", "L"): "U",
-                ("open", "U"): "O",
-                ("close", "O"): "U",
-                ("lock", "U"): "L",
-                ("lock", "O"): "L",
-            }[(action, cur)]  # type: ignore[invalid-index]
-            self.grid.set_door(x, y, new_state)
+            # Legal rows always carry a to_state (error/to_state are mutually
+            # exclusive in the table); this guard is for mypy only.
+            if row.to_state is None:
+                return {"type": "error", "message": "illegal door transition"}
+            self.grid.set_door(x, y, row.to_state)
             self._run_b(self._broadcast())
         return None
 
