@@ -16,17 +16,6 @@ import unittest
 
 from app.grid import build_sample_map
 from app.models import Grid
-from app.session import GameSession
-from tests.test_session import (
-    FakeConn,
-    attach,
-    drive,
-    make_grid,
-    oracle_visible,
-    s_cells,
-)
-
-from app.models import Grid
 from app.session import GameSession, NO_ROUTE
 from tests.test_session import (
     FakeConn,
