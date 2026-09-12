@@ -16,12 +16,12 @@ import unittest
 
 from app.grid import build_sample_map
 from app.session import GameSession, NO_ROUTE
+from tests.oracles import oracle_visible
 from tests.test_session import (
     FakeConn,
     attach,
     drive,
     make_grid,
-    oracle_visible,
     s_cells,
 )
 
