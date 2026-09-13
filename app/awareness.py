@@ -54,6 +54,7 @@ if set, always overrides the team-derived color.
 
 from __future__ import annotations
 
+from threading import RLock
 from typing import Any
 
 from app.models import Entity, Grid, Player, TEAM_COLORS
@@ -141,7 +142,102 @@ def _full_item(entity: Entity) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
+# ---------------------------------------------------------------------------
+# Per-viewer snapshot memoization (stage 5c)
+# ---------------------------------------------------------------------------
+
+#: FIFO eviction bound for the memo table (entries).
+_AWARENESS_CACHE_MAX = 256
+
+#: Memo table: cache key -> (grid object the entry was built from, items).
+#: The grid object is retained so a later ``id()`` reuse by a *different*
+#: Grid can never alias an old entry (verified on lookup by identity,
+#: below). The table is shared across sessions -- every ``GameSession``
+#: already serialises snapshot construction on its own RLock; this lock
+#: additionally covers cross-session and worker-thread callers (REST
+#: offload). The values are pure function outputs: nothing ever mutates
+#: the returned list or its item dicts, so a hit hands the cached list
+#: out as-is (byte-identical wire, by construction).
+_AWARENESS_CACHE: dict[tuple[Any, ...], tuple[Grid | None, list[dict[str, Any]]]] = {}
+_AWARENESS_CACHE_LOCK = RLock()
+
+
+def _awareness_cache_key(
+    viewer: Player,
+    entities: dict[str, Entity],
+    grid: Grid | None,
+) -> tuple[Any, ...]:
+    """Cache key = exactly what :func:`_build_awareness_uncached` reads.
+
+    * grid: ``(id(grid), grid.revision, doors-signature, safe-signature)``
+      -- every grid mutation bumps ``grid.revision`` (stage 5b invariant),
+      and the door/safe signatures additionally pin the content the LOS
+      builder reads directly, so even a raw in-place door mutation that
+      skips ``bump_revision`` invalidates the entry; retaining the object
+      (checked by identity on lookup) pins the key against ``id()`` reuse
+      after GC (``use_map`` installs a fresh Grid at revision 0).
+    * viewer: role, anchor ``entity_id``, and the effective awareness
+      radius (a non-int/bool value normalises to :data:`APPROX_RADIUS`
+      inside the builder, so the key normalises identically).
+    * entities: every entity's id + the attributes the builder reads
+      (x, y, name, kind, team, color) -- entity moves are NOT grid
+      revisions, so positions must live in the key.
+    """
+    radius = viewer.awareness_radius
+    if isinstance(radius, bool) or not isinstance(radius, int):
+        radius = APPROX_RADIUS
+    return (
+        None if grid is None else (
+            id(grid),
+            grid.revision,
+            # Door/safe state signature: guards against raw in-place grid
+            # mutation (e.g. ``grid.doors = {...}``) that does NOT bump
+            # ``grid.revision``; the LOS builder reads ``grid.doors`` and
+            # ``grid.safe`` directly, so their content must live in the key.
+            tuple(sorted((grid.doors or {}).items())),
+            tuple(sorted((grid.safe or {}).items())),
+        ),
+        viewer.role,
+        viewer.entity_id,
+        radius,
+        tuple(
+            (entity_id, e.x, e.y, e.name, e.kind, e.team, e.color)
+            for entity_id, e in sorted(entities.items())
+        ),
+    )
+
+
 def build_awareness(
+    viewer: Player,
+    entities: dict[str, Entity],
+    grid: Grid | None = None,
+) -> list[dict[str, Any]]:
+    """Memoized entry point for :func:`_build_awareness_uncached`.
+
+    Repeated snapshots for the same viewer while the grid revision, door
+    state, and every entity's position/attributes are unchanged reuse the
+    cached item list instead of re-running line-of-sight filtering. The key
+    (see :func:`_awareness_cache_key`) captures every input the builder
+    reads -- entity moves mutate the key even though they do not touch
+    ``grid.revision`` -- so a cache hit is always byte-identical to a
+    fresh build. Callers hold the session lock (all ``GameSession``
+    snapshot paths do, under the RLock); the module lock additionally
+    serialises cross-session / worker-thread access to the table.
+    """
+    key = _awareness_cache_key(viewer, entities, grid)
+    with _AWARENESS_CACHE_LOCK:
+        entry = _AWARENESS_CACHE.get(key)
+        if entry is not None and entry[0] is grid:
+            return entry[1]
+    items = _build_awareness_uncached(viewer, entities, grid)
+    with _AWARENESS_CACHE_LOCK:
+        _AWARENESS_CACHE[key] = (grid, items)
+        while len(_AWARENESS_CACHE) > _AWARENESS_CACHE_MAX:
+            _AWARENESS_CACHE.pop(next(iter(_AWARENESS_CACHE)))
+    return items
+
+
+def _build_awareness_uncached(
     viewer: Player,
     entities: dict[str, Entity],
     grid: Grid | None = None,
