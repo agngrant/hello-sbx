@@ -1258,7 +1258,10 @@ class TestIdAllocationGap(unittest.TestCase):
         # increments a counter (the old bug recomputed the same value).
         import inspect
 
-        self.assertIn("n += 1", inspect.getsource(self.session.join))
+        # Stage 4c moved the join-side token allocation out of ``join``
+        # into ``_assign_player_token`` — point the guard at the real site.
+        self.assertIn("n += 1",
+                      inspect.getsource(self.session._assign_player_token))
         self.assertIn("n += 1", inspect.getsource(self.session._on_create_entity))
 
         # e1 = the player's starting token (GM is a pure controller: no token).
