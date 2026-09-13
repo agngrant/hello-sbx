@@ -772,6 +772,12 @@ async def _handle_paint(map_id: str, request: Any) -> JSONResponse:
     # paint floor/wall over a door → state deleted). The response shape is
     # unchanged (frozen) — a subsequent GET reflects the door state.
     grid.sync_doors_after_cell_set(x, y)
+    # Stage 5b: the REST paint mutates the grid OUTSIDE any session (REST
+    # maps live in the registry, not in a GameSession) — bump the revision so
+    # a session later opened on this map (which resets to the grid's current
+    # revision) serializes the wire form fresh. The registry's own GET
+    # re-reads cells each request, so no cache is involved here.
+    grid.bump_revision()
     return JSONResponse(
         {"ok": True, "x": x, "y": y, "cell_type": cell_type},
         headers={"Cache-Control": "no-store"},

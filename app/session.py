@@ -233,6 +233,12 @@ class GameSession:
         # for token-less players; cleared on ``use_map`` (D3); pruned on
         # ``leave`` (D6). GMs never get an entry (D4).
         self._explored: dict[str, set[tuple[int, int]]] = {}
+        # stage 5b: the grid wire-form cache — a (grid.revision, wire-dict)
+        # pair, rebuilt only when the grid object or its revision changes
+        # (every paint / door / safe mutation bumps grid.revision via
+        # Grid.bump_revision; use_map installs a fresh object at revision 0),
+        # so an unchanged grid serializes once and is reused per snapshot.
+        self._grid_wire: tuple[int, dict[str, Any]] | None = None
 
     # ------------------------------------------------------------------
     # Connection bookkeeping
@@ -517,17 +523,7 @@ class GameSession:
         """
         is_gm = viewer.role == "gm"
         own = self.entities.get(viewer.entity_id) if viewer.entity_id else None
-        map_dict = self.grid.to_dict()
-        doors_wire = self.grid.doors_for_wire()
-        if doors_wire is not None:
-            map_dict["doors"] = doors_wire
-        # Additive (safe-room spec §8.1, I5): the safe object — every
-        # safe-door cell's current state — whenever the grid has >= 1 safe
-        # door (``to_dict`` already carries it; this is the explicit wire
-        # policy point, disjoint from map.doors which skips safe cells).
-        safe_wire = self.grid.safe_for_wire()
-        if safe_wire is not None:
-            map_dict["safe"] = safe_wire
+        map_dict = self._grid_wire_form()
         payload: dict[str, Any] = {
             "type": "state",
             "map": map_dict,
@@ -540,6 +536,36 @@ class GameSession:
         if not is_gm:
             payload["visibility"] = self._visibility_for(viewer, own)
         return payload
+
+    def _grid_wire_form(self) -> dict[str, Any]:
+        """The grid's wire form, cached on (grid, revision) — stage 5b.
+
+        ``to_dict`` is O(w*h) and used to run on EVERY per-viewer snapshot
+        even when the grid was untouched; the wire dict is now built once
+        per grid revision and reused until the grid mutates (every mutation
+        — WS paint, REST paint, doors, safe — bumps ``grid.revision`` via
+        :meth:`~app.models.Grid.bump_revision`). The ``doors``/``safe``
+        objects keep their per-call fresh-copy semantics (spec §8.1): the
+        cached dict is shallow-copied and the additive keys swapped with
+        fresh dicts here, so cached references never leak. Wire shape is
+        unchanged: ``to_dict`` + the identical ``doors_for_wire`` /
+        ``safe_for_wire`` additive-key logic. Caller holds ``self._lock``.
+        """
+        cached = self._grid_wire
+        if cached is None or cached[0] != self.grid.revision:
+            wire = self.grid.to_dict()
+            self._grid_wire = (self.grid.revision, wire)
+            cached = self._grid_wire
+        wire = dict(cached[1])  # shallow copy: the additive keys below swap
+                                # in fresh dicts, so the cached one is never
+                                # mutated by per-viewer assembly
+        doors = self.grid.doors_for_wire()
+        if doors is not None:
+            wire["doors"] = doors
+        safe_wire = self.grid.safe_for_wire()
+        if safe_wire is not None:
+            wire["safe"] = safe_wire
+        return wire
 
     def _visibility_for(self, viewer: Player, own: Entity | None) -> list[str]:
         """The additive ``visibility`` tier matrix for a PLAYER (spec §3.3–§3.5).
@@ -1247,6 +1273,7 @@ class GameSession:
             return {"type": "error", "message": f"unknown map: {map_id!s}"}
         with self._lock:
             self.grid = grid
+            self._grid_wire = None  # stage 5b: new grid object — invalidate
             if saved_entities is not None:
                 self.entities = self._rebuild_saved_roster(saved_entities)
             self._reposition_out_of_bounds()

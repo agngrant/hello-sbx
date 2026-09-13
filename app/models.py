@@ -109,6 +109,23 @@ class Grid:
     image: str | None = None  # filename of uploaded source image (optional)
     doors: dict[str, str] | None = None  # NORMAL doors (door-features D1)
     safe: dict[str, str] | None = None  # SAFE-room doors (safe-room D1): "<x>,<y>" -> "L"|"U"|"O"
+    # Stage 5b: monotonically increasing content revision, bumped by EVERY
+    # mutation (see ``bump_revision``); ``GridWireCache`` uses it to decide
+    # whether the last serialized wire form (cells/doors/safe) can be
+    # reused. Never serialized: to_dict/to_wire/select() don't copy it, and
+    # from_dict constructs a fresh Grid, so the wire shape is unchanged.
+    revision: int = field(default=0, repr=False)
+
+    def bump_revision(self) -> None:
+        """Advance :attr:`revision` (stage 5b): call after ANY mutation of
+        grid content — cells, ``doors``, or ``safe``.
+
+        Purely advisory bookkeeping: never raises, changes no wire-visible
+        state, and is a no-op in terms of behavior if forgotten (the worst
+        case is a stale wire cache on an undetected mutation, which the
+        documented choke points above the session lock prevent).
+        """
+        self.revision += 1
 
     def __post_init__(self) -> None:
         if len(self.cells) != self.height:
@@ -275,6 +292,7 @@ class Grid:
             raise ValueError(f"door at ({x},{y}) is a safe door")
         self.doors = dict(self.doors or {})
         self.doors[f"{x},{y}"] = state
+        self.bump_revision()  # stage 5b: door content changed
 
     def sync_doors_after_cell_set(self, x: int, y: int) -> None:
         """D4: keep ``doors`` consistent after a cell is (re)typed by paint.
@@ -307,6 +325,9 @@ class Grid:
             self.safe.pop(f"{x},{y}", None)
             if not self.safe:
                 self.safe = None
+        # stage 5b: paint + door sync changed grid content — the wire-form
+        # cache (session) must re-serialize on the next snapshot.
+        self.bump_revision()
 
     def doors_for_wire(self) -> dict[str, str] | None:
         """The full door object for the WIRE/REST (spec §8.1/§8.2, A9, I5).
@@ -396,6 +417,7 @@ class Grid:
             raise ValueError(f"door at {key!r} is a normal door, not safe")
         self.safe = dict(self.safe or {})
         self.safe[key] = state
+        self.bump_revision()  # stage 5b: safe-door content changed
 
     def unmark_safe_door(self, x: int, y: int) -> None:
         """Remove the safe marking from ``(x, y)``, reverting it to a NORMAL
@@ -418,6 +440,7 @@ class Grid:
         # Reversion to a normal door, preserving the state (L→L, U→U, O→O):
         self.doors = dict(self.doors or {})
         self.doors[key] = st
+        self.bump_revision()  # stage 5b: door record moved safe→normal
 
 
 # ---------------------------------------------------------------------------
