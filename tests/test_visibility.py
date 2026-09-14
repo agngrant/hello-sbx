@@ -37,7 +37,6 @@ from app.pathfinding import has_line_of_sight
 from app.visibility import build_visibility_mask, visible_cells
 from tests.oracles import oracle_visible
 
-
 # ---------------------------------------------------------------------------
 # Shared helpers (spec §12 "Shared helper") + grid/mask utilities
 # ---------------------------------------------------------------------------

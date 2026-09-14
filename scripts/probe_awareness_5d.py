@@ -11,7 +11,7 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from app.awareness import build_awareness, _build_awareness_uncached
+from app.awareness import _build_awareness_uncached, build_awareness
 from app.models import Entity, Grid, Player
 
 W = H = 40

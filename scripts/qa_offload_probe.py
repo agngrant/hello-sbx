@@ -34,9 +34,9 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-import app.saves as saves_mod  # noqa: E402
-from app.detection import detect_grid, grid_to_thumbnail_png  # noqa: E402
-from app.generation import generate_grid  # noqa: E402
+import app.saves as saves_mod
+from app.detection import detect_grid, grid_to_thumbnail_png
+from app.generation import generate_grid
 
 # Redirect save writes to a throwaway dir so the probe is idempotent.
 _TMP_SAVES = tempfile.mkdtemp(prefix="qa_offload_saves_")
@@ -47,6 +47,7 @@ BLOCK_THRESHOLD_MS = 50.0  # a worker op should never stall the loop this long
 
 def _make_image(w=2048, h=2048):
     import random
+
     from PIL import Image
     random.seed(7)
     im = Image.new("RGB", (w, h))

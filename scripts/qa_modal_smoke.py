@@ -20,14 +20,14 @@ import socket
 import subprocess
 import sys
 import time
-import urllib.request
 import urllib.error
+import urllib.request
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 NODE = os.environ.get("NODE", "node")
 
-from tests.wsclient import WSClient  # noqa: E402
+from tests.wsclient import WSClient
 
 FAILURES: list[str] = []
 LOG = os.path.join(ROOT, "qa_modal_smoke.log")
@@ -156,8 +156,8 @@ def main():
               and '<button id="save-delete-modal-confirm" class="btn btn-danger">Delete</button>' in html)
 
         _, js = get_text(port, "/app.js")
-        js_nc = re.sub(r"/\*.*?\*/", "", js, flags=re.S)      # strip block comments
-        js_nc = re.sub(r"^\s*//.*$", "", js_nc, flags=re.M)   # then line comments
+        js_nc = re.sub(r"/\*.*?\*/", "", js, flags=re.DOTALL)      # strip block comments
+        js_nc = re.sub(r"^\s*//.*$", "", js_nc, flags=re.MULTILINE)   # then line comments
         check("served app.js: syncSaveModal present", "function syncSaveModal" in js)
         check("served app.js: modal wiring present",
               "els.saveDeleteModalConfirm.addEventListener" in js

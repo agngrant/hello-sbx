@@ -15,7 +15,7 @@ from __future__ import annotations
 import unittest
 
 from app.grid import build_sample_map
-from app.session import GameSession, NO_ROUTE
+from app.session import NO_ROUTE, GameSession
 from tests.oracles import oracle_visible
 from tests.test_session import (
     FakeConn,
@@ -528,6 +528,7 @@ class TestDoorPerformance(unittest.TestCase):
 
     def test_full_recompute_within_budget(self):
         import time
+
         from app.generation import generate_grid
         grid = generate_grid(60, 60, "door-perf", seed=1)
         grid.doors = {
@@ -551,6 +552,7 @@ class TestDoorPerformance(unittest.TestCase):
 
     def test_find_path_across_open_doors_within_budget(self):
         import time
+
         from app.generation import generate_grid
         from app.pathfinding import find_path
         grid = generate_grid(60, 60, "door-perf", seed=1)

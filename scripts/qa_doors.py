@@ -81,10 +81,9 @@ DOORS_ALL_L = {"5,5": "L", "10,4": "L", "9,7": "L"}
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from app.awareness import build_awareness        # frozen reference (allowed)
+from app.awareness import build_awareness  # frozen reference (allowed)
 from app.models import Entity, Grid, Player
-from app.pathfinding import (_closed_doors, find_path, has_line_of_sight,
-                             is_valid_step)
+from app.pathfinding import _closed_doors, find_path, has_line_of_sight, is_valid_step
 from tests.wsclient import WSClient
 
 PASS, FAIL = "\u2713", "\u2717"

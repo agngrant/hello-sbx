@@ -44,8 +44,8 @@ from collections import deque
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 
-from app.models import Grid  # noqa: E402
-from app.pathfinding import find_path, is_valid_step  # noqa: E402
+from app.models import Grid
+from app.pathfinding import find_path, is_valid_step
 
 HOST = os.environ.get("QA_HOST", "127.0.0.1")
 PORT = int(os.environ.get("QA_PORT", "8000"))

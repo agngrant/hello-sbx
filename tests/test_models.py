@@ -12,7 +12,10 @@ import unittest
 
 from app.grid import build_sample_map
 from app.models import (
-    DOOR_STATES, SAFE_DOOR_LEGACY_STATE, SAFE_DOOR_STATES, SAFE_DOOR_TEAMS,
+    DOOR_STATES,
+    SAFE_DOOR_LEGACY_STATE,
+    SAFE_DOOR_STATES,
+    SAFE_DOOR_TEAMS,
     Grid,
 )
 
@@ -368,9 +371,8 @@ class TestSafeDoorPostInitValidation(unittest.TestCase):
         # it (only `from_dict` coerces it to "U" first); a stray "C" that
         # was not migrated is rejected.
         for bad in ("C", "X", "c", "", "l"):
-            with self.subTest(bad=bad):
-                with self.assertRaises(ValueError):
-                    _grid(_DOORS_ROWS, safe={"1,0": bad})
+            with self.subTest(bad=bad), self.assertRaises(ValueError):
+                _grid(_DOORS_ROWS, safe={"1,0": bad})
 
     def test_rejects_malformed_key_no_comma(self):
         with self.assertRaises(ValueError):
@@ -447,9 +449,8 @@ class TestSetSafeDoor(unittest.TestCase):
     def test_set_safe_door_rejects_bad_state(self):
         g = _grid(_DOORS_ROWS)
         for bad in ("X", "c"):
-            with self.subTest(bad=bad):
-                with self.assertRaises(ValueError):
-                    g.set_safe_door(1, 0, bad)
+            with self.subTest(bad=bad), self.assertRaises(ValueError):
+                g.set_safe_door(1, 0, bad)
 
     def test_set_safe_door_rejects_legacy_c(self):
         # "C" is no longer a safe-door state — the constructor/migrator is

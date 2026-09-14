@@ -4453,7 +4453,7 @@ class TestSavesAction(SavesBase):
             "s.url==='/api/saves'&&s.opts&&s.opts.method==='POST');"
             "return {url:post?post.url:null,"
             "body:post?JSON.parse(post.opts.body):null," 
-            "cleared:api.els.saveName.value===''};});"  # noqa: E501
+            "cleared:api.els.saveName.value===''};});"
         )
         d = json.loads(js(expr))
         self.assertEqual(d["url"], "/api/saves")
@@ -5556,8 +5556,8 @@ class TestSavesDelete(SavesBase):
         # Strip comments before the window.confirm check: app.js PROSE
         # mentions "No window.confirm — ..."; the guard is that no CALL
         # exists outside comments.
-        no_comments = re.sub(r"/\*.*?\*/", "", src, flags=re.S)
-        no_comments = re.sub(r"^\s*//.*$", "", no_comments, flags=re.M)
+        no_comments = re.sub(r"/\*.*?\*/", "", src, flags=re.DOTALL)
+        no_comments = re.sub(r"^\s*//.*$", "", no_comments, flags=re.MULTILINE)
         self.assertNotIn("window.confirm", no_comments,
                          "no native confirm dialog (A10)")
         self.assertEqual(src.count("deleteSave("), 2,

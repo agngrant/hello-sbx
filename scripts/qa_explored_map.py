@@ -55,7 +55,7 @@ TIMEOUT = 10.0
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from app.awareness import build_awareness          # frozen reference (allowed)
+from app.awareness import build_awareness  # frozen reference (allowed)
 from app.models import Entity, Grid, Player
 from app.pathfinding import has_line_of_sight, is_valid_step
 from tests.wsclient import WSClient

@@ -218,7 +218,7 @@ class Grid:
         return d
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> "Grid":
+    def from_dict(cls, data: dict[str, Any]) -> Grid:
         """Rebuild a :class:`Grid` from its dict form (validated).
 
         The ``doors`` key is optional: absent/``None`` ⇒ every door locked
@@ -488,7 +488,7 @@ class Entity:
         }
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> "Entity":
+    def from_dict(cls, data: dict[str, Any]) -> Entity:
         return cls(
             id=data["id"],
             name=data["name"],
@@ -543,7 +543,7 @@ class Player:
         }
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> "Player":
+    def from_dict(cls, data: dict[str, Any]) -> Player:
         # awareness_radius (0–20, default 4): out-of-range or invalid
         # values are silently clamped on read — the live "set_awareness"
         # setter enforces the same range and errors.

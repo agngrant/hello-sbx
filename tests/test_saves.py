@@ -290,10 +290,9 @@ class SavesIOTestCase(unittest.TestCase):
                 ents = [sample_entities()[0], sample_entities()[0]]
             else:
                 ents = [e]
-            with self.subTest(case=label):
-                with self.assertRaises(ValueError):
-                    save_store.load_bundle(
-                        self._write_ents(ents))
+            with self.subTest(case=label), self.assertRaises(ValueError):
+                save_store.load_bundle(
+                    self._write_ents(ents))
 
     def _write_ents(self, ents: list[dict]) -> str:
         save_id = save_store.id_for_name("case")

@@ -32,21 +32,22 @@ from app.grid import build_sample_map
 from app.models import Entity, Grid, Player
 from app.pathfinding import is_valid_step
 from app.session import (
-    GameSession,
     MAX_PLAYERS,
     NO_ROUTE,
     SESSION_FULL,
+    GameSession,
 )
 from tests.oracles import oracle_visible
 from tests.test_visibility import (
     W4_MASK,
     W4_MASK_ALL_OPEN,
     assert_well_formed,
-    cell as mask_cell,
     mask_counts,
     mask_rows,
 )
-
+from tests.test_visibility import (
+    cell as mask_cell,
+)
 
 # ---------------------------------------------------------------------------
 # Fake connection: the session registers it with attach_async(conn, conn.send)

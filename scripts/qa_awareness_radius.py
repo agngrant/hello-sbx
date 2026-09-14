@@ -62,7 +62,7 @@ import time
 # Make the repo root importable (app.*, tests.*) regardless of CWD.
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from tests.wsclient import WSClient  # noqa: E402
+from tests.wsclient import WSClient
 
 HOST, PORT = "127.0.0.1", 8000
 PASS, FAIL = "\u2713", "\u2717"

@@ -52,7 +52,7 @@ class WSClient:
 
     # -- lifecycle -----------------------------------------------------------
 
-    def connect(self) -> "WSClient":
+    def connect(self) -> WSClient:
         if self.sock is not None:
             return self  # idempotent: safe with `with self.client()`
         try:
@@ -87,7 +87,7 @@ class WSClient:
             except OSError:
                 pass
 
-    def __enter__(self) -> "WSClient":
+    def __enter__(self) -> WSClient:
         return self.connect()
 
     def __exit__(self, *exc_info: object) -> None:

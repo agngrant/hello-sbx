@@ -32,13 +32,13 @@ import subprocess
 import sys
 import threading
 import time
-import urllib.request
 import urllib.error
+import urllib.request
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 
-from tests.wsclient import WSClient  # noqa: E402
+from tests.wsclient import WSClient
 
 SAVE_NAME = "Checkpoint 1"
 PASS = "\u2713"
@@ -174,7 +174,7 @@ def ws_join(port, name, role=None):
 
 
 def close_all():
-    for mc in list(MANAGED):
+    for mc in MANAGED:
         mc.close()
 
 
@@ -628,7 +628,6 @@ def body():
         close_all()
         for p in procs.values():
             stop_server(p)
-    return None
 
 
 def main():

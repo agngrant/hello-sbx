@@ -606,8 +606,8 @@ class TestSaves(ServerTestCase):
 
     def setUp(self):
         import app.saves as save_store
-        from app.main import get_session as _gs
         from app.grid import build_sample_map
+        from app.main import get_session as _gs
         from app.models import Player
 
         self._orig_dir = save_store.SAVES_DIR
@@ -624,6 +624,7 @@ class TestSaves(ServerTestCase):
 
     def tearDown(self):
         import shutil
+
         import app.saves as save_store
         from app.main import sessions
 
@@ -707,8 +708,8 @@ class TestSaves(ServerTestCase):
     def test_gm_save_writes_bundle_to_disk(self):
         # AC1: 200 record correct AND the file is on disk with the full
         # state (grid + entities carrying owner_name = the player's NAME).
-        from app.models import Entity
         from app.main import sessions
+        from app.models import Entity
 
         s = sessions["default"]
         self._add_player("Alice", entity_id="e1")
@@ -746,8 +747,8 @@ class TestSaves(ServerTestCase):
         self.assertEqual(ent["owner_name"], "Alice")
 
     def test_gm_save_captures_gm_controlled_entities_with_null_owner_name(self):
-        from app.models import Entity
         from app.main import sessions
+        from app.models import Entity
 
         s = sessions["default"]
         s.entities["g1"] = Entity(id="g1", name="Goblin", kind="enemy",
@@ -765,8 +766,8 @@ class TestSaves(ServerTestCase):
     def test_gm_save_snapshot_is_frozen_copy(self):
         # AC17: creating a save must not mutate the live session — the grid
         # object is not swapped and the entity is not moved by the save.
-        from app.models import Entity
         from app.main import sessions
+        from app.models import Entity
 
         s = sessions["default"]
         self._add_player("Alice", entity_id="e1")

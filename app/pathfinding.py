@@ -42,7 +42,8 @@ from __future__ import annotations
 
 import heapq
 import math
-from typing import Any, Iterator
+from collections.abc import Iterator
+from typing import Any
 
 from app.models import SAFE_DOOR_TEAMS, Grid
 

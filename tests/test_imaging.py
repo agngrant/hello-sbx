@@ -10,7 +10,7 @@ from __future__ import annotations
 import struct
 import unittest
 import zlib
-from typing import Callable
+from collections.abc import Callable
 
 from app.imaging import (
     decode_image,

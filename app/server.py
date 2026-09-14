@@ -57,20 +57,20 @@ from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException
 from starlette.staticfiles import StaticFiles
 
+from app import saves as save_store
 from app.detection import detect_grid, grid_to_thumbnail_png
 from app.generation import GEN_MAX_EDGE, GEN_MIN_EDGE, generate_grid
-from app import saves as save_store
 from app.main import (
     BASE_DIR,
     MAX_BODY,
     STATIC_DIR,
+    _register_map,
+    _timestamp_map_id,
+    _unique_map_id,
     get_map_entry,
     get_session,
     maps_registry,
     slug_map_id,
-    _register_map,
-    _timestamp_map_id,
-    _unique_map_id,
 )
 from app.models import CELL_TYPES, Grid
 
@@ -933,7 +933,7 @@ class ThreadingHTTPServer:
 
     # -- ThreadingHTTPServer lifecycle ----------------------------------------
 
-    def serve_forever(self, poll_interval: float = 0.5) -> None:  # noqa: N802
+    def serve_forever(self, poll_interval: float = 0.5) -> None:
         if self._runner is None:
             self._runner = _UvicornThread(
                 self._sock,
@@ -947,11 +947,11 @@ class ThreadingHTTPServer:
             import time
             time.sleep(min(poll_interval, 0.2))
 
-    def shutdown(self) -> None:  # noqa: N802
+    def shutdown(self) -> None:
         if self._runner is not None:
             self._runner.shutdown()
 
-    def server_close(self) -> None:  # noqa: N802
+    def server_close(self) -> None:
         if self._runner is not None:
             self._runner.stop()
         else:

@@ -57,7 +57,7 @@ from __future__ import annotations
 from threading import RLock
 from typing import Any
 
-from app.models import Entity, Grid, Player, TEAM_COLORS
+from app.models import TEAM_COLORS, Entity, Grid, Player
 from app.pathfinding import _closed_doors, has_line_of_sight
 
 # ---------------------------------------------------------------------------
