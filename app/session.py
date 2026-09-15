@@ -70,7 +70,7 @@ NOT_ALLOWED = "not allowed"
 
 #: Entity kinds a GM may create (player characters are spawned by ``join``;
 #: the GM itself has NO token — docs/design/gm-controller.md §2.3).
-CREATABLE_KINDS = ("npc", "enemy")
+CREATABLE_KINDS = ("npc", "enemy", "boss")
 
 #: Door actions (docs/design/door-features.md §4/§18): the client→server
 #: ``{type:"door", x, y, action}`` message. ``unlock``/``lock`` are GM-only;
@@ -953,6 +953,9 @@ class GameSession:
         for cx, cy in footprint_cells(x, y, w, h):
             if not (0 <= cx < self.grid.width
                     and 0 <= cy < self.grid.height):
+                return {"type": "error",
+                        "message": "Boss footprint does not fit"}
+            if self.grid.cells[cy][cx] == "wall":
                 return {"type": "error",
                         "message": "Boss footprint does not fit"}
             if self._any_entity_at(cx, cy):
