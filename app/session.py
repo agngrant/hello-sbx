@@ -42,7 +42,10 @@ import threading
 from typing import Any
 
 from app.awareness import AWARENESS_MAX, AWARENESS_MIN, build_awareness
-from app.models import CELL_TYPES, TEAMS, Entity, Grid, Player
+from app.models import (
+    BOSS_FOOTPRINTS, CELL_TYPES, TEAMS, Entity, Grid, Player,
+    boss_footprint, entity_cells, footprint_cells,
+)
 from app.pathfinding import find_path
 from app.visibility import build_visibility_mask, visible_cells
 
@@ -816,6 +819,23 @@ class GameSession:
                 return {"type": "path", "entity_id": entity.id,
                         "path": [{"x": entity.x, "y": entity.y}]}
 
+            # Boss-entity spec: the mover may only stop where its FULL
+            # footprint is in-bounds and free of every OTHER entity
+            # (footprint-aware occupancy, models.entity_cells).
+            w, h = (boss_footprint(entity.size)
+                    if entity.kind == "boss" else (1, 1))
+            for cx, cy in footprint_cells(x, y, w, h):
+                if not (0 <= cx < self.grid.width
+                        and 0 <= cy < self.grid.height):
+                    return {"type": "error",
+                            "message": "destination out of bounds"}
+                for o in self.entities.values():
+                    if o is entity:
+                        continue
+                    if (cx, cy) in entity_cells(o):
+                        return {"type": "error",
+                                "message": "destination occupied"}
+
             if override:
                 # GM "ignore walls": direct move to the target, walls
                 # ignored — EXCEPT the safe-room safety rule (safe-room
@@ -889,6 +909,16 @@ class GameSession:
         if x is None or y is None:
             return {"type": "error", "message": "x and y must be integers"}
         with self._lock:
+            # Boss (boss-entity spec §Grid validity): a boss may only spawn
+            # where its FULL W×H footprint is in-bounds and free of other
+            # entities; any other cell fails with the spec's exact message.
+            if kind == "boss":
+                err = self._spawn_boss(name.strip(), team, x, y,
+                                       size=_as_int(msg.get("size", 2)))
+                if err:
+                    return err
+                self._run_b(self._broadcast())
+                return None
             if not (0 <= x < self.grid.width and 0 <= y < self.grid.height):
                 return {"type": "error", "message": "destination out of bounds"}
             # Safe-room spec §5.2 (D4): a hostile is never CREATED on a
@@ -906,6 +936,37 @@ class GameSession:
                 x=x, y=y, owner=None,
             )
             self._run_b(self._broadcast())
+        return None
+
+    def _spawn_boss(self, name: str, team: str, x: int, y: int,
+                    size: int | None = 2) -> dict[str, Any] | None:
+        """Create a boss token whose FULL footprint fits; None on success.
+
+        Boss-entity spec §Grid validity: the boss's anchor is its top-left
+        corner and every cell of its W×H footprint must be in-bounds and
+        unoccupied by another entity, else fail with the exact message
+        ``"Boss footprint does not fit"``.
+        """
+        if size not in BOSS_FOOTPRINTS:
+            return {"type": "error", "message": "Boss footprint does not fit"}
+        w, h = BOSS_FOOTPRINTS[size]
+        for cx, cy in footprint_cells(x, y, w, h):
+            if not (0 <= cx < self.grid.width
+                    and 0 <= cy < self.grid.height):
+                return {"type": "error",
+                        "message": "Boss footprint does not fit"}
+            if self._any_entity_at(cx, cy):
+                return {"type": "error",
+                        "message": "Boss footprint does not fit"}
+        n = len(self.entities)
+        eid = f"e{n + 1}"
+        while eid in self.entities:
+            n += 1
+            eid = f"e{n + 1}"
+        self.entities[eid] = Entity(
+            id=eid, name=name, kind="boss", team=team,
+            x=x, y=y, owner=None, size=size,
+        )
         return None
 
     def _on_delete_entity(self, msg: dict[str, Any]) -> dict[str, Any] | None:
@@ -1219,8 +1280,13 @@ class GameSession:
         return None
 
     def _any_entity_at(self, x: int, y: int) -> bool:
-        """True if any entity occupies ``(x, y)`` (D3 occupancy guard)."""
-        return any(e.x == x and e.y == y for e in self.entities.values())
+        """True if any entity's footprint covers cell (x, y).
+
+        Boss-entity spec: a boss occupies every cell of its W×H footprint
+        (models.entity_cells), not just its anchor cell.
+        """
+        return any(cell == (x, y) for e in self.entities.values()
+                   for cell in entity_cells(e))
 
     def _on_set_fog(self, msg: dict[str, Any]) -> dict[str, Any] | None:
         # Wire compatibility: the ``fog`` flag is stored and broadcast, but
