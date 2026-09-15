@@ -33,7 +33,7 @@ ROLES = ("gm", "player")
 #: still load old data without crashing — the GM is now a pure controller
 #: with no token, so it is never spawned and never creatable again
 #: (docs/design/gm-controller.md §2.7; PROJECT.md §4 PM decision).
-ENTITY_KINDS = ("player", "npc", "enemy", "gm_character")
+ENTITY_KINDS = ("player", "npc", "enemy", "boss", "gm_character")
 
 #: Team → awareness color (base rule; an explicit ``Entity.color`` wins if
 #: set). Iteration 5 (awareness.py) builds on this; the frontend mirrors it.
@@ -84,6 +84,40 @@ SAFE_DOOR_LEGACY_STATE = "C"
 #: characters) and ``neutral`` (neutral NPCs) may step onto / stand on a
 #: safe door; the only team excluded is ``hostile``.
 SAFE_DOOR_TEAMS = frozenset({"party", "neutral"})
+
+
+# ---------------------------------------------------------------------------
+# Boss entity footprints (docs/specs/boss-entity.md §2)
+# ---------------------------------------------------------------------------
+
+#: Valid boss size variants, in TILES (spec §2): the six footprints the
+#: spec pins — 2 → 2×1, 4 → 2×2, 6 → 2×3, 8 → 2×4, 10 → 2×5, 12 → 3×4
+#: (W×H tiles). A boss is anchored at its TOP-LEFT tile and occupies the
+#: full W×H rectangle.
+BOSS_FOOTPRINTS = (2, 4, 6, 8, 10, 12)
+
+#: Tile dimensions ``(w, h)`` for each boss size variant (spec §2 table).
+BOSS_FOOTPRINT_CELLS: dict[int, tuple[int, int]] = {
+    2: (2, 1),
+    4: (2, 2),
+    6: (2, 3),
+    8: (2, 4),
+    10: (2, 5),
+    12: (3, 4),
+}
+
+
+def boss_footprint_cells(tiles: int | None) -> tuple[int, int]:
+    """The ``(w, h)`` tile footprint for a boss size variant (spec §2).
+
+    Raises ``ValueError`` for any value outside :data:`BOSS_FOOTPRINTS`.
+    """
+    try:
+        return BOSS_FOOTPRINT_CELLS[tiles]
+    except (KeyError, TypeError):
+        raise ValueError(
+            f"boss footprint must be one of {BOSS_FOOTPRINTS} (tiles), "
+            f"got {tiles!r}") from None
 
 
 # ---------------------------------------------------------------------------
@@ -468,15 +502,38 @@ class Entity:
     # (GameSession.join). NEVER serialized by to_dict — the wire payloads
     # stay frozen (A10). Additive/optional: to_dict/from_dict are unchanged.
     owner_name: str | None = None
+    # Boss size variant in TILES (2, 4, 6, 8, 10, 12 — docs/specs/boss-entity.md);
+    # ``None`` for every other kind (which occupies one 1x1 cell). Serialised by
+    # to_dict ONLY for bosses (additive field); validated in ``__post_init__``.
+    footprint: int | None = None
 
     def __post_init__(self) -> None:
         if self.kind not in ENTITY_KINDS:
             raise ValueError(f"invalid entity kind {self.kind!r}")
         if self.team not in TEAMS:
             raise ValueError(f"invalid team {self.team!r}")
+        # Bosses (docs/specs/boss-entity.md) must pick one of the six size
+        # variants; every other kind is strictly 1x1 and carries no footprint.
+        if self.kind == "boss":
+            if self.footprint not in BOSS_FOOTPRINTS:
+                raise ValueError(
+                    f"boss footprint must be one of {BOSS_FOOTPRINTS} (tiles), "
+                    f"got {self.footprint!r}"
+                )
+        elif self.footprint is not None:
+            raise ValueError(
+                f"footprint is only valid for boss entities, got {self.footprint!r}"
+            )
+
+    @property
+    def footprint_cells(self) -> tuple[int, int]:
+        """Occupied cells as ``(w, h)`` — always ``(1, 1)`` except bosses."""
+        if self.kind == "boss":
+            return boss_footprint_cells(self.footprint)
+        return (1, 1)
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        d: dict[str, Any] = {
             "id": self.id,
             "name": self.name,
             "kind": self.kind,
@@ -486,9 +543,17 @@ class Entity:
             "owner": self.owner,
             "color": self.color,
         }
+        # Additive field: only bosses (docs/specs/boss-entity.md) carry a size
+        # variant; other kinds stay byte-identical for older clients.
+        if self.kind == "boss":
+            d["footprint"] = self.footprint
+        return d
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> Entity:
+        # Additive optional field (docs/specs/boss-entity.md): older saves
+        # without it keep their byte-identical shape; absence = 1x1.
+        fp = data.get("footprint")
         return cls(
             id=data["id"],
             name=data["name"],
@@ -498,6 +563,7 @@ class Entity:
             y=int(data["y"]),
             owner=data.get("owner"),
             color=data.get("color"),
+            footprint=int(fp) if fp is not None else None,
         )
 
 
