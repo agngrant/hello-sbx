@@ -1452,8 +1452,28 @@ function drawGridOnCanvas(canvas, ctx, visibility = null, view = null) {
   //    Unchanged by the explored map. Under pan/zoom (§6.1) the entities are
   //    culled to the visible render window (the single (s, ox, oy) origin).
   if (canvas.id === "map-canvas") {
-    drawEntitiesAndDots(ctx, s, ox, oy, { x0, x1, y0, y1 });
-  }
+    // Boss entities (boss-entity spec): one footprint blob + one skull per
+    // visible boss — above floor/grid (and walls/doors, which may share the
+    // footprint cells), below the awareness dots/tokens that follow. Cull by
+    // OVERLAP with the render window (§6.1): a blob whose anchor is just
+    // off-window but whose footprint straddles the edge still draws and
+    // clips at the canvas edge. Static draw only (no animation), so
+    // reducedMotion is honored trivially.
+    const W = (e) => e.W || 1, H = (e) => e.H || 1;
+    for (const e of allEntities()) {
+      if (e.kind !== "boss") continue;
+      const overlaps = (e.x < x1 && e.x + W(e) > x0 &&
+                        e.y < y1 && e.y + H(e) > y0);
+      if (!overlaps) continue;
+      const eTier = tier(e.x, e.y) === "E";   // §4.1 colors from the anchor tier
+      drawBoss(ctx, e, s, ox, oy, eTier);
+      // §4.1 per-footprint skull center (anchor cells): 2×2 → (0.3, 0.35),
+      // 1×1 → (0.3, 0.35), 1×2 → (0.3, 1.35), 2×1 → (0.3, 0.35).
+      const dy = (H(e) === 2 && W(e) === 1) ? 1.35 : 0.35;
+      drawSkull(ctx, eTier ? "#6b7280" : "#111111",
+        ox + (e.x + 0.3) * s, oy + (e.y + dy) * s, s * 0.35);
+    }
+    drawEntitiesAndDots(ctx, s, ox, oy, { x0, x1, y0, y1 });  }
 }
 
 /* ───────────────────────────── Awareness rings (canvas, §4) ─────────────────────────────
@@ -1607,6 +1627,84 @@ function drawEntitiesAndDots(ctx, s, ox, oy, win) {
       ctx.strokeRect(hx + 1, hy + 1, s - 2, s - 2);
     }
   }
+}
+
+/* ───────────────────────────── Boss entity (boss-entity spec §2/§4) ─────────────────────────────
+   One boss = one rounded footprint blob + one skull, both pure canvas (no
+   assets). drawBoss: a roundRect over the boss's W×H footprint (W/H from
+   its anchor; 2×2 → 1×1 → 1×2 → 2×1), fill T.enemy (E tier: #8a5a5e),
+   2px T.dotStroke stroke, corner radius 0.14×min(W,H) tiles, interior grid
+   lines dimmed to 30% alpha (T.gridLineDim) inside the blob. drawSkull:
+   a line-skull (dome, two eye sockets, nose triangle, two jaw ticks) in
+   #111111 (E tier: #6b7280), size 0.35×min(tileW,tileH) — tiles are square
+   (s from the view), so 0.35×s — centered at spec §4.1 (offsets in anchor
+   cells). Static draw only (no animation), so reducedMotion needs no
+   special handling. */
+function drawBoss(ctx, e, s, ox, oy, eTier) {
+  const W = e.W || 1, H = e.H || 1;
+  const px = ox + e.x * s, py = oy + e.y * s;
+  const r = 0.14 * Math.min(W, H) * s;
+  roundRect(ctx, px, py, W * s, H * s, r);
+  ctx.fillStyle = eTier ? "#8a5a5e" : T.enemy;
+  ctx.fill();
+  // Dim the interior grid lines to 30% alpha (boss spec §2).
+  ctx.save();
+  roundRect(ctx, px, py, W * s, H * s, r);
+  ctx.clip();
+  ctx.strokeStyle = T.gridLineDim;
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  for (let i = 1; i < W; i++) {
+    const gx = Math.round(px + i * s) + 0.5;
+    ctx.moveTo(gx, py); ctx.lineTo(gx, py + H * s);
+  }
+  for (let j = 1; j < H; j++) {
+    const gy = Math.round(py + j * s) + 0.5;
+    ctx.moveTo(px, gy); ctx.lineTo(px + W * s, gy);
+  }
+  ctx.stroke();
+  ctx.restore();
+  ctx.strokeStyle = T.dotStroke;
+  ctx.lineWidth = 2;
+  roundRect(ctx, px, py, W * s, H * s, r);
+  ctx.stroke();
+}
+
+function drawSkull(ctx, color, cx, cy, size) {
+  const u = size / 16;          // 16-unit grid; ~14.5 units tall
+  ctx.save();
+  ctx.strokeStyle = color;
+  ctx.fillStyle = color;
+  ctx.lineWidth = Math.max(1, size * 0.09);
+  ctx.lineCap = "round";
+  ctx.lineJoin = "round";
+  // Dome: open-bottom U
+  ctx.beginPath();
+  ctx.arc(cx, cy - u, 6.5 * u, Math.PI, 0, false);
+  ctx.lineTo(cx + 6.5 * u, cy + 5 * u);
+  ctx.lineTo(cx - 6.5 * u, cy + 5 * u);
+  ctx.closePath();
+  ctx.stroke();
+  // Two eye sockets
+  ctx.beginPath();
+  ctx.arc(cx - 3 * u, cy + u, 1.8 * u, 0, Math.PI * 2);
+  ctx.arc(cx + 3 * u, cy + u, 1.8 * u, 0, Math.PI * 2);
+  ctx.fill();
+  // Nose: filled inverted triangle
+  ctx.beginPath();
+  ctx.moveTo(cx, cy + 2.4 * u);
+  ctx.lineTo(cx - 1.4 * u, cy + 4.4 * u);
+  ctx.lineTo(cx + 1.4 * u, cy + 4.4 * u);
+  ctx.closePath();
+  ctx.fill();
+  // Two jaw ticks
+  ctx.beginPath();
+  ctx.moveTo(cx - 2.2 * u, cy + 5 * u);
+  ctx.lineTo(cx - 2.2 * u, cy + 7 * u);
+  ctx.moveTo(cx + 2.2 * u, cy + 5 * u);
+  ctx.lineTo(cx + 2.2 * u, cy + 7 * u);
+  ctx.stroke();
+  ctx.restore();
 }
 
 /* A full entity token: circle + name letter + optional blue ring + label. */
