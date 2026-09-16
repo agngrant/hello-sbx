@@ -18,14 +18,22 @@ from app.models import (
     is_enemy,
 )
 from app.session import CREATABLE_KINDS, GameSession
-from tests.test_session import FakeConn, drive, make_grid
+from tests.test_session import FakeConn, attach, drive, make_grid
 
 # 8×8 open grid; the joiner's character spawns on the top-left floor cell
 # (0,0) and every cell below is walkable floor.
-GRID = [" " * 8 for _ in range(8)]
+GRID = [["floor"] * 8 for _ in range(8)]
 
 
-def cell(kind="npc", x=0, y=0, team="neutral", size=None) -> Entity:
+def cell(kind="npc", x=0, y=0, team="neutral", size=1) -> Entity:
+    # models.py contract: a boss must pick one of the six BOSS_FOOTPRINTS
+    # sizes (no size=None / 1×1 fallback); every other kind is 1×1.
+    if kind == "boss" and size not in BOSS_FOOTPRINTS:
+        size = 2  # smallest valid boss size variant
+    # is_enemy = boss or hostile team — a plain enemy is hostile by default
+    # (a neutral-team enemy is NOT an enemy per models.is_enemy).
+    if kind == "enemy" and team == "neutral":
+        team = "hostile"
     return Entity(
         id="t1", name="t", kind=kind, team=team,
         x=x, y=y, owner=None, size=size,
@@ -82,10 +90,11 @@ def test_entity_cells_cover_the_full_boss_footprint():
     assert (4, 6) in entity_cells(e)  # the far (bottom-right) corner
 
 
-def test_unknown_size_defaults_to_one_cell():
-    assert boss_footprint(None) == (1, 1)
-    assert boss_footprint(99) == (1, 1)
-    assert boss_footprint(0) == (1, 1)
+def test_invalid_boss_size_is_rejected():
+    # models.py: no (1, 1) fallback — sizes outside BOSS_FOOTPRINTS raise.
+    for bad in (None, 0, 99):
+        with pytest.raises(ValueError, match="boss footprint"):
+            boss_footprint(bad)
 
 
 # ---------------------------------------------------------------------------
@@ -95,6 +104,7 @@ def test_unknown_size_defaults_to_one_cell():
 def gm_joined(session):
     """Join a fresh GM and return its FakeConn (first joiner is the GM)."""
     conn = FakeConn()
+    attach(session, conn)
     drive(session, conn, {"type": "join", "name": "GM", "role": "gm"})
     assert conn.last("state") is not None
     return conn
@@ -102,6 +112,7 @@ def gm_joined(session):
 
 def join_player(session, name="Alice"):
     conn = FakeConn()
+    attach(session, conn)
     drive(session, conn, {"type": "join", "name": name, "role": "player"})
     assert conn.last("state") is not None
     return conn
