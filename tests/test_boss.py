@@ -12,7 +12,7 @@ import pytest
 from app.models import (
     BOSS_FOOTPRINTS,
     Entity,
-    boss_footprint,
+    boss_footprint_cells,
     entity_cells,
     footprint_cells,
     is_enemy,
@@ -94,7 +94,7 @@ def test_invalid_boss_size_is_rejected():
     # models.py: no (1, 1) fallback — sizes outside BOSS_FOOTPRINTS raise.
     for bad in (None, 0, 99):
         with pytest.raises(ValueError, match="boss footprint"):
-            boss_footprint(bad)
+            boss_footprint_cells(bad)
 
 
 # ---------------------------------------------------------------------------

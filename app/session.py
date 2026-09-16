@@ -44,7 +44,7 @@ from typing import Any
 from app.awareness import AWARENESS_MAX, AWARENESS_MIN, build_awareness
 from app.models import (
     BOSS_FOOTPRINTS, CELL_TYPES, TEAMS, Entity, Grid, Player,
-    boss_footprint, entity_cells, footprint_cells,
+    boss_footprint_cells, entity_cells, footprint_cells,
 )
 from app.pathfinding import find_path
 from app.visibility import build_visibility_mask, visible_cells
@@ -822,7 +822,7 @@ class GameSession:
             # Boss-entity spec: the mover may only stop where its FULL
             # footprint is in-bounds and free of every OTHER entity
             # (footprint-aware occupancy, models.entity_cells).
-            w, h = (boss_footprint(entity.size)
+            w, h = (boss_footprint_cells(entity.size)
                     if entity.kind == "boss" else (1, 1))
             for cx, cy in footprint_cells(x, y, w, h):
                 if not (0 <= cx < self.grid.width
