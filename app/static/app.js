@@ -1467,11 +1467,12 @@ function drawGridOnCanvas(canvas, ctx, visibility = null, view = null) {
       if (!overlaps) continue;
       const eTier = tier(e.x, e.y) === "E";   // §4.1 colors from the anchor tier
       drawBoss(ctx, e, s, ox, oy, eTier);
-      // §4.1 per-footprint skull center (anchor cells): 2×2 → (0.3, 0.35),
-      // 1×1 → (0.3, 0.35), 1×2 → (0.3, 1.35), 2×1 → (0.3, 0.35).
-      const dy = (H(e) === 2 && W(e) === 1) ? 1.35 : 0.35;
+      // §4.1 skull center, footprint-local (u,v) from the top-left anchor tile:
+      // 2×1 → (0.5, 0.5); W≥2, H≥2 → (1.0, 0.75).
+      const u = W(e) >= 2 ? 1.0 : 0.5;
+      const v = W(e) === 2 && H(e) === 1 ? 0.5 : 0.75;
       drawSkull(ctx, eTier ? "#6b7280" : "#111111",
-        ox + (e.x + 0.3) * s, oy + (e.y + dy) * s, s * 0.35);
+        ox + (e.x + u) * s, oy + (e.y + v) * s, s * 0.35);
     }
     drawEntitiesAndDots(ctx, s, ox, oy, { x0, x1, y0, y1 });  }
 }
