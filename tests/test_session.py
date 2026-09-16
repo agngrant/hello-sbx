@@ -316,9 +316,10 @@ class TestJoins(unittest.TestCase):
 
 class TestMovement(SessionTestCase):
     def test_player_moves_own_entity_adjacent_floor(self):
-        # Alice's entity spawns at (1,1); (2,1) is a free floor cell.
+        # Alice's entity spawns at (1,1); (1,2) is a free floor cell ((2,1)
+        # is occupied by Bob, so it can no longer be used as a destination).
         reply = drive(self.session, 
-            self.p1_s, {"type": "move", "entity_id": self.p1_ent, "x": 2, "y": 1}
+            self.p1_s, {"type": "move", "entity_id": self.p1_ent, "x": 1, "y": 2}
         )
         # Successful move: no separate reply — the path frame is broadcast
         # to everyone (sender included) ahead of the state snapshot.
@@ -327,9 +328,9 @@ class TestMovement(SessionTestCase):
         self.assertEqual(len(paths), 1)
         self.assertEqual(paths[0]["entity_id"], self.p1_ent)
         self.assertEqual(paths[0]["path"][0], {"x": 1, "y": 1})
-        self.assertEqual(paths[0]["path"][-1], {"x": 2, "y": 1})
+        self.assertEqual(paths[0]["path"][-1], {"x": 1, "y": 2})
         ent = self.session.entities[self.p1_ent]
-        self.assertEqual((ent.x, ent.y), (2, 1))
+        self.assertEqual((ent.x, ent.y), (1, 2))
         # every client got its per-viewer state snapshot for the mutation.
         for sock in (self.gm_s, self.p1_s, self.p2_s):
             self.assertTrue(sock.sent("state"))
@@ -368,15 +369,15 @@ class TestMovement(SessionTestCase):
 
     def test_gm_can_move_any_entity(self):
         # GM moves ALICE's (p1's) entity — allowed even though it's not
-        # owned by the GM (the GM has no own entity at all). (1,1) -> (2,1),
-        # an adjacent free floor.
+        # owned by the GM (the GM has no own entity at all). (1,1) -> (1,2),
+        # an adjacent free floor ((2,1) is occupied by Bob).
         reply = drive(self.session, 
-            self.gm_s, {"type": "move", "entity_id": self.p1_ent, "x": 2, "y": 1}
+            self.gm_s, {"type": "move", "entity_id": self.p1_ent, "x": 1, "y": 2}
         )
         self.assertIsNone(reply)
         self.assertTrue(self.gm_s.sent("path"))
         ent = self.session.entities[self.p1_ent]
-        self.assertEqual((ent.x, ent.y), (2, 1))
+        self.assertEqual((ent.x, ent.y), (1, 2))
 
     def test_gm_override_moves_through_wall(self):
         # (2,1) [Bob] -> (4,2): straight line crosses the wall col 5? No —
@@ -540,7 +541,7 @@ class TestGmTools(SessionTestCase):
             )
             self.assertEqual(
                 reply,
-                {"type": "error", "message": "kind must be one of npc/enemy"},
+                {"type": "error", "message": "kind must be one of npc/enemy/boss"},
             )
             self.assertEqual(len(self.session.entities), before)
 
