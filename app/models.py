@@ -120,6 +120,42 @@ def boss_footprint_cells(tiles: int | None) -> tuple[int, int]:
             f"got {tiles!r}") from None
 
 
+def footprint_cells(x: int, y: int, w: int, h: int) -> list[tuple[int, int]]:
+    """The ``(w, h)`` rectangle of grid cells anchored at its top-left corner.
+
+    Row-major over a grid indexed ``[y][x]``: the rows are the ``h`` cells at
+    ``y .. y + h - 1`` and, within each, the ``w`` cells at
+    ``x .. x + w - 1`` — so ``footprint_cells(3, 4, 2, 3)`` is the 6 cells
+    from ``(3, 4)`` through the far ``(4, 6)`` corner.
+    """
+    return [(cx, cy) for cy in range(y, y + h) for cx in range(x, x + w)]
+
+
+def entity_cells(entity: "Entity") -> list[tuple[int, int]]:
+    """The grid cells ``entity`` currently occupies.
+
+    A normal (1x1) entity is just its anchor cell; a boss covers its full
+    ``footprint_cells`` (delegating :meth:`Entity.footprint_cells` for the
+    ``(w, h)``). Used for footprint-aware occupancy checks elsewhere in the
+    session logic.
+    """
+    w, h = entity.footprint_cells
+    if (w, h) == (1, 1):
+        return [(entity.x, entity.y)]
+    return footprint_cells(entity.x, entity.y, w, h)
+
+
+def is_enemy(entity: "Entity") -> bool:
+    """Whether ``entity`` counts as an enemy for the session's
+    enemy-aware logic (footprint-blocked movement, threat handling).
+
+    A boss is always an enemy, whatever its team; every other kind is an
+    enemy iff it belongs to the hostile team (a neutral-team enemy is not
+    an enemy).
+    """
+    return entity.kind == "boss" or entity.team == "hostile"
+
+
 # ---------------------------------------------------------------------------
 # Grid
 # ---------------------------------------------------------------------------
