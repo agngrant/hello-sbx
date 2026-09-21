@@ -1633,6 +1633,29 @@ function drawEntitiesAndDots(ctx, s, ox, oy, win) {
       if (!overlaps) continue;
       drawUnknownDot(ctx, ox + bx * s, oy + by * s, s);
     } else if (item.entity_id !== ownId) {
+      if (item.kind === "boss" && item.size != null) {
+        // Full-contact BOSS (boss-entity spec): render the true W×H
+        // footprint blob + skull EXACTLY like the GM boss pass above —
+        // the awareness item now carries the additive `size` field and
+        // the client derives W×H from the §2 table. Cull by OVERLAP
+        // with the render window (§6.1): an anchor just off-window whose
+        // footprint straddles the edge still draws, clipped at the canvas
+        // edge. The tier (S full color / E greyed) is read from the
+        // player's visibility matrix at the anchor — the same rule the
+        // map renderer uses (a boss never draws here without line of
+        // sight, so the anchor is normally "S").
+        const [bw, bh] = bossDims(item);
+        const overlaps = !win || (item.x < win.x1 && item.x + bw > win.x0 &&
+                                  item.y < win.y1 && item.y + bh > win.y0);
+        if (!overlaps) continue;
+        const vrow = state.visibility && state.visibility[item.y];
+        const eTier = !!vrow && vrow[item.x] === "E";
+        drawBoss(ctx, item, s, ox, oy, eTier);
+        const [u, v] = BOSS_SKULL_POS[item.size] || [0.5, 0.5];
+        drawSkull(ctx, eTier ? "#6b7280" : "#111111",
+          ox + (item.x + u) * s, oy + (item.y + v) * s, s * 0.35);
+        continue;
+      }
       if (!inWin(item.x, item.y)) continue;   // §6.1 cull
       // Full contact (line of sight): colored token + name label +
       // colorblind shape marker (triangle friend / circle neutral /
@@ -1690,6 +1713,14 @@ const BOSS_SKULL_POS = {
 };
 function bossDims(e) {
   return BOSS_FOOTPRINTS[e.size] || [1, 1];
+}
+/* Sidebar / selection readout for a boss's `size` (total tiles): the
+   "W×H" footprint text from the §2 table (e.g. size 8 → "2×4"). null
+   for a size that is not in the table (graceful degrade: no size text,
+   exactly as before this feature). */
+function bossFootprintLabel(size) {
+  const fp = BOSS_FOOTPRINTS[size];
+  return fp ? `${fp[0]}×${fp[1]}` : null;
 }
 
 /* One boss = one rounded footprint blob + one skull, both pure canvas (no
@@ -1936,11 +1967,24 @@ function drawSidebar() {
       const e = allEntities().find((x) => x.id === item.entity_id);
       name = item.name || (e ? e.name : null);
       meta = e ? `${e.kind}·${e.team}` : null;
+      // Boss: append the footprint size (e.g. "boss·hostile · 2×4").
+      // The entity's own `size` (the state wire) is authoritative; the
+      // awareness item's additive `size` is the fallback.
+      if (e && e.kind === "boss" && meta) {
+        const fp = bossFootprintLabel(e.size != null ? e.size : item.size);
+        if (fp) meta = `${meta} · ${fp}`;
+      }
     } else {
       // Full contact (line of sight): the item itself now carries the
       // name + kind (the server sends them) — players see labeled entries.
       name = item.name || null;
       meta = item.kind ? item.kind : null;
+      // Boss: append the footprint size (e.g. "boss · 2×4") from the
+      // additive awareness `size` field.
+      if (item.kind === "boss" && meta) {
+        const fp = bossFootprintLabel(item.size);
+        if (fp) meta = `${meta} · ${fp}`;
+      }
     }
     const li = awarenessRow(
       { id: item.entity_id, x: item.x, y: item.y },
@@ -2042,7 +2086,14 @@ function selectEntity(id) {
   if (id) dismissGmFirstRunHint();  // GM chose a token — hint no longer needed
   els.canvasWrap.classList.toggle("has-selection", !!id);
   const e = state.entities.find((x) => x.id === id);
-  els.selEntityName.textContent = e ? `${e.name} (${e.kind})` : (id || "None");
+  if (e) {
+    // Boss: include the footprint size (e.g. "Gore (boss · 2×4)").
+    const fp = e.kind === "boss" ? bossFootprintLabel(e.size) : null;
+    els.selEntityName.textContent =
+      `${e.name} (${e.kind}${fp ? ` · ${fp}` : ""})`;
+  } else {
+    els.selEntityName.textContent = id || "None";
+  }
   if (e) els.teamSelect.value = e.team;
   syncGmTools();
   renderAll();

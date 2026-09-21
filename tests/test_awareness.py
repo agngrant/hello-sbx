@@ -677,5 +677,110 @@ class TestPlayerAwarenessRadiusModel(unittest.TestCase):
             4)
 
 
+# ---------------------------------------------------------------------------
+# Additive `size` field on FULL awareness items (boss-entity spec):
+# the wire carries the boss's size variant in TILES (never W/H) so a
+# player can render the true W×H footprint and show the size in the
+# sidebar; non-boss FULL items carry ``size: None``.
+# ---------------------------------------------------------------------------
+
+
+class TestFullItemCarriesBossSize(unittest.TestCase):
+    @staticmethod
+    def boss(eid: str, x: int, y: int, size: int = 8) -> Entity:
+        return Entity(id=eid, name=f"boss-{eid}", kind="boss",
+                      team="hostile", x=x, y=y, size=size)
+
+    def test_gm_full_items_carry_boss_size_and_none_else(self):
+        gm = Player(id="gm1", name="G", role="gm", entity_id=None)
+        entities = {
+            "B1": self.boss("B1", x=1, y=1, size=8),
+            "B2": self.boss("B2", x=3, y=1, size=2),
+            "N": ent("N", "neutral", kind="npc", x=5, y=1),
+            "E": ent("E", "hostile", kind="enemy", x=6, y=1),
+        }
+        by_id = items_by_id(build_awareness(gm, entities))
+        self.assertEqual(by_id["B1"]["size"], 8)
+        self.assertEqual(by_id["B2"]["size"], 2)
+        # Non-boss FULL items carry the field, as None (additive shape).
+        self.assertIn("size", by_id["N"])
+        self.assertIsNone(by_id["N"]["size"])
+        self.assertIsNone(by_id["E"]["size"])
+
+    def test_player_full_items_carry_boss_size_on_los(self):
+        # Open 4×3 grid: the viewer at (0,0) has line of sight to every
+        # entity → every other entity is a FULL item.
+        grid = make_grid([["floor"] * 4 for _ in range(3)])
+        viewer = Player(id="p1", name="A", role="player", entity_id="A")
+        entities = {
+            "A": ent("A", "party", x=0, y=0),
+            "B1": self.boss("B1", x=2, y=1, size=12),
+            "E": ent("E", "hostile", kind="enemy", x=3, y=1),
+        }
+        by_id = items_by_id(build_awareness(viewer, entities, grid))
+        self.assertEqual(by_id["B1"]["size"], 12)
+        self.assertIsNone(by_id["E"]["size"])
+
+    def test_player_full_boss_size_reaches_all_six_variants(self):
+        grid = make_grid([["floor"] * 8 for _ in range(8)])
+        viewer = Player(id="p1", name="A", role="player", entity_id="A")
+        for size in (2, 4, 6, 8, 10, 12):
+            with self.subTest(size=size):
+                entities = {
+                    "A": ent("A", "party", x=0, y=0),
+                    "B1": self.boss("B1", x=2, y=2, size=size),
+                }
+                (item,) = build_awareness(viewer, entities, grid)
+                self.assertEqual(item["size"], size)
+
+    def test_full_and_gm_item_shapes_stay_identical_with_size(self):
+        # The existing GM/player FULL-item equality contract must hold
+        # now that both carry the size field.
+        grid = make_grid([["floor"] * 4 for _ in range(3)])
+        gm = Player(id="gm1", name="G", role="gm", entity_id=None)
+        viewer = Player(id="p1", name="A", role="player", entity_id="A")
+        entities = {
+            "A": ent("A", "party", x=0, y=0),
+            "B1": self.boss("B1", x=2, y=1, size=6),
+        }
+        gm_by_id = items_by_id(build_awareness(gm, entities, grid))
+        pl_by_id = items_by_id(build_awareness(viewer, entities, grid))
+        self.assertEqual(pl_by_id["B1"], gm_by_id["B1"])
+        self.assertEqual(pl_by_id["B1"]["size"], 6)
+
+    def test_approximate_boss_item_carries_no_size_and_no_identity(self):
+        # The three-tier model is kind-agnostic: a boss without line of
+        # sight (within the radius) is an APPROXIMATE block — the exact
+        # surrogate shape, with NO size, name, kind or color (no
+        # footprint leak past the coarse block).
+        grid = tier_grid()
+        viewer = Player(id="p1", name="A", role="player", entity_id="A")
+        # B1 (4,3): the (1,4)→(4,3) Bresenham line crosses wall (3,3) →
+        # no LOS; chebyshev max(3, 1) = 3 ≤ 4 → approximate.
+        entities = {"A": ent("A", "party", x=1, y=4),
+                    "B1": self.boss("B1", x=4, y=3, size=4)}
+        (item,) = build_awareness(viewer, entities, grid)
+        self.assertEqual(
+            set(item), {"entity_id", "x", "y", "approximate", "label"})
+        self.assertNotIn("size", item)
+
+    def test_cache_key_includes_boss_size(self):
+        # Mutating ONLY the boss's size (no grid revision bump, no move,
+        # no other attribute change) must invalidate the memoized
+        # snapshot — the builder reads ``size`` via ``_full_item``, so it
+        # must live in the cache key.
+        grid = make_grid([["floor"] * 4 for _ in range(3)])
+        viewer = Player(id="p1", name="A", role="player", entity_id="A")
+        b1 = self.boss("B1", x=2, y=1, size=4)
+        entities = {"A": ent("A", "party", x=0, y=0), "B1": b1}
+        # The viewer's OWN entity is excluded from a player's awareness, so
+        # the list holds only the boss.
+        (first,) = build_awareness(viewer, entities, grid)
+        self.assertEqual(first["size"], 4)
+        b1.size = 8   # the only thing that changed
+        (second,) = build_awareness(viewer, entities, grid)
+        self.assertEqual(second["size"], 8)
+
+
 if __name__ == "__main__":
     unittest.main()

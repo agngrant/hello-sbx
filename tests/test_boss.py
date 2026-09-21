@@ -152,6 +152,43 @@ def test_gm_spawns_a_boss_with_size_on_the_entity():
     assert len(s.entities) == 1
 
 
+def test_awareness_payload_carries_boss_size_on_the_wire():
+    """The ADDITIVE wire field (boss-entity spec): a boss's FULL
+    awareness item carries its ``size`` for BOTH the GM and a player
+    with line of sight, while every non-boss FULL item carries
+    ``size: None``. This is what lets the player client draw the true
+    W×H footprint on the canvas and show the size in the sidebar —
+    the wire never carries W/H itself.
+    """
+    s = GameSession("t1", make_grid(GRID))
+    gm = gm_joined(s)
+    drive(s, gm, {"type": "create_entity", "name": "Gore",
+                  "kind": "boss", "team": "hostile", "x": 3, "y": 3,
+                  "size": 8})
+    player = join_player(s)
+    boss = boss_entity(s)
+    me = player_entity(s)
+    # The GM's snapshot (the join fan-out re-sends every other viewer's
+    # state): the boss item carries the size, the player token's does
+    # not (None, not absent — the field is part of the FULL shape).
+    gm_aw = {i["entity_id"]: i for i in gm.last("state")["awareness"]}
+    assert gm_aw[boss.id]["size"] == 8
+    assert gm_aw[me.id]["size"] is None
+    # The player's welcome: the boss at (3,3) is on clear line of sight
+    # from the token at (0,0) → a FULL item carrying the size (and the
+    # name/kind/label the player already receives).
+    pl_aw = {i["entity_id"]: i
+             for i in player.last("welcome")["awareness"]}
+    item = pl_aw[boss.id]
+    assert item["size"] == 8
+    assert item["kind"] == "boss"
+    assert item["label"] is True
+    assert item["name"] == "Gore"
+    # The player never receives the entities list — the awareness item
+    # is the ONLY source of the boss's size on the player wire.
+    assert player.last("welcome")["entities"] == []
+
+
 def test_spawn_boss_out_of_bounds_is_rejected():
     s = GameSession("t1", make_grid(GRID))
     gm = gm_joined(s)

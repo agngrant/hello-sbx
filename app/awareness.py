@@ -125,7 +125,15 @@ def overlay_color(relation: str, entity: Entity) -> str:
 def _full_item(entity: Entity) -> dict[str, Any]:
     """A **FULL**-visibility awareness item (exact position, color,
     name, kind, ``label: True``) — the identical shape for GM and for
-    a player with line of sight."""
+    a player with line of sight.
+
+    ``size`` is the additive boss size variant in TILES
+    (docs/specs/boss-entity.md): the ``int`` for a boss (the client
+    derives the W×H footprint from its own spec table — the wire never
+    carries W/H), ``None`` for every other kind. The field is new and
+    optional on the wire, so older clients ignore it; non-boss items
+    keep their pre-feature meaning.
+    """
     return {
         "entity_id": entity.id,
         "x": entity.x,
@@ -134,6 +142,7 @@ def _full_item(entity: Entity) -> dict[str, Any]:
         "name": entity.name,
         "kind": entity.kind,
         "label": True,
+        "size": entity.size,
     }
 
 
@@ -180,8 +189,10 @@ def _awareness_cache_key(
       radius (a non-int/bool value normalises to :data:`APPROX_RADIUS`
       inside the builder, so the key normalises identically).
     * entities: every entity's id + the attributes the builder reads
-      (x, y, name, kind, team, color) -- entity moves are NOT grid
-      revisions, so positions must live in the key.
+      (x, y, name, kind, team, color, size) -- entity moves are NOT
+      grid revisions, so positions must live in the key, and ``size``
+      is read by the FULL-item builder (``_full_item``) without any
+      grid revision bump.
     """
     radius = viewer.awareness_radius
     if isinstance(radius, bool) or not isinstance(radius, int):
@@ -201,7 +212,7 @@ def _awareness_cache_key(
         viewer.entity_id,
         radius,
         tuple(
-            (entity_id, e.x, e.y, e.name, e.kind, e.team, e.color)
+            (entity_id, e.x, e.y, e.name, e.kind, e.team, e.color, e.size)
             for entity_id, e in sorted(entities.items())
         ),
     )
@@ -247,10 +258,12 @@ def _build_awareness_uncached(
     * ``viewer.role == "gm"``: one item for EVERY entity — the GM is a
       pure controller with no own token (``viewer.entity_id`` is never
       consulted), each ``{"entity_id", "x", "y", "color", "name", "kind",
-      "label": True}``.  Color is the explicit override or the team color
-      (true colors, no masking), and every item carries the name + kind.
-      A ``grid``, when given, changes NOTHING for the GM: no LOS and no
-      distance filtering is ever applied.
+      "label": True, "size"}``.  Color is the explicit override or the
+      team color (true colors, no masking), and every item carries the
+      name + kind.  ``size`` is the additive boss size variant in TILES
+      (an ``int`` for a boss, ``None`` otherwise — see
+      :func:`_full_item`).  A ``grid``, when given, changes NOTHING for
+      the GM: no LOS and no distance filtering is ever applied.
     * ``viewer.role == "player"`` (see module docstring for the model):
 
       * with ``grid`` — the three-tier model anchored at the viewer's own

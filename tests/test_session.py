@@ -1787,10 +1787,15 @@ class TestExploredMapGmPayload(unittest.TestCase):
             "entities": [e1.to_dict(), e2.to_dict()],
             "you_entity": None,
             "awareness": [
+                # `size` is the additive boss-size field (boss-entity spec):
+                # an int for a boss, None for every other kind — so the
+                # pre-feature literal gains `size: None` for these players.
                 {"entity_id": "e1", "x": 1, "y": 1, "color": "green",
-                 "name": "Alice", "kind": "player", "label": True},
+                 "name": "Alice", "kind": "player", "label": True,
+                 "size": None},
                 {"entity_id": "e2", "x": 2, "y": 1, "color": "green",
-                 "name": "Bob", "kind": "player", "label": True},
+                 "name": "Bob", "kind": "player", "label": True,
+                 "size": None},
             ],
             "fog": False,
         }
@@ -1821,14 +1826,18 @@ class TestExploredMapAwarenessUnchanged(unittest.TestCase):
                          build_awareness(p1, s.entities, s.grid))
         # And the pre-feature literal list (copied from the current test
         # expectations: all four line-of-sight tokens are FULL, sorted by
-        # entity_id, surrogate-free).
+        # entity_id, surrogate-free). Each carries the additive boss-size
+        # field as `size: None` (non-boss).
         self.assertEqual(st["awareness"], [
             {"entity_id": "e2", "x": 2, "y": 1, "color": "green",
-             "name": "Bob", "kind": "player", "label": True},
+             "name": "Bob", "kind": "player", "label": True,
+             "size": None},
             {"entity_id": "e3", "x": 3, "y": 1, "color": "green",
-             "name": "Carl", "kind": "player", "label": True},
+             "name": "Carl", "kind": "player", "label": True,
+             "size": None},
             {"entity_id": "e4", "x": 4, "y": 1, "color": "green",
-             "name": "Dee", "kind": "player", "label": True},
+             "name": "Dee", "kind": "player", "label": True,
+             "size": None},
         ])
 
     def test_no_los_pair_chebyshev3_default_and_radius7(self):

@@ -802,6 +802,165 @@ class TestBossEntityFrontend(FrontendBase):
             out, {"playerBoss": True, "gmBoss": False, "gmNpc": True}
         )
 
+    # ------------------------------------------------------------------
+    # Additive `size` on the player FULL awareness item: the player now
+    # renders the boss's TRUE multi-tile footprint blob on the canvas and
+    # sees the footprint size as text (sidebar + selection readout), and
+    # the GM's sidebar shows the same size text.
+    # ------------------------------------------------------------------
+
+    def test_player_full_boss_renders_footprint_blob_not_single_token(self):
+        # A player with line of sight to a size-8 boss (its FULL awareness
+        # item now carries the additive `size`) must render the true 2×4
+        # footprint BLOB (a round-rect T.enemy fill) + skull — NOT a single
+        # 1×1 token circle at the anchor cell. A non-boss FULL contact in
+        # the same view still renders its normal labeled token (regression
+        # guard for the new branch).
+        expr = (
+            "(()=>{const map={name:'m',width:16,height:12,cells:Array.from("
+            "{length:12},()=>Array(16).fill('floor'))};"
+            "api.onWelcome({type:'welcome',you:{id:'p2',name:'Alice',"
+            "role:'player',entity_id:'e2'},map,entities:[],"
+            "you_entity:{id:'e2',name:'Alice',kind:'player',team:'party',"
+            "x:1,y:1},players:[],awareness:["
+            "{entity_id:'b1',x:4,y:1,color:'red',name:'Gore',kind:'boss',"
+            "size:8,label:true},"
+            "{entity_id:'e3',x:6,y:1,color:'green',name:'Bob',kind:'player',"
+            "label:true}],"
+            "fog:false});"
+            "api.els.mapView.hidden=false;"
+            "const c=api.els.canvas.getContext('2d');"
+            # onWelcome already rendered into the same ctx (the recording
+            # arrays accumulate); reset them so the single controlled
+            # renderAll below is the only contributor.
+            "c._fillPaths.length=0;c._arcs.length=0;c._texts.length=0;"
+            "c._strokes.length=0;"
+            "api.renderAll();"
+            "const s=api.state.cell, ox=api.state.offsetX, oy=api.state.offsetY;"
+            "return {enemy:api.T.enemy, fillPaths:c._fillPaths, arcs:c._arcs,"
+            "texts:c._texts, s, ax:ox+4.5*s, ay:oy+1.5*s};})()"
+        )
+        d = json.loads(js(expr))
+        s = d["s"]
+        # The footprint BLOB: a T.enemy fill whose path is a round-rect
+        # (has arcTo corner segments). A single-token circle fills an EMPTY
+        # path (its arc() lands in _arcs, not the fill path), so this
+        # discriminates the multi-tile blob from a 1×1 token.
+        blob = [
+            fp for fp in d["fillPaths"]
+            if fp["style"] == d["enemy"]
+            and any(seg.get("a") for seg in fp["path"])
+        ]
+        self.assertEqual(len(blob), 1, "exactly one footprint blob")
+        # The blob spans the 2×4 footprint (width 2 tiles, height 4 tiles),
+        # not a 1×1 token — measured from the round-rect corner endpoints.
+        corners = []
+        for seg in blob[0]["path"]:
+            if seg.get("a"):
+                x1, y1, x2, y2, _r = seg["a"]
+                corners.extend([(x1, y1), (x2, y2)])
+        xs = [c[0] for c in corners]
+        ys = [c[1] for c in corners]
+        self.assertAlmostEqual(max(xs) - min(xs), 2 * s, delta=0.05 * s)
+        self.assertAlmostEqual(max(ys) - min(ys), 4 * s, delta=0.05 * s)
+        # NOT a single token: no token circle centered on the anchor cell.
+        centers = {(round(a[0], 2), round(a[1], 2)) for a in d["arcs"]}
+        self.assertNotIn((round(d["ax"], 2), round(d["ay"], 2)), centers,
+                         "no 1×1 token circle at the boss anchor cell")
+        # The boss blob carries no name label (mirrors the GM boss pass);
+        # the non-boss FULL contact (Bob) still gets its token + label.
+        self.assertNotIn("Gore", d["texts"])
+        self.assertIn("Bob", d["texts"])
+
+    def test_player_sidebar_shows_boss_footprint_size(self):
+        # A player's sidebar row for a boss FULL contact appends the
+        # footprint size ("boss · 2×4") from the additive awareness `size`.
+        expr = (
+            "(()=>{const map={name:'m',width:16,height:12,cells:Array.from("
+            "{length:12},()=>Array(16).fill('floor'))};"
+            "api.onWelcome({type:'welcome',you:{id:'p2',name:'Alice',"
+            "role:'player',entity_id:'e2'},map,entities:[],"
+            "you_entity:{id:'e2',name:'Alice',kind:'player',team:'party',"
+            "x:1,y:1},players:[],awareness:["
+            "{entity_id:'b1',x:4,y:1,color:'red',name:'Gore',kind:'boss',"
+            "size:8,label:true}],"
+            "fog:false});"
+            "const doc=api.document;const made=[];"
+            "const realCreate=doc.createElement;"
+            "doc.createElement=(t)=>{const el=realCreate(t);"
+            "if(t==='li'){const row={el,spans:[],texts:[]};made.push(row);"
+            "el.appendChild=(c)=>{row.spans.push(c.className);"
+            "row.texts.push(c.textContent||'');return c};}"
+            "return el;};"
+            "api.drawSidebar();"
+            "doc.createElement=realCreate;"
+            "return {rows:made.map(r=>({id:r.el.dataset.entityId,"
+            "spans:r.spans,texts:r.texts}))};})()"
+        )
+        rows = json.loads(js(expr))["rows"]
+        boss = [r for r in rows if r["id"] == "b1"]
+        self.assertEqual(len(boss), 1, "exactly one sidebar row for the boss")
+        self.assertIn("awareness-meta", boss[0]["spans"])
+        self.assertIn("Gore", boss[0]["texts"])
+        self.assertIn("boss · 2×4", boss[0]["texts"])
+
+    def test_gm_sidebar_shows_boss_footprint_size(self):
+        # The GM's sidebar row for a boss appends the footprint size too
+        # ("boss·hostile · 2×4"), from the entity's own `size` (the state
+        # wire is authoritative; the awareness item's `size` is the fallback).
+        expr = (
+            "(()=>{api.state.role='gm';api.state.name='Gamer';"
+            "api.state.entities=[{id:'b1',name:'Gore',kind:'boss',"
+            "team:'hostile',x:4,y:1,size:8}];"
+            "api.state.you={id:'p1',name:'Gamer',role:'gm',entity_id:null};"
+            "api.state.awareness=[{entity_id:'b1',x:4,y:1,color:'red',"
+            "name:'Gore',kind:'boss',size:8,label:true}];"
+            "const doc=api.document;const made=[];"
+            "const realCreate=doc.createElement;"
+            "doc.createElement=(t)=>{const el=realCreate(t);"
+            "if(t==='li'){const row={el,spans:[],texts:[]};made.push(row);"
+            "el.appendChild=(c)=>{row.spans.push(c.className);"
+            "row.texts.push(c.textContent||'');return c};}return el;};"
+            "api.drawSidebar();"
+            "doc.createElement=realCreate;"
+            "return {rows:made.map(r=>({id:r.el.dataset.entityId,"
+            "spans:r.spans,texts:r.texts}))};})()"
+        )
+        rows = json.loads(js(expr))["rows"]
+        boss = [r for r in rows if r["id"] == "b1"]
+        self.assertEqual(len(boss), 1, "exactly one sidebar row for the boss")
+        self.assertIn("awareness-meta", boss[0]["spans"])
+        self.assertIn("Gore", boss[0]["texts"])
+        self.assertIn("boss·hostile · 2×4", boss[0]["texts"])
+
+    def test_select_entity_includes_boss_footprint(self):
+        # Selecting a boss shows the footprint size in the readout
+        # ("Gore (boss · 2×4)"); a non-boss keeps the plain "(kind)".
+        expr = (
+            "(()=>{api.state.role='gm';"
+            "api.state.grid={width:6,height:6,cells:Array.from"
+            "({length:6},()=>Array(6).fill('floor'))};"
+            "api.state.you={id:'p1',name:'Gamer',role:'gm',entity_id:null};"
+            "api.state.entities=[{id:'b1',name:'Gore',kind:'boss',"
+            "team:'hostile',x:4,y:1,size:8}];"
+            "api.els.mapView.hidden=true;"
+            "api.selectEntity('b1');"
+            "return api.els.selEntityName.textContent;})()"
+        )
+        self.assertEqual(json.loads(js(expr)), "Gore (boss · 2×4)")
+        expr_npc = (
+            "(()=>{api.state.role='gm';"
+            "api.state.grid={width:6,height:6,cells:Array.from"
+            "({length:6},()=>Array(6).fill('floor'))};"
+            "api.state.you={id:'p1',name:'Gamer',role:'gm',entity_id:null};"
+            "api.state.entities=[{id:'e9',name:'Moe',kind:'npc',"
+            "team:'neutral',x:2,y:2}];"
+            "api.els.mapView.hidden=true;"
+            "api.selectEntity('e9');"
+            "return api.els.selEntityName.textContent;})()"
+        )
+        self.assertEqual(json.loads(js(expr_npc)), "Moe (npc)")
+
 
 class TestGmControllerView(FrontendBase):
     """Acceptance for "GM is a pure controller" (docs/design/gm-controller.md
