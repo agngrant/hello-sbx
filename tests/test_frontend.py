@@ -709,8 +709,11 @@ class TestBossEntityFrontend(FrontendBase):
     canvas art (AC7)."""
 
     def test_footprint_table_matches_spec_section_2(self):
-        # Size (total tiles) → [W, H] tiles, anchored top-left.
-        out = json.loads(js("api.BOSS_FOOTPRINTS"))
+        # Size (total tiles) → [W, H] tiles, anchored top-left. The
+        # hardcoded FALLBACK literal (used only when the server's
+        # additive `boss_footprints` field is absent/malformed) must stay
+        # in sync with spec §2.
+        out = json.loads(js("api.BOSS_FOOTPRINTS_FALLBACK"))
         self.assertEqual(out, {
             "2": [2, 1], "4": [2, 2], "6": [2, 3],
             "8": [2, 4], "10": [2, 5], "12": [3, 4],
@@ -960,6 +963,175 @@ class TestBossEntityFrontend(FrontendBase):
             "return api.els.selEntityName.textContent;})()"
         )
         self.assertEqual(json.loads(js(expr_npc)), "Moe (npc)")
+
+
+class TestBossFootprintsWireAdoption(FrontendBase):
+    """Client-side adoption of the additive ``boss_footprints`` wire field
+    (boss-entity spec): the SERVER's canonical ``size -> [w, h]`` tile
+    table rides every state/welcome frame (``state_for``/``welcome_for``),
+    so the client derives boss dimensions from it instead of its own
+    hardcoded copy. The hardcoded literal survives ONLY as
+    ``BOSS_FOOTPRINTS_FALLBACK`` for old servers that never send the field;
+    the server value takes precedence whenever present, and a malformed
+    payload is rejected by ``validateBossFootprints`` (→ fallback) so a bad
+    frame can never crash the render."""
+
+    # The hardcoded fallback literal (what an old server never sends).
+    FALLBACK = {"2": [2, 1], "4": [2, 2], "6": [2, 3],
+                "8": [2, 4], "10": [2, 5], "12": [3, 4]}
+    # A SERVER table that deliberately DISAGREES with the fallback for two
+    # sizes (2 → 3×3, 8 → 4×2) so "server wins" is provable, not tautological.
+    SERVER_TABLE = {"2": [3, 3], "4": [2, 2], "6": [2, 3],
+                    "8": [4, 2], "10": [2, 5], "12": [3, 4]}
+
+    def _welcome_head(self, extra=""):
+        return (
+            "(()=>{const map={name:'m',width:16,height:12,cells:Array.from("
+            "{length:12},()=>Array(16).fill('floor'))};"
+            "api.onWelcome({type:'welcome',you:{id:'p2',name:'Alice',"
+            "role:'player',entity_id:'e2'},map,entities:[],"
+            "you_entity:{id:'e2',name:'Alice',kind:'player',team:'party',"
+            "x:1,y:1},players:[],awareness:[],fog:false"
+            f"{extra}}});"
+        )
+
+    def test_welcome_adopts_server_table_over_fallback(self):
+        # A welcome frame carrying boss_footprints: the client stores it and
+        # every consumer (dims, label, live table) resolves through the
+        # SERVER's values — size 8 must come out 4×2 (server), NOT 2×4
+        # (hardcoded fallback).
+        out = json.loads(js(
+            self._welcome_head(",boss_footprints:" + json.dumps(self.SERVER_TABLE))
+            + "return {stored:api.state.bossFootprints,"
+            "table:api.bossFootprintsTable(),"
+            "dims8:api.bossDims({size:8}),label8:api.bossFootprintLabel(8),"
+            "dims2:api.bossDims({size:2})};})()"
+        ))
+        self.assertEqual(out["stored"], self.SERVER_TABLE)
+        # The live table IS the server's (server value takes precedence).
+        self.assertEqual(out["table"], self.SERVER_TABLE)
+        self.assertEqual(out["dims8"], [4, 2],
+                         "server table must override the hardcoded fallback")
+        self.assertEqual(out["label8"], "4×2")
+        self.assertEqual(out["dims2"], [3, 3])
+
+    def test_state_frame_adopts_table_after_welcome_without(self):
+        # An OLD-style welcome (no field) followed by a NEW-style state
+        # frame: the table is adopted from the state frame — adoption is
+        # per-frame in applyState, not welcome-only.
+        out = json.loads(js(
+            self._welcome_head()
+            + "const before=api.state.bossFootprints;"
+            "api.onState({type:'state',map,entities:[],"
+            "you_entity:{id:'e2',name:'Alice',kind:'player',team:'party',"
+            "x:1,y:1},players:[],awareness:[],fog:false,"
+            "boss_footprints:" + json.dumps(self.FALLBACK) + "});"
+            "return {before,after:api.state.bossFootprints,"
+            "dims12:api.bossDims({size:12})};})()"
+        ))
+        self.assertIsNone(out["before"], "welcome carried no table")
+        self.assertEqual(out["after"], self.FALLBACK)
+        self.assertEqual(out["dims12"], [3, 4])
+
+    def test_absent_field_falls_back_to_hardcoded_literal(self):
+        # Old-server compat: no boss_footprints anywhere → state stays
+        # null and every consumer resolves through the hardcoded literal,
+        # exactly as before this feature.
+        out = json.loads(js(
+            self._welcome_head()
+            + "return {stored:api.state.bossFootprints,"
+            "table:api.bossFootprintsTable(),"
+            "dims8:api.bossDims({size:8}),label12:api.bossFootprintLabel(12),"
+            "bad:api.bossDims({size:99})};})()"
+        ))
+        self.assertIsNone(out["stored"])
+        self.assertEqual(out["table"], self.FALLBACK,
+                         "live table must BE the hardcoded fallback")
+        self.assertEqual(out["dims8"], [2, 4])
+        self.assertEqual(out["label12"], "3×4")
+        self.assertEqual(out["bad"], [1, 1])
+
+    def test_validator_rejects_malformed_tables(self):
+        # Each input is malformed in a different way; the validator must
+        # return null for ALL of them (→ the caller keeps the fallback).
+        # name → the malformed JS literal to feed the validator.
+        cases = {
+            "null": "null",
+            "undef": "undefined",
+            "str": "'2:[2,1]'",
+            "num": "42",
+            "arr": "[[2,1]]",
+            "empty": "{}",
+            "badKey": "{'2':[2,1],'x':[1,1]}",
+            "zeroKey": "{'0':[2,1]}",
+            "strVal": "{2:'2x1'}",
+            "nullVal": "{2:null}",
+            "short": "{2:[2]}",
+            "long": "{2:[2,1,3]}",
+            "float": "{2:[2.5,1]}",
+            "neg": "{2:[-2,1]}",
+            "zero": "{2:[0,1]}",
+            "bool": "{2:[true,1]}",
+        }
+        exprs = ",".join(f'"{name}":api.validateBossFootprints({jsv})'
+                         for name, jsv in cases.items())
+        out = json.loads(js("({" + exprs + "})"))
+        for name in cases:
+            self.assertIsNone(out[name], f"{name} must be rejected: {out[name]!r}")
+        # Well-formed tables pass through intact (incl. a sparse one — the
+        # key set is deliberately not pinned to the six known sizes).
+        out = json.loads(js(
+            "({ok:api.validateBossFootprints({2:[2,1],12:[3,4]}),"
+            "sparse:api.validateBossFootprints({8:[2,4]})})"
+        ))
+        self.assertEqual(out["ok"], {"2": [2, 1], "12": [3, 4]})
+        self.assertEqual(out["sparse"], {"8": [2, 4]})
+
+    def test_malformed_wire_table_falls_back_and_renders(self):
+        # End-to-end: a welcome whose boss_footprints is a garbage object
+        # must not crash the render; the boss still draws with the FALLBACK
+        # dims (size 8 → 2×4) and the readout falls back too.
+        out = json.loads(js(
+            "(()=>{const map={name:'m',width:16,height:12,cells:Array.from("
+            "{length:12},()=>Array(16).fill('floor'))};"
+            "api.onWelcome({type:'welcome',you:{id:'p2',name:'Alice',"
+            "role:'player',entity_id:'e2'},map,entities:[],"
+            "you_entity:{id:'e2',name:'Alice',kind:'player',team:'party',"
+            "x:1,y:1},players:[],awareness:["
+            "{entity_id:'b1',x:4,y:1,color:'red',name:'Gore',kind:'boss',"
+            "size:8,label:true}],fog:false,boss_footprints:{8:'2x4'}});"
+            "api.els.mapView.hidden=false;"
+            "const c=api.els.canvas.getContext('2d');"
+            "c._fillPaths.length=0;c._arcs.length=0;c._texts.length=0;"
+            "api.renderAll();"
+            "const s=api.state.cell, ox=api.state.offsetX, oy=api.state.offsetY;"
+            "return {stored:api.state.bossFootprints,"
+            "dims8:api.bossDims({size:8}),label8:api.bossFootprintLabel(8),"
+            "enemy:api.T.enemy, fillPaths:c._fillPaths, s};})()"
+        ))
+        # The malformed table was rejected wholesale (not partially stored)…
+        self.assertIsNone(out["stored"])
+        # …and the readout + render fall back to the hardcoded dims.
+        self.assertEqual(out["dims8"], [2, 4])
+        self.assertEqual(out["label8"], "2×4")
+        # The boss blob is still drawn at the FALLBACK 2×4 size (one
+        # round-rect T.enemy fill; measured from its arcTo corners).
+        s = out["s"]
+        blob = [
+            fp for fp in out["fillPaths"]
+            if fp["style"] == out["enemy"]
+            and any(seg.get("a") for seg in fp["path"])
+        ]
+        self.assertEqual(len(blob), 1, "boss blob still rendered (fallback)")
+        corners = []
+        for seg in blob[0]["path"]:
+            if seg.get("a"):
+                x1, y1, x2, y2, _r = seg["a"]
+                corners.extend([(x1, y1), (x2, y2)])
+        xs = [c[0] for c in corners]
+        ys = [c[1] for c in corners]
+        self.assertAlmostEqual(max(xs) - min(xs), 2 * s, delta=0.05 * s)
+        self.assertAlmostEqual(max(ys) - min(ys), 4 * s, delta=0.05 * s)
 
 
 class TestGmControllerView(FrontendBase):

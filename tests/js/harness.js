@@ -116,6 +116,27 @@ function makeCtx(el) {
       this._strokes.push({ style: this.strokeStyle, path: path.slice() });
       path.length = 0; m = null;
     },
+    // Compositing model for the offscreen static grid layer (the app's
+    // cached canvas, refined render path): blitting a harness canvas element
+    // REPLAYS that layer's recorded draws into this context's recordings —
+    // per category, in the layer's draw order — so assertions on the main
+    // canvas stay meaningful: the main ctx ends up with exactly the entries
+    // the pre-cache world produced (grid art drawn straight onto it), in the
+    // same relative position (right after the background fill, before the
+    // dynamic entity pass). Blitting anything with no recordings is a
+    // no-op, as drawing an image the stub holds no pixels for would be.
+    drawImage(img) {
+      const src = (img && typeof img.getContext === "function")
+        ? img.getContext("2d") : null;
+      if (!src || !src._fills) return;
+      for (const f of src._fills) this._fills.push(f);
+      for (const s of src._strokes) this._strokes.push(s);
+      for (const a of src._arcs) this._arcs.push(a.slice());
+      for (const t of src._texts) this._texts.push(t);
+      for (const r of src._rects) this._rects.push(r);
+      for (const fp of src._fillPaths) this._fillPaths.push(fp);
+      for (const g of src._gradients) this._gradients.push(g);
+    },
     save: noop, restore: noop,
     clip: noop, setTransform: noop, transform: noop, setLineDash: noop,
     fillText(t, x, y) { this._texts.push(String(t)); },
@@ -398,8 +419,11 @@ function buildApi() {
     "uploadMap, generateMap, showUploadPreview, resetUploadForm, setSourceTab, syncTabStyles, syncGenerateButton, setGenerateBusy, setUploadBusy, syncUploadButton," +
     "doorStateAt, validateDoors, sendDoor, setTool, setDoorAction," +
     "drawDoorCell, renderLegendDoorSwatches, renderLegendBossSwatch, drawDoorClosed, drawPadlock, drawDoorOpen," +
-    // Boss entity (boss-entity spec): §2/§4.1 tables + dims helper.
-    "BOSS_FOOTPRINTS, BOSS_SKULL_POS, bossDims, syncGmTools," +
+    // Boss entity (boss-entity spec): §2/§4.1 tables + dims helper + the
+    // server-provided footprint table adoption (validateBossFootprints /
+    // bossFootprintsTable / bossFootprintLabel).
+    "BOSS_FOOTPRINTS_FALLBACK, BOSS_SKULL_POS, bossDims, bossFootprintsTable," +
+    "validateBossFootprints, bossFootprintLabel, syncGmTools," +
     "SAFE_STATES," +
     "isSafeDoor, safeDoorStateAt, validateSafe, sendSafeDoor, setSafeAction," +
     // Save / Load menu (save-load spec §7): list + save + load + delete.

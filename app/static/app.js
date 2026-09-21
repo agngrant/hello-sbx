@@ -149,6 +149,11 @@ const state = {
   players: [],
   visibility: null,     // explored map: player's S/E/H tier matrix (null for the
                         //   GM and for a malformed matrix → full-detail render)
+  bossFootprints: null, // boss-entity spec: the server-provided size → [w, h]
+                        //   footprint table (the additive `boss_footprints`
+                        //   state field, validated in applyState; null until
+                        //   a valid table arrives → the hardcoded
+                        //   BOSS_FOOTPRINTS_FALLBACK is used instead)
   fog: false,
   selectedEntityId: null,
   expectCreatedToken: false, // GM "Add" armed: the next state auto-selects the new token
@@ -358,6 +363,16 @@ function applyState(msg) {
   // so a validated replacement keeps the two client copies disjoint.
   state.safe = validateSafe(msg.map ? msg.map.safe : undefined);
   state.visibility = validateVisibilityMatrix(msg.visibility, state.grid);
+  // Boss footprints (boss-entity spec, additive): the canonical size →
+  // [w, h] tile table (app.models.BOSS_FOOTPRINTS) the server emits on
+  // EVERY state/welcome frame, so the client derives boss dimensions from
+  // the server instead of a hardcoded copy. Same additive/defensive
+  // pattern as doors/safe/visibility: absent (an old server that predates
+  // the field) or malformed (validateBossFootprints ⇒ null) ⇒ the
+  // hardcoded BOSS_FOOTPRINTS_FALLBACK keeps rendering exactly as before.
+  // bossFootprintsTable() is the single read point for the rest of the
+  // file — the server value takes precedence whenever it is present.
+  state.bossFootprints = validateBossFootprints(msg.boss_footprints);
   const fogChanged = state.fog !== msg.fog;
   state.fog = !!msg.fog;
   // The fog toggle is GM-only and stays ENABLED for the GM: fog is applied
@@ -1210,6 +1225,85 @@ function scheduleRender() {
   });
 }
 
+/* ───────────────────── Static grid layer (offscreen cache) ─────────────────────
+   The STATIC map art — floor / grid lines / walls / doors — depends only on
+   the map CONTENT (grid, doors, safe doors), the player's tier matrix
+   (state.visibility) and the VIEWPORT (level / pan + canvas size). It does
+   NOT depend on entities, awareness, selection or hover — those make up the
+   DYNAMIC layer, drawn on top every frame. Painting the static art is the
+   expensive part of a frame (O(cells) fills + strokes), so it is cached in
+   an offscreen canvas that is rebuilt ONLY when its key changes; each
+   layoutCanvas blits the cached layer with a single drawImage and then
+   repaints just the dynamic layer. On-screen output is unchanged: the
+   blitted layer carries exactly the old drawGridOnCanvas steps 1–2 (same
+   draws, same order), and the dynamic pass below is the old step 3.
+   Animation ticks (which only move entities) therefore skip the O(cells)
+   grid repaint entirely.
+
+   The layer canvas never carries id "map-canvas", so drawGridOnCanvas'
+   step 3 (the entity pass) is skipped on it by its own gate. */
+let _gridLayer = null;    // { canvas, ctx } — the cached offscreen layer
+let _gridLayerKey = null;  // the key string the cached layer was painted for
+
+function gridLayerKey(availW, availH, dpr, vis, view) {
+  // Every input the static art depends on. Being sensitive to more than is
+  // strictly required can only cost a spurious rebuild (identical art);
+  // a stale hit would be a rendering bug, so err on the rebuild side.
+  return [availW, availH, dpr, state.role,
+          JSON.stringify(state.grid),
+          JSON.stringify(state.doors),
+          JSON.stringify(state.safe),
+          JSON.stringify(vis),
+          JSON.stringify(view)].join("|");
+}
+
+function ensureGridLayer(availW, availH, dpr, vis, view) {
+  const key = gridLayerKey(availW, availH, dpr, vis, view);
+  if (_gridLayer && _gridLayerKey === key) return _gridLayer;
+  // A fresh canvas per invalidation (never clear + repaint in place) so a
+  // stale frame can never leak into the blit.
+  const canvas = document.createElement("canvas");
+  canvas.width = Math.round(availW * dpr);
+  canvas.height = Math.round(availH * dpr);
+  const ctx = canvas.getContext("2d");
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  drawGridOnCanvas(canvas, ctx, vis, view);
+  _gridLayer = { canvas, ctx };
+  _gridLayerKey = key;
+  return _gridLayer;
+}
+
+/* The DYNAMIC layer of the map-canvas pass — the old step 3 of
+   drawGridOnCanvas, factored out so the map-canvas pass can run it ON TOP
+   of the blitted static layer. Identical draws, identical order: one
+   footprint blob + skull per visible boss (culled by overlap), then the
+   tokens / awareness dots / selection / hover pass. `tier` is the cell-tier
+   lookup (the validated matrix's char, or "S" for the GM/no-tier pass). */
+function drawEntityLayers(ctx, s, ox, oy, win, tier) {
+  // Boss entities (boss-entity spec): one footprint blob + one skull per
+  // visible boss — above floor/grid (and walls/doors, which may share the
+  // footprint cells), below the awareness dots/tokens that follow. Cull by
+  // OVERLAP with the render window (§6.1): a blob whose anchor is just
+  // off-window but whose footprint straddles the edge still draws and
+  // clips at the canvas edge. Static draw only (no animation), so
+  // reducedMotion is honored trivially.
+  for (const e of allEntities()) {
+    if (e.kind !== "boss") continue;
+    const [bw, bh] = bossDims(e);   // spec §2 size → W×H table
+    const overlaps = (e.x < win.x1 && e.x + bw > win.x0 &&
+                      e.y < win.y1 && e.y + bh > win.y0);
+    if (!overlaps) continue;
+    const eTier = tier(e.x, e.y) === "E";   // §4.1 colors from the anchor tier
+    drawBoss(ctx, e, s, ox, oy, eTier);
+    // §4.1 skull center (u, v), footprint-local from the top-left anchor
+    // tile — the 6-entry spec table (left tile / top band / top row).
+    const [u, v] = BOSS_SKULL_POS[e.size] || [0.5, 0.5];
+    drawSkull(ctx, eTier ? "#6b7280" : "#111111",
+      ox + (e.x + u) * s, oy + (e.y + v) * s, s * 0.35);
+  }
+  drawEntitiesAndDots(ctx, s, ox, oy, win);
+}
+
 function layoutCanvas() {
   const wrap = els.canvasWrap;
   const availW = Math.max(0, wrap.clientWidth - 16);
@@ -1238,10 +1332,28 @@ function layoutCanvas() {
   // Explored map (§6.3): the map-canvas pass tiers cells ONLY for a player
   // holding a well-formed visibility matrix. The GM (and any absent/malformed
   // matrix) renders full detail — `null` → the no-tier renderer. The map pass
-  // also passes the VIEW so the renderer culls to the visible window (§6.1);
+  // passes the VIEW so the renderer culls to the visible window (§6.1);
   // the preview canvas never passes a view (A10, self-fit whole-map).
   const vis = (state.role === "player") ? state.visibility : null;
-  drawGridOnCanvas(canvas, ctx, vis, state._view);
+  const view = state._view;
+
+  // Static grid layer: rebuild the offscreen cache ONLY when map content /
+  // tiering / viewport changed, then blit it — one drawImage instead of
+  // O(cells) fills + strokes on every frame (see ensureGridLayer).
+  const layer = ensureGridLayer(availW, availH, dpr, vis, view);
+  ctx.drawImage(layer.canvas, 0, 0, availW, availH);
+
+  // Dynamic layer: bosses + tokens / awareness / selection / hover, on top
+  // of the static art in the exact order the old map-canvas pass (step 3)
+  // used. The tier lookup reads the validated state.visibility directly
+  // (applyState stores it only validated or null), so boss anchor colors
+  // match the static pass.
+  const tier = (x, y) => {
+    const row = vis ? vis[y] : null;
+    return (row ? row[x] : "S");
+  };
+  drawEntityLayers(ctx, view.s, view.ox, view.oy,
+    { x0: view.x0, x1: view.x1, y0: view.y0, y1: view.y1 }, tier);
 }
 
 /* Single cell-renderer shared by #map-canvas and #preview-canvas
@@ -1484,29 +1596,11 @@ function drawGridOnCanvas(canvas, ctx, visibility = null, view = null) {
   // 3. Entity tokens (GM / own character) — the #map-canvas pass only.
   //    Unchanged by the explored map. Under pan/zoom (§6.1) the entities are
   //    culled to the visible render window (the single (s, ox, oy) origin).
+  //    Factored into drawEntityLayers so the map-canvas pass can run the
+  //    SAME draws (same order) on top of its blitted static grid layer.
   if (canvas.id === "map-canvas") {
-    // Boss entities (boss-entity spec): one footprint blob + one skull per
-    // visible boss — above floor/grid (and walls/doors, which may share the
-    // footprint cells), below the awareness dots/tokens that follow. Cull by
-    // OVERLAP with the render window (§6.1): a blob whose anchor is just
-    // off-window but whose footprint straddles the edge still draws and
-    // clips at the canvas edge. Static draw only (no animation), so
-    // reducedMotion is honored trivially.
-    for (const e of allEntities()) {
-      if (e.kind !== "boss") continue;
-      const [bw, bh] = bossDims(e);   // spec §2 size → W×H table
-      const overlaps = (e.x < x1 && e.x + bw > x0 &&
-                        e.y < y1 && e.y + bh > y0);
-      if (!overlaps) continue;
-      const eTier = tier(e.x, e.y) === "E";   // §4.1 colors from the anchor tier
-      drawBoss(ctx, e, s, ox, oy, eTier);
-      // §4.1 skull center (u, v), footprint-local from the top-left anchor
-      // tile — the 6-entry spec table (left tile / top band / top row).
-      const [u, v] = BOSS_SKULL_POS[e.size] || [0.5, 0.5];
-      drawSkull(ctx, eTier ? "#6b7280" : "#111111",
-        ox + (e.x + u) * s, oy + (e.y + v) * s, s * 0.35);
-    }
-    drawEntitiesAndDots(ctx, s, ox, oy, { x0, x1, y0, y1 });  }
+    drawEntityLayers(ctx, s, ox, oy, { x0, x1, y0, y1 }, tier);
+  }
 }
 
 /* ───────────────────────────── Awareness rings (canvas, §4) ─────────────────────────────
@@ -1538,10 +1632,14 @@ function drawAwarenessRings(ctx, s, ox, oy, win) {
   const inWin = (x, y) => !win || (x >= win.x0 && x < win.x1 && y >= win.y0 && y < win.y1);
   if (state.role === "gm") {
     // GM: a ring around every player-owned token (the GM has no token).
+    // Per-frame index (entity_id → player row): ONE Map build + O(1) .get()
+    // per entity instead of an O(n) players.find scan per entity
+    // (O(n²) → O(n)).
+    const byEntity = new Map(players.map((pl) => [pl.entity_id, pl]));
     for (const e of state.entities) {
       if (!e.owner) continue;
       if (!inWin(e.x, e.y)) continue;   // §6.1 cull: off-window → skipped
-      const p = players.find((pl) => pl.entity_id === e.id);
+      const p = byEntity.get(e.id);
       const r = p && Number.isFinite(p.awareness_radius)
         ? p.awareness_radius : 4;
       drawAwarenessRing(ctx, e.x, e.y, r, s, ox, oy);
@@ -1549,7 +1647,8 @@ function drawAwarenessRings(ctx, s, ox, oy, win) {
   } else if (state.youEntity) {
     // Player: one ring around their own token, at their own radius.
     if (!inWin(state.youEntity.x, state.youEntity.y)) return;
-    const p = players.find((pl) => pl.id === state.you.id);
+    const byId = new Map(players.map((pl) => [pl.id, pl]));
+    const p = byId.get(state.you.id);
     const r = p && Number.isFinite(p.awareness_radius)
       ? p.awareness_radius : 4;
     drawAwarenessRing(ctx, state.youEntity.x, state.youEntity.y, r, s, ox, oy);
@@ -1568,6 +1667,9 @@ function drawEntitiesAndDots(ctx, s, ox, oy, win) {
   // Players keep their own entity in a local view so it stays renderable
   // even though the server sends players an empty "entities" list.
   const entities = allEntities();
+  // Per-frame index (id → entity): O(1) selection lookup instead of an
+  // O(n) scan.
+  const byId = new Map(entities.map((e) => [e.id, e]));
   const inWin = (x, y) => !win || (x >= win.x0 && x < win.x1 && y >= win.y0 && y < win.y1);
 
   // Awareness rings (under the tokens; see drawAwarenessRings).
@@ -1575,7 +1677,7 @@ function drawEntitiesAndDots(ctx, s, ox, oy, win) {
 
   // Selection ring (under tokens). Boss (spec §6): a rounded-rect outline
   // around the FULL W×H blob, offset 2 px — not a per-tile circle.
-  const sel = entities.find((e) => e.id === state.selectedEntityId);
+  const sel = byId.get(state.selectedEntityId);
   if (sel && inWin(sel.x, sel.y)) {
     ctx.strokeStyle = T.accent;
     ctx.lineWidth = 2.5;
@@ -1699,11 +1801,53 @@ function drawEntitiesAndDots(ctx, s, ox, oy, win) {
 
 /* ───────────────────────────── Boss entity (boss-entity spec §2/§4) ─────────────────────────────
    The WIRE carries a boss's `size` (total tiles: 2/4/6/8/10/12) and its
-   top-left ANCHOR cell only — never W/H. The blob dimensions and skull
-   position derive from the spec tables below (Entity.to_dict omits both). */
-const BOSS_FOOTPRINTS = {
+   top-left ANCHOR cell only — never W/H. The blob dimensions derive from
+   the size → [w, h] tile table (Entity.to_dict omits W/H); the skull
+   position from the §4.1 offsets below.
+
+   Footprint table: the SERVER is the single source of truth. Every
+   state/welcome frame carries the additive `boss_footprints` field
+   (app.models.BOSS_FOOTPRINTS as JSON — stringified size keys → [w, h]
+   arrays); applyState stores the validated copy in state.bossFootprints.
+   BOSS_FOOTPRINTS_FALLBACK below is kept ONLY for old servers that never
+   send the field, and is used whenever the wire value is absent or
+   malformed (validateBossFootprints ⇒ null). Every consumer reads the
+   table through bossFootprintsTable() — never the constant. */
+const BOSS_FOOTPRINTS_FALLBACK = {
   2: [2, 1], 4: [2, 2], 6: [2, 3], 8: [2, 4], 10: [2, 5], 12: [3, 4],
 };
+/* Defensive validation of the wire's `boss_footprints` field (cf.
+   validateDoors / validateSafe / validateVisibilityMatrix): it must be a
+   plain object mapping integer size keys ("2", "4", …) to [w, h] arrays
+   of positive integers (JSON renders the server's tuples exactly that
+   way). Anything else — wrong type, an array, a bad key, a bad value, or
+   an empty object — is rejected (null ⇒ the caller keeps the hardcoded
+   fallback), so a malformed payload can never crash the render. The key
+   set is deliberately NOT pinned to the six known sizes: the server stays
+   authoritative, so a NEW size it ever adds must arrive and render, not
+   be silently dropped. */
+function validateBossFootprints(fp) {
+  if (fp == null) return null;
+  if (typeof fp !== "object" || Array.isArray(fp)) return null;
+  const clean = {};
+  for (const key of Object.keys(fp)) {
+    if (!/^\d+$/.test(key) || Number(key) < 1) return null;
+    const v = fp[key];
+    if (!Array.isArray(v) || v.length !== 2) return null;
+    const [w, h] = v;
+    if (!Number.isInteger(w) || !Number.isInteger(h) ||
+        w <= 0 || h <= 0) return null;
+    clean[Number(key)] = [w, h];
+  }
+  return Object.keys(clean).length ? clean : null;
+}
+/* The live size → [w, h] table: the server-provided state.bossFootprints
+   when present (new servers), else the hardcoded fallback (old servers —
+   backward compat: an old server never sends the field, so this is a
+   no-op for them). */
+function bossFootprintsTable() {
+  return state.bossFootprints || BOSS_FOOTPRINTS_FALLBACK;
+}
 /* Spec §4.1: skull center (u, v) in footprint-local tile space from the
    top-left anchor tile — 2×1 rides the LEFT tile; 4/12 the top BAND
    (v=0.75); 6/8/10 the top ROW (v=0.5). */
@@ -1712,14 +1856,14 @@ const BOSS_SKULL_POS = {
   10: [1.0, 0.5], 12: [1.5, 0.75],
 };
 function bossDims(e) {
-  return BOSS_FOOTPRINTS[e.size] || [1, 1];
+  return bossFootprintsTable()[e.size] || [1, 1];
 }
 /* Sidebar / selection readout for a boss's `size` (total tiles): the
    "W×H" footprint text from the §2 table (e.g. size 8 → "2×4"). null
    for a size that is not in the table (graceful degrade: no size text,
    exactly as before this feature). */
 function bossFootprintLabel(size) {
-  const fp = BOSS_FOOTPRINTS[size];
+  const fp = bossFootprintsTable()[size];
   return fp ? `${fp[0]}×${fp[1]}` : null;
 }
 
@@ -1944,6 +2088,11 @@ function drawSidebar() {
     els.awarenessList.appendChild(li);
   }
 
+  // Per-frame entity index (id → entity): the GM rows used to rescan
+  // allEntities() with .find for EVERY awareness item (and re-allocate the
+  // array on each item); one Map build + O(1) .get() per row replaces it.
+  const eIndex = gm ? new Map(allEntities().map((e) => [e.id, e])) : null;
+
   for (const item of state.awareness) {
     if (item.color === "green") counts.green++;
     else if (item.color === "white") counts.white++;
@@ -1964,7 +2113,7 @@ function drawSidebar() {
     }
     let name = null, meta = null;
     if (gm) {
-      const e = allEntities().find((x) => x.id === item.entity_id);
+      const e = eIndex.get(item.entity_id);
       name = item.name || (e ? e.name : null);
       meta = e ? `${e.kind}·${e.team}` : null;
       // Boss: append the footprint size (e.g. "boss·hostile · 2×4").
