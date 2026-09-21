@@ -85,9 +85,10 @@ and binds `127.0.0.1:8000`.
     any detection mistakes — corrections apply to everyone live.
   - **Teams:** set a selected entity's team to *party* / *neutral* / *hostile*
     (this drives the awareness colors).
-  - **Create / delete tokens:** add `npc` or `enemy` tokens
-    (spawned on the last hovered tile) and delete any entity. The GM itself
-    has no token on the map — there is nothing to select for the GM.
+   - **Create / delete tokens:** add `npc`, `enemy`, or multi-tile `boss`
+     tokens (bosses in one of six fixed sizes — see below) spawned on the
+     last hovered tile, and delete any entity. The GM itself has no token
+     on the map — there is nothing to select for the GM.
   - **Fog of war:** the old fog-of-war toggle is retained on the wire for
     compatibility but no longer changes what players see — visibility is now
     always the line-of-sight + proximity model below.
@@ -175,11 +176,43 @@ The core rule: **only player characters (party) and neutral NPCs may step
 onto / stand on a safe room door** — a **hostile** enemy can never path
 onto, stand on, or be placed on the cell, **even while the door is open**
 and **even under the GM's *Ignore walls* override** (the safety rule; party
-and neutral keep their normal ignore-walls behavior). Like a normal door, a
-**closed** safe room door blocks sight and movement like a wall; an **open**
-one is walkable and sight-transparent for party/neutral. It renders as a
-**green cross** (closed = cross + bar) — distinct from normal doors' red
-padlock / amber bar / amber arch — and appears in the legend.
+ and neutral keep their normal ignore-walls behavior). Like a normal door, a
+ **closed** safe room door blocks sight and movement like a wall; an **open**
+ one is walkable and sight-transparent for party/neutral. It renders as a
+ **green cross** (closed = cross + bar) — distinct from normal doors' red
+ padlock / amber bar / amber arch — and appears in the legend.
+
+### Bosses (GM)
+
+A **boss** is a **multi-tile** enemy token. Instead of a single 1×1 cell it
+occupies a fixed **W×H footprint** (top-left anchored) chosen from six
+sizes — **2×1, 2×2, 2×3, 2×4, 2×5, 3×4** (the *Size* dropdown in the token
+-creation form, GM-only). A boss:
+
+- **Spawns only where its FULL footprint fits** — every tile of the W×H
+  block in-bounds and on floor/doorway, free of other entities — otherwise
+  the exact error `Boss footprint does not fit` is returned. (Spec:
+  `docs/specs/boss-entity.md` §2.)
+- **Blocks movement like a solid obstacle:** no entity may *stop* on any
+  tile of a boss's footprint (`destination occupied`), and a boss cannot be
+  moved onto its own cell. Routing itself is entity-unaware by design
+  (boss spec §8) — a path may *transit* a cell, but the stop point must be
+  free.
+- **Renders as a single rounded blob** spanning its footprint (red
+  `#e03131`, 2px outline, interior grid dimmed) with a line-art **skull**
+  centered per size (§4.1). On the **explored** (greyed) tier the blob and
+  skull render muted at the identical position. Selecting a boss draws a
+  rounded-rect ring around its whole footprint. A matching **legend** entry
+  is drawn from the same render code.
+- **Persists through saves:** its `size` round-trips in the save bundle, and
+  on `use_map`/load a boss that no longer fits is repositioned so its full
+  footprint lands on floor.
+
+A boss is always `enemy`-class per `models.is_enemy` (regardless of team);
+its *team* (party/neutral/hostile) is set in the token-creation form and
+drives the usual team-based rules — awareness colors/shapes are team-driven,
+and e.g. a hostile-team boss is barred from safe-room doors like any
+hostile.
 
 ---
 
