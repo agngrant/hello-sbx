@@ -228,22 +228,31 @@ function makeEl() {
    headless browser is available in this environment — the team's own
    qa_ui_smoke probe is a Node harness probe of the same kind.) */
 function loadLegendSwatches(indexPath) {
-  const html = fs.readFileSync(indexPath, "utf8");
-  const chips = [];
-  const re = /<i\s+class="door-swatch"([^>]*)><\/i>/g;
-  let m;
-  while ((m = re.exec(html))) {
-    const attrs = m[1];
-    const get = (name) => {
-      const am = attrs.match(new RegExp(name + '="([^"]*)"'));
-      return am ? am[1] : null;
-    };
-    const el = makeEl();
-    el.tag = "i";
-    el.dataset = { kind: get("data-kind"), state: get("data-state") };
-    chips.push(el);
-  }
-  return chips;
+   const html = fs.readFileSync(indexPath, "utf8");
+   const chips = [];
+   const re = /<i\s+class="door-swatch"([^>]*)><\/i>/g;
+   let m;
+   while ((m = re.exec(html))) {
+     const attrs = m[1];
+     const get = (name) => {
+       const am = attrs.match(new RegExp(name + '="([^"]*)"'));
+       return am ? am[1] : null;
+     };
+     const el = makeEl();
+     el.tag = "i";
+     el.dataset = { kind: get("data-kind"), state: get("data-state") };
+     chips.push(el);
+   }
+   // Boss chip (boss-entity spec §6): the real index.html carries exactly
+   // one bare <i class="boss-swatch"></i>; renderLegendBossSwatch must find
+   // it via #legend.querySelector(".boss-swatch").
+   const boss = [];
+   if (/<i\s+class="boss-swatch"><\/i>/.test(html)) {
+     const el = makeEl();
+     el.tag = "i";
+     boss.push(el);
+   }
+   return { door: chips, boss };
 }
 
 function buildApi() {
@@ -251,9 +260,9 @@ function buildApi() {
   const INDEX_HTML_PATH = process.env.INDEX_HTML_PATH;
   // LEGEND_SWATCHES defaults ON when INDEX_HTML_PATH is provided (opt out
   // with "0"): the suite wants the real lobby DOM by default.
-  const chips = INDEX_HTML_PATH && process.env.LEGEND_SWATCHES !== "0"
-    ? loadLegendSwatches(INDEX_HTML_PATH)
-    : [];
+   const chips = INDEX_HTML_PATH && process.env.LEGEND_SWATCHES !== "0"
+     ? loadLegendSwatches(INDEX_HTML_PATH)
+     : { door: [], boss: [] };
   const timer = makeTimer();
   const __SEND = makeSend();
 
@@ -278,12 +287,19 @@ function buildApi() {
         // .door-swatch chips (chips above) for ".door-swatch" so the
         // swatch loop body executes at boot.
         el.querySelectorAll = (s) =>
-          s === ".door-swatch" ? chips.slice() : [];
+          s === ".door-swatch" ? chips.door.slice()
+            : s === ".boss-swatch" ? chips.boss.slice() : [];
+        // Boss swatch (boss-entity spec §6): renderLegendBossSwatch looks
+        // the chip up with querySelector (single element).
+        el.querySelector = (s) =>
+          s === ".boss-swatch" ? (chips.boss[0] || null) : null;
       }
       return el;
     },
     querySelectorAll(sel) {
-      return sel === ".door-swatch" ? chips.slice() : [];
+      if (sel === ".door-swatch") return chips.door.slice();
+      if (sel === ".boss-swatch") return chips.boss.slice();
+      return [];
     },
     createElement() { return makeEl(); },
     addEventListener(type, fn) {
@@ -381,7 +397,9 @@ function buildApi() {
     "join, connectWs, setConn, scheduleReconnect, showView, wsSend, wsUrl," +
     "uploadMap, generateMap, showUploadPreview, resetUploadForm, setSourceTab, syncTabStyles, syncGenerateButton, setGenerateBusy, setUploadBusy, syncUploadButton," +
     "doorStateAt, validateDoors, sendDoor, setTool, setDoorAction," +
-    "drawDoorCell, renderLegendDoorSwatches, drawDoorClosed, drawPadlock, drawDoorOpen," +
+    "drawDoorCell, renderLegendDoorSwatches, renderLegendBossSwatch, drawDoorClosed, drawPadlock, drawDoorOpen," +
+    // Boss entity (boss-entity spec): §2/§4.1 tables + dims helper.
+    "BOSS_FOOTPRINTS, BOSS_SKULL_POS, bossDims, syncGmTools," +
     "SAFE_STATES," +
     "isSafeDoor, safeDoorStateAt, validateSafe, sendSafeDoor, setSafeAction," +
     // Save / Load menu (save-load spec §7): list + save + load + delete.

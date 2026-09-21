@@ -201,6 +201,7 @@
           <span class="legend-chip"><i class="dot dot-tri team-party"></i>friend</span>
           <span class="legend-chip"><i class="dot dot-circle team-neutral"></i>neutral</span>
           <span class="legend-chip"><i class="dot dot-square team-hostile"></i>enemy</span>
+          <span class="legend-chip"><i class="boss-swatch"></i>Boss (multi-tile)</span>
           <span class="legend-chip"><i class="dot dot-approx"></i>unseen contact (within awareness range, sight blocked)</span>
           <span class="legend-chip"><i class="ring-swatch"></i>awareness range</span>
           <span class="legend-note">in sight → named token · blocked within the player's awareness range (default 4 squares) → gray “?” block · beyond the awareness range or blocked farther away → hidden</span>
@@ -275,6 +276,7 @@
             <select id="new-entity-kind">
               <option value="npc">npc</option>
               <option value="enemy">enemy</option>
+              <option value="boss">boss</option>
             </select>
             <select id="new-entity-team">
               <option value="party">party</option>
@@ -282,6 +284,18 @@
               <option value="hostile">hostile</option>
             </select>
             <button id="btn-new-entity" class="btn">Add</button>
+          </div>
+          <div class="gm-field-row">
+            <label class="muted" for="new-entity-size">Size</label>
+            <select id="new-entity-size" disabled
+                    title="Boss footprint size in tiles (boss-entity spec §2)">
+              <option value="2" selected>2 — 2×1</option>
+              <option value="4">4 — 2×2</option>
+              <option value="6">6 — 2×3</option>
+              <option value="8">8 — 2×4</option>
+              <option value="10">10 — 2×5</option>
+              <option value="12">12 — 3×4</option>
+            </select>
           </div>
           <p class="muted small">Spawns on the last hovered tile (first free tile if none).</p>
         </section>

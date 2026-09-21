@@ -556,6 +556,12 @@ input[type="file"] { color: var(--text-muted); }
    players (no body.is-gm gate). */
 .door-swatch { display: inline-block; width: 16px; height: 16px; border-radius: 2px; }
 .door-swatch canvas { display: block; }
+/* Boss swatch (boss-entity spec §6): a 20×10 <canvas> drawn by
+   renderLegendBossSwatch() with the ACTUAL map art (a size-2 boss: red
+   rounded blob + black skull at 10px/tile), so the legend matches the
+   in-canvas art (AC7). Visible to BOTH GM and players. */
+.boss-swatch { display: inline-block; width: 20px; height: 10px; }
+.boss-swatch canvas { display: block; }
 /* Explored map tiers (explored-map spec §7): "explored" = greyed floor with a
    grey wall border; "hidden" = the canvas background (nothing drawn). */
 .swatch.explored { background: var(--explored-floor); border: 1px solid var(--explored-wall); }

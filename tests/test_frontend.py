@@ -700,6 +700,109 @@ class TestLobbyBootRegression(FrontendBase):
         self.assertIn("true", out, out)
 
 
+class TestBossEntityFrontend(FrontendBase):
+    """Boss entity rendering (docs/specs/boss-entity.md). The WIRE carries
+    only ``size`` (2/4/6/8/10/12) + the top-left anchor cell — never W/H —
+    so the blob dimensions (AC1/AC2) and the skull center (AC4) must derive
+    from the spec §2/§4.1 tables in app.js; the GM spawn form arms the size
+    selector only for the boss kind; the legend chip renders the ACTUAL
+    canvas art (AC7)."""
+
+    def test_footprint_table_matches_spec_section_2(self):
+        # Size (total tiles) → [W, H] tiles, anchored top-left.
+        out = json.loads(js("api.BOSS_FOOTPRINTS"))
+        self.assertEqual(out, {
+            "2": [2, 1], "4": [2, 2], "6": [2, 3],
+            "8": [2, 4], "10": [2, 5], "12": [3, 4],
+        })
+
+    def test_skull_table_matches_spec_section_4_1(self):
+        # Skull center (u, v) in footprint-local tile space: 2×1 rides the
+        # left tile; 4/12 the top band (v=0.75); 6/8/10 the top row (v=0.5).
+        out = json.loads(js("api.BOSS_SKULL_POS"))
+        self.assertEqual(out, {
+            "2": [0.5, 0.5], "4": [1.0, 0.75], "6": [1.0, 0.5],
+            "8": [1.0, 0.5], "10": [1.0, 0.5], "12": [1.5, 0.75],
+        })
+
+    def test_boss_dims_resolves_size_and_falls_back_to_single_tile(self):
+        out = json.loads(js(
+            "({eight:api.bossDims({size:8}),bad:api.bossDims({size:99}),"
+            "missing:api.bossDims({})})"
+        ))
+        self.assertEqual(out["eight"], [2, 4])
+        self.assertEqual(out["bad"], [1, 1])
+        self.assertEqual(out["missing"], [1, 1])
+
+    def test_legend_boss_swatch_renders_actual_art(self):
+        # showView("map") (the production call site) draws ONE 20×10 canvas
+        # (a size-2 boss: 2×1 footprint at 10px/tile) onto the real
+        # index.html chip.
+        out = json.loads(js(
+            "(()=>{api.showView('map');"
+            "const chip=api.document.querySelector('#legend')"
+            ".querySelector('.boss-swatch');"
+            "const c=chip.children[0];"
+            "return {n:chip.children.length,w:c.width,h:c.height};})()"
+        ))
+        self.assertEqual(out, {"n": 1, "w": 20, "h": 10})
+
+    def test_legend_boss_swatch_is_idempotent(self):
+        out = json.loads(js(
+            "(()=>{api.showView('map');api.showView('map');"
+            "const chip=api.document.querySelector('#legend')"
+            ".querySelector('.boss-swatch');"
+            "return chip.children.length;})()"
+        ))
+        self.assertEqual(out, 1)
+
+    def test_spawn_boss_sends_size_and_other_kinds_omit_it(self):
+        out = json.loads(js(
+            "(()=>{api.state.role='gm';"
+            "api.els.newEntityName.value='Gore';"
+            "api.els.newEntityTeam.value='hostile';"
+            "api.state.grid={width:6,height:6,cells:Array.from"
+            "({length:6},()=>Array(6).fill('floor'))};"
+            "api.state.lastHovered={x:1,y:1};"
+            "api.els.newEntityKind.value='boss';"
+            "api.els.newEntitySize.value='8';"
+            "api._send.sent.length=0;"
+            "api.createEntity();"
+            "const bossMsg=api._send.sent[api._send.sent.length-1];"
+            "api.els.newEntityKind.value='npc';"
+            "api._send.sent.length=0;"
+            "api.createEntity();"
+            "const npcMsg=api._send.sent[api._send.sent.length-1];"
+            "return {bossMsg,npcMsg};})()"
+        ))
+        boss = out["bossMsg"]
+        self.assertEqual(boss["type"], "create_entity")
+        self.assertEqual(boss["kind"], "boss")
+        self.assertEqual(boss["size"], 8)
+        self.assertEqual((boss["x"], boss["y"]), (1, 1))
+        self.assertNotIn("size", out["npcMsg"])
+
+    def test_size_selector_gated_by_role_and_kind(self):
+        out = json.loads(js(
+            "(()=>{const out={};"
+            "api.state.role='player';"
+            "api.els.newEntityKind.value='boss';"
+            "api.syncGmTools();"
+            "out.playerBoss=api.els.newEntitySize.disabled;"
+            "api.state.role='gm';"
+            "api.els.newEntityKind.value='boss';"
+            "api.syncGmTools();"
+            "out.gmBoss=api.els.newEntitySize.disabled;"
+            "api.els.newEntityKind.value='npc';"
+            "api.syncGmTools();"
+            "out.gmNpc=api.els.newEntitySize.disabled;"
+            "return out;})()"
+        ))
+        self.assertEqual(
+            out, {"playerBoss": True, "gmBoss": False, "gmNpc": True}
+        )
+
+
 class TestGmControllerView(FrontendBase):
     """Acceptance for "GM is a pure controller" (docs/design/gm-controller.md
     §8, A12–A15/A19): a GM welcome with you.entity_id = null and an empty

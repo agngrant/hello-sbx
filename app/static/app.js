@@ -96,6 +96,7 @@ const els = {
   btnDeleteEntity: $("#btn-delete-entity"),
   newEntityName: $("#new-entity-name"),
   newEntityKind: $("#new-entity-kind"),
+  newEntitySize: $("#new-entity-size"),
   newEntityTeam: $("#new-entity-team"),
   btnNewEntity: $("#btn-new-entity"),
   // map: saves panel (save-load spec §7.2) — GM-only, between GM Tools and
@@ -545,7 +546,11 @@ function showView(view) {
   els.lobbyView.hidden = view !== "lobby";
   els.uploadView.hidden = view !== "upload";
   els.mapView.hidden = view !== "map";
-  if (view === "map") { renderLegendDoorSwatches(); syncNavControls(); }
+  if (view === "map") {
+    renderLegendDoorSwatches();
+    renderLegendBossSwatch();
+    syncNavControls();
+  }
   // Saves list refresh triggers (save-load spec §7.2): the GM's panel first
   // shown + after each save/load/delete + on a successful use_map (all wired
   // in the saves module). Cheap: one small GET.
@@ -585,6 +590,34 @@ function renderLegendDoorSwatches() {
     }
     el.appendChild(c);
   }
+}
+
+/* Legend boss swatch (boss-entity spec §6/AC7): the `.boss-swatch` chip in
+   #legend holds a 20×10 <canvas> rendering the ACTUAL map art at 10px/tile —
+   a size-2 boss (2×1 footprint): drawBoss blob + drawSkull at the §4.1
+   center — so the legend matches the in-canvas art. Idempotent; the ONLY
+   production call site is showView("map") (same T-ordering constraint as
+   renderLegendDoorSwatches). */
+function renderLegendBossSwatch() {
+  const legend = els.legend;
+  if (!legend || !legend.querySelector) return;
+  const el = legend.querySelector(".boss-swatch");
+  if (!el) return;
+  const hasCanvas = (el.querySelector && el.querySelector("canvas")) ||
+    (Array.isArray(el.children) && el.children.length > 0);
+  if (hasCanvas) return;
+  const s = 10;   // 2×1 footprint → 20×10 px
+  const c = document.createElement("canvas");
+  c.width = 2 * s;
+  c.height = 1 * s;
+  const c2d = c.getContext && c.getContext("2d");
+  if (c2d) {
+    const fake = { kind: "boss", size: 2, x: 0, y: 0 };
+    drawBoss(c2d, fake, s, 0, 0, false);
+    const [u, v] = BOSS_SKULL_POS[2];
+    drawSkull(c2d, "#111111", u * s, v * s, s * 0.35);
+  }
+  el.appendChild(c);
 }
 
 /* P1 join-blocking bug: `renderLegendDoorSwatches()` must never run before
@@ -1459,18 +1492,17 @@ function drawGridOnCanvas(canvas, ctx, visibility = null, view = null) {
     // off-window but whose footprint straddles the edge still draws and
     // clips at the canvas edge. Static draw only (no animation), so
     // reducedMotion is honored trivially.
-    const W = (e) => e.W || 1, H = (e) => e.H || 1;
     for (const e of allEntities()) {
       if (e.kind !== "boss") continue;
-      const overlaps = (e.x < x1 && e.x + W(e) > x0 &&
-                        e.y < y1 && e.y + H(e) > y0);
+      const [bw, bh] = bossDims(e);   // spec §2 size → W×H table
+      const overlaps = (e.x < x1 && e.x + bw > x0 &&
+                        e.y < y1 && e.y + bh > y0);
       if (!overlaps) continue;
       const eTier = tier(e.x, e.y) === "E";   // §4.1 colors from the anchor tier
       drawBoss(ctx, e, s, ox, oy, eTier);
-      // §4.1 skull center, footprint-local (u,v) from the top-left anchor tile:
-      // 2×1 → (0.5, 0.5); W≥2, H≥2 → (1.0, 0.75).
-      const u = W(e) >= 2 ? 1.0 : 0.5;
-      const v = W(e) === 2 && H(e) === 1 ? 0.5 : 0.75;
+      // §4.1 skull center (u, v), footprint-local from the top-left anchor
+      // tile — the 6-entry spec table (left tile / top band / top row).
+      const [u, v] = BOSS_SKULL_POS[e.size] || [0.5, 0.5];
       drawSkull(ctx, eTier ? "#6b7280" : "#111111",
         ox + (e.x + u) * s, oy + (e.y + v) * s, s * 0.35);
     }
@@ -1541,18 +1573,30 @@ function drawEntitiesAndDots(ctx, s, ox, oy, win) {
   // Awareness rings (under the tokens; see drawAwarenessRings).
   drawAwarenessRings(ctx, s, ox, oy, win);
 
-  // Selection ring (under tokens)
+  // Selection ring (under tokens). Boss (spec §6): a rounded-rect outline
+  // around the FULL W×H blob, offset 2 px — not a per-tile circle.
   const sel = entities.find((e) => e.id === state.selectedEntityId);
   if (sel && inWin(sel.x, sel.y)) {
     ctx.strokeStyle = T.accent;
     ctx.lineWidth = 2.5;
-    ctx.beginPath();
-    ctx.arc(ox + sel.x * s + s / 2, oy + sel.y * s + s / 2, s * 0.55, 0, Math.PI * 2);
+    if (sel.kind === "boss") {
+      const [bw, bh] = bossDims(sel);
+      const r = 0.14 * Math.min(bw, bh) * s + 2;
+      roundRect(ctx, ox + sel.x * s - 2, oy + sel.y * s - 2,
+                bw * s + 4, bh * s + 4, r);
+    } else {
+      ctx.beginPath();
+      ctx.arc(ox + sel.x * s + s / 2, oy + sel.y * s + s / 2, s * 0.55, 0, Math.PI * 2);
+    }
     ctx.stroke();
   }
 
-  // Full tokens for every entity the client controls (GM: all; player: self).
+  // Full tokens for every entity the client controls (GM: all; player:
+  // self). Bosses are skipped: they already render as blob + skull in the
+  // boss pass above (spec §3 layering) — a token circle here would
+  // double-draw the anchor tile.
   for (const e of entities) {
+    if (e.kind === "boss") continue;
     if (!inWin(e.x, e.y)) continue;   // §6.1 cull
     const isOwn = state.you && e.id === state.you.entity_id;
     drawToken(ctx, e, ox, oy, s, {
@@ -1631,9 +1675,26 @@ function drawEntitiesAndDots(ctx, s, ox, oy, win) {
 }
 
 /* ───────────────────────────── Boss entity (boss-entity spec §2/§4) ─────────────────────────────
-   One boss = one rounded footprint blob + one skull, both pure canvas (no
+   The WIRE carries a boss's `size` (total tiles: 2/4/6/8/10/12) and its
+   top-left ANCHOR cell only — never W/H. The blob dimensions and skull
+   position derive from the spec tables below (Entity.to_dict omits both). */
+const BOSS_FOOTPRINTS = {
+  2: [2, 1], 4: [2, 2], 6: [2, 3], 8: [2, 4], 10: [2, 5], 12: [3, 4],
+};
+/* Spec §4.1: skull center (u, v) in footprint-local tile space from the
+   top-left anchor tile — 2×1 rides the LEFT tile; 4/12 the top BAND
+   (v=0.75); 6/8/10 the top ROW (v=0.5). */
+const BOSS_SKULL_POS = {
+  2: [0.5, 0.5], 4: [1.0, 0.75], 6: [1.0, 0.5], 8: [1.0, 0.5],
+  10: [1.0, 0.5], 12: [1.5, 0.75],
+};
+function bossDims(e) {
+  return BOSS_FOOTPRINTS[e.size] || [1, 1];
+}
+
+/* One boss = one rounded footprint blob + one skull, both pure canvas (no
    assets). drawBoss: a roundRect over the boss's W×H footprint (W/H from
-   its anchor; 2×2 → 1×1 → 1×2 → 2×1), fill T.enemy (E tier: #8a5a5e),
+   the §2 size table via bossDims), fill T.enemy (E tier: #8a5a5e),
    2px T.dotStroke stroke, corner radius 0.14×min(W,H) tiles, interior grid
    lines dimmed to 30% alpha (T.gridLineDim) inside the blob. drawSkull:
    a line-skull (dome, two eye sockets, nose triangle, two jaw ticks) in
@@ -1641,8 +1702,8 @@ function drawEntitiesAndDots(ctx, s, ox, oy, win) {
    (s from the view), so 0.35×s — centered at spec §4.1 (offsets in anchor
    cells). Static draw only (no animation), so reducedMotion needs no
    special handling. */
-function drawBoss(ctx, e, s, ox, oy, eTier) {
-  const W = e.W || 1, H = e.H || 1;
+ function drawBoss(ctx, e, s, ox, oy, eTier) {
+   const [W, H] = bossDims(e);
   const px = ox + e.x * s, py = oy + e.y * s;
   const r = 0.14 * Math.min(W, H) * s;
   roundRect(ctx, px, py, W * s, H * s, r);
@@ -1674,10 +1735,10 @@ function drawBoss(ctx, e, s, ox, oy, eTier) {
 function drawSkull(ctx, color, cx, cy, size) {
   const u = size / 16;          // 16-unit grid; ~14.5 units tall
   ctx.save();
-  ctx.strokeStyle = color;
-  ctx.fillStyle = color;
-  ctx.lineWidth = Math.max(1, size * 0.09);
-  ctx.lineCap = "round";
+   ctx.strokeStyle = color;
+   ctx.fillStyle = color;
+   ctx.lineWidth = size * 0.05;   // spec §4: stroke = 5% of icon size
+   ctx.lineCap = "round";
   ctx.lineJoin = "round";
   // Dome: open-bottom U
   ctx.beginPath();
@@ -2219,6 +2280,11 @@ function syncGmTools() {
   els.newEntityName.disabled = !gm;
   els.newEntityKind.disabled = !gm;
   els.newEntityTeam.disabled = !gm;
+  // Boss size selector (boss-entity spec §2): live only for a GM with the
+  // boss kind armed — the other kinds have no footprint.
+  if (els.newEntitySize) {
+    els.newEntitySize.disabled = !gm || els.newEntityKind.value !== "boss";
+  }
   els.btnNewEntity.disabled = !gm;
   els.overrideToggle.disabled = !gm;
   if (sel) els.teamSelect.value = sel.team;
@@ -2336,6 +2402,9 @@ els.newEntityName.addEventListener("input", () => {
   syncGmTools();
 });
 
+// Boss kind armed → the size selector enables (syncGmTools gates it).
+els.newEntityKind.addEventListener("change", () => syncGmTools());
+
 els.btnNewEntity.addEventListener("click", () => createEntity());
 
 // GM "Add": spawn a token at the last hovered walkable tile (else the first
@@ -2345,13 +2414,21 @@ function createEntity() {
   const name = els.newEntityName.value.trim() || "entity";
   const kind = els.newEntityKind.value;
   const team = els.newEntityTeam.value;
+  const msg = { type: "create_entity", name, kind, team };
+  if (kind === "boss" && els.newEntitySize) {
+    // Boss footprint size (spec §2 table); the server defaults to size 2
+    // when the key is absent, so send it explicitly for a chosen variant.
+    msg.size = Number(els.newEntitySize.value);
+  }
   const spot = (state.lastHovered &&
                 state.grid &&
                 (state.grid.cells[state.lastHovered.y][state.lastHovered.x] === "floor" ||
                  state.grid.cells[state.lastHovered.y][state.lastHovered.x] === "doorway"))
     ? state.lastHovered
     : firstFreeFloor();
-  wsSend({ type: "create_entity", name, kind, team, x: spot.x, y: spot.y });
+  msg.x = spot.x;
+  msg.y = spot.y;
+  wsSend(msg);
   els.newEntityName.value = "";
   state.expectCreatedToken = true;  // the next state selects the new token
   dismissGmFirstRunHint();
