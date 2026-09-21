@@ -69,6 +69,7 @@ from app.main import (
     _unique_map_id,
     get_map_entry,
     get_session,
+    lock_all_sessions,
     maps_registry,
     slug_map_id,
 )
@@ -282,8 +283,11 @@ def build_app() -> FastAPI:
                 # its tasks, and it only ever holds the RLock for a few
                 # milliseconds (a 16x12 A* is <1ms), so doing it inline
                 # keeps joins/moves/paints broadcast-correct without adding
-                # a thread hop. (REST does not take the session lock, so
-                # there is no cross-thread lock contention to hide behind.)
+                # a thread hop. (REST paint now takes the session locks too
+                # — app.main.lock_all_sessions — but it also runs on this
+                # same event-loop thread, so the two surfaces are already
+                # serialized and there is no cross-thread lock contention
+                # between them to hide behind.)
                 reply = session.handle_message(websocket, msg)
                 if reply is not None:
                     await websocket.send_text(
@@ -765,19 +769,28 @@ async def _handle_paint(map_id: str, request: Any) -> JSONResponse:
             f"({x}, {y}) out of bounds for {grid.width}x{grid.height} grid",
         )
 
-    grid.cells[y][x] = cell_type
-    # D4 (door-features spec §9): the REST paint route shares the SAME single
-    # sync point as the WS paint handler, so door state can never desync from
-    # the cell type on either surface (paint a doorway → door created locked;
-    # paint floor/wall over a door → state deleted). The response shape is
-    # unchanged (frozen) — a subsequent GET reflects the door state.
-    grid.sync_doors_after_cell_set(x, y)
-    # Stage 5b: the REST paint mutates the grid OUTSIDE any session (REST
-    # maps live in the registry, not in a GameSession) — bump the revision so
-    # a session later opened on this map (which resets to the grid's current
-    # revision) serializes the wire form fresh. The registry's own GET
-    # re-reads cells each request, so no cache is involved here.
-    grid.bump_revision()
+    # Data-race fix: the registry grid is shared by object identity with
+    # every live session playing it (app.main.get_session installs the
+    # registry's grid; use_map re-swaps sessions back onto it), so the
+    # mutation runs under EVERY session's lock — the same lock every WS
+    # paint/snapshot/door/safe path takes. All three lines are atomic
+    # together: a session snapshot sees either the whole paint or none of
+    # it, and the revision bump (which invalidates the stage 5b _grid_wire
+    # cache and the revision-keyed awareness cache) is serialized with the
+    # mutation it describes.
+    with lock_all_sessions():
+        grid.cells[y][x] = cell_type
+        # D4 (door-features spec §9): the REST paint route shares the SAME
+        # single sync point as the WS paint handler, so door state can never
+        # desync from the cell type on either surface (paint a doorway →
+        # door created locked; paint floor/wall over a door → state
+        # deleted). The response shape is unchanged (frozen) — a subsequent
+        # GET reflects the door state.
+        grid.sync_doors_after_cell_set(x, y)
+        # Stage 5b: bump the revision so every session's wire cache
+        # serializes the painted grid fresh (the registry's own GET
+        # re-reads cells each request, so no cache is involved there).
+        grid.bump_revision()
     return JSONResponse(
         {"ok": True, "x": x, "y": y, "cell_type": cell_type},
         headers={"Cache-Control": "no-store"},

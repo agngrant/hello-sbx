@@ -43,7 +43,8 @@ import os
 import re
 import threading
 import time
-from typing import Any
+from contextlib import contextmanager
+from typing import Any, Iterator
 
 from app.grid import SAMPLE_MAP_ID, build_sample_map
 from app.models import Grid
@@ -104,6 +105,37 @@ def get_session(session_id: str) -> GameSession:
             session = GameSession(session_id, entry["grid"])
             sessions[session_id] = session
         return session
+
+
+@contextmanager
+def lock_all_sessions() -> Iterator[None]:
+    """Hold the locks of EVERY live session at once (REST paint path).
+
+    The registry grid a REST paint mutates is shared by OBJECT IDENTITY
+    with every session playing it — :func:`get_session` installs the
+    registry's grid into the session, and a ``use_map`` re-swaps a session
+    back onto the registry grid at any time. So a paint must be serialized
+    against the readers/writers of ALL sessions, not just the one whose id
+    happens to match the map id: a session that does not yet match can be
+    mid-``use_map`` onto the very grid being painted.
+
+    Sessions are few and the critical section is a handful of cell writes,
+    so locking them all is cheap. Locks are acquired in deterministic
+    (sorted session-id) order and released in reverse in a ``finally``;
+    this is the ONLY code path that ever holds more than one session lock,
+    so no other path can invert the order and deadlock. The registry lock
+    is held only to snapshot the session list, never while session locks
+    are held (no lock-order inversion with :func:`get_session`).
+    """
+    with _sessions_lock:
+        ordered = sorted(sessions.values(), key=lambda s: s.id)
+    for s in ordered:
+        s._lock.acquire()
+    try:
+        yield
+    finally:
+        for s in reversed(ordered):
+            s._lock.release()
 
 
 # ---------------------------------------------------------------------------

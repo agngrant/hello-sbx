@@ -7,6 +7,8 @@ damage OUT of scope (there is no ``app.boss`` module).
 
 Run: ``pytest tests/test_boss.py``
 """
+import json
+
 import pytest
 
 from app.models import (
@@ -187,6 +189,32 @@ def test_awareness_payload_carries_boss_size_on_the_wire():
     # The player never receives the entities list — the awareness item
     # is the ONLY source of the boss's size on the player wire.
     assert player.last("welcome")["entities"] == []
+
+
+def test_state_and_welcome_frames_carry_boss_footprints_table():
+    """The ADDITIVE ``boss_footprints`` field on EVERY ``state`` /
+    ``welcome`` frame: the server's canonical ``size -> (w, h)`` tile
+    table (models.BOSS_FOOTPRINTS), present and identical for the GM and
+    a player, so the client's hardcoded copy of the table can be retired
+    in favour of the wire value.
+    """
+    s = GameSession("t1", make_grid(GRID))
+    gm_joined(s)
+    join_player(s)
+    gms = [p for p in s.players.values() if p.role == "gm"]
+    players = [p for p in s.players.values() if p.role == "player"]
+    assert len(gms) == 1 and len(players) == 1
+    # Every frame shape (GM state, player state, player welcome) carries
+    # the table, equal to the canonical one.
+    for frame in (s.state_for(gms[0]), s.state_for(players[0]),
+                  s.welcome_for(players[0])):
+        assert frame["boss_footprints"] == BOSS_FOOTPRINTS
+    # Wire form: the JSON round-trip a real socket connection performs —
+    # int keys stringify, tuple values render as [w, h] arrays.
+    wire = json.loads(json.dumps(s.state_for(players[0])))
+    assert wire["boss_footprints"] == {
+        str(size): list(w_h) for size, w_h in BOSS_FOOTPRINTS.items()
+    }
 
 
 def test_spawn_boss_out_of_bounds_is_rejected():

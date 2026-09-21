@@ -523,6 +523,16 @@ class GameSession:
         doorway cell, so the wire is unambiguous (a door open/close
         broadcast reaches every viewer up to date); the key is absent when
         the grid has no doorways (the client ⇒ all locked).
+
+        Boss footprints (boss-entity spec, additive): the
+        ``boss_footprints`` field carries the canonical ``size -> (w, h)``
+        tile table (:data:`app.models.BOSS_FOOTPRINTS`) as a fresh shallow
+        copy on every frame, so clients derive boss dimensions from the
+        server instead of a hardcoded table. Values are tuples (JSON
+        renders them as ``[w, h]`` arrays under stringified size keys);
+        the table is static, so the key is present on GM and player
+        frames alike and needs no role gating. Old clients ignore the
+        unknown key.
         """
         is_gm = viewer.role == "gm"
         own = self.entities.get(viewer.entity_id) if viewer.entity_id else None
@@ -535,6 +545,7 @@ class GameSession:
             "you_entity": own.to_dict() if (own is not None and not is_gm) else None,
             "awareness": self._awareness_for(viewer),
             "fog": self.fog,
+            "boss_footprints": dict(BOSS_FOOTPRINTS),
         }
         if not is_gm:
             payload["visibility"] = self._visibility_for(viewer, own)

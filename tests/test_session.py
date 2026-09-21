@@ -30,7 +30,7 @@ from typing import Any
 
 from app.awareness import build_awareness
 from app.grid import build_sample_map
-from app.models import Entity, Grid, Player, entity_cells
+from app.models import BOSS_FOOTPRINTS, Entity, Grid, Player, entity_cells
 from app.pathfinding import is_valid_step
 from app.session import (
     MAX_PLAYERS,
@@ -789,6 +789,97 @@ class TestStateFor(SessionTestCase):
         err_reply = drive(s2, bad, {"type": "join", "name": "P7", "role": "player"})
         self.assertEqual(err_reply, {"type": "error", "message": SESSION_FULL})
         self.assertEqual(bad.out, [])  # nothing was sent on the refused join
+
+
+# ---------------------------------------------------------------------------
+# app.main.lock_all_sessions — the REST paint's cross-session lock. The
+# registry grid a paint mutates is shared by object identity with every
+# live session playing it, so the paint takes EVERY session's lock in one
+# deterministic (sorted-id) order.
+# ---------------------------------------------------------------------------
+
+
+class LockAllSessionsTest(unittest.TestCase):
+    """Unit tests for the all-sessions lock the REST paint path takes."""
+
+    def setUp(self) -> None:
+        import app.main as main_mod
+
+        self.main = main_mod
+        # The module-level session registry is process-wide shared state —
+        # snapshot and restore it so this test neither leaks sessions into
+        # other tests nor is disturbed by sessions they left behind.
+        self._saved_sessions = dict(main_mod.sessions)
+        main_mod.sessions.clear()
+
+    def tearDown(self) -> None:
+        self.main.sessions.clear()
+        self.main.sessions.update(self._saved_sessions)
+
+    def _register(self, sid: str) -> GameSession:
+        s = GameSession(sid, build_sample_map())
+        self.main.sessions[sid] = s
+        return s
+
+    def test_locks_every_live_session_and_releases_all(self) -> None:
+        a = self._register("s-a")
+        b = self._register("s-b")
+        with self.main.lock_all_sessions():
+            self.assertTrue(a._lock._is_owned())
+            self.assertTrue(b._lock._is_owned())
+        self.assertFalse(a._lock._is_owned())
+        self.assertFalse(b._lock._is_owned())
+
+    def test_reentrant_for_the_holding_thread(self) -> None:
+        self._register("s-a")
+        # RLocks: the holding thread may re-acquire, so a session handler
+        # nested inside the paint's critical section still works.
+        with self.main.lock_all_sessions():
+            with self.main.lock_all_sessions():
+                pass
+
+    def test_locks_released_when_the_body_raises(self) -> None:
+        a = self._register("s-a")
+        b = self._register("s-b")
+        with self.assertRaises(RuntimeError):
+            with self.main.lock_all_sessions():
+                raise RuntimeError("boom")
+        self.assertFalse(a._lock._is_owned())
+        self.assertFalse(b._lock._is_owned())
+
+    def test_works_with_no_live_sessions(self) -> None:
+        with self.main.lock_all_sessions():
+            pass
+
+    def test_concurrent_holders_never_deadlock(self) -> None:
+        # Deadlock-freedom rests on the single total acquisition order
+        # (sorted session id): concurrent holders can only ever be waiting
+        # on a lock the first holder will release. A regression to
+        # per-call ordering would wedge here.
+        for sid in ("s-a", "s-b", "s-c"):
+            self._register(sid)
+        errors: list[BaseException] = []
+
+        def worker() -> None:
+            try:
+                for _ in range(200):
+                    with self.main.lock_all_sessions():
+                        pass
+            except BaseException as exc:  # noqa: BLE001 — test harness
+                errors.append(exc)
+
+        threads = [
+            threading.Thread(target=worker, daemon=True) for _ in range(3)
+        ]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=10)
+        self.assertEqual(errors, [])
+        self.assertFalse(
+            [t for t in threads if t.is_alive()],
+            "lock_all_sessions deadlocked",
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -1768,7 +1859,9 @@ class TestExploredMapGmPayload(unittest.TestCase):
         e1 = s.entities[p1.entity_id]  # e1 — Alice's token
         e2 = s.entities[p2.entity_id]  # e2 — Bob's token
         # Hand-written pre-feature expectation: EXACTLY the 7 keys the
-        # payload had before this feature, with their values.
+        # payload had before this feature, with their values — plus the
+        # additive `boss_footprints` table (boss-entity spec), which every
+        # state/welcome frame now carries.
         expected = {
             "type": "state",
             # Additive `map.doors` (door-features spec §8.1/I3/AC10): the GM
@@ -1798,6 +1891,7 @@ class TestExploredMapGmPayload(unittest.TestCase):
                  "size": None},
             ],
             "fog": False,
+            "boss_footprints": BOSS_FOOTPRINTS,
         }
         st = s.state_for(gm)
         self.assertNotIn("visibility", st)  # absent — not null, not []
@@ -1900,12 +1994,12 @@ class TestExploredMapPlayersShapeUnchanged(unittest.TestCase):
         gm_st = s.state_for(gm)
         p1_st = s.state_for(p1)
         self.assertEqual(sorted(gm_st), [
-            "awareness", "entities", "fog", "map", "players",
-            "type", "you_entity",
+            "awareness", "boss_footprints", "entities", "fog", "map",
+            "players", "type", "you_entity",
         ])
         self.assertEqual(sorted(p1_st), [
-            "awareness", "entities", "fog", "map", "players",
-            "type", "visibility", "you_entity",
+            "awareness", "boss_footprints", "entities", "fog", "map",
+            "players", "type", "visibility", "you_entity",
         ])
         for st in (gm_st, p1_st):
             self.assertEqual(len(st["players"]), 2)

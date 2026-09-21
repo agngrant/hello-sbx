@@ -582,6 +582,56 @@ class TestSafeDoorRest(ServerTestCase):
             maps_registry.pop(map_id, None)
 
 
+class TestPaintSessionSerialization(ServerTestCase):
+    """Data-race fix: the REST paint runs under EVERY live session's lock.
+
+    The registry grid a paint hits is shared by object identity with the
+    live session playing it (app.main.get_session installs the registry's
+    grid), so a session that snapshots the map before and after a paint
+    must observe exactly one atomic state — and the paint's revision bump
+    must invalidate the session's stage 5b grid-wire cache, so the new
+    snapshot serializes the painted grid fresh.
+    """
+
+    def test_paint_is_atomic_for_a_live_session(self):
+        from app.main import get_session, maps_registry, sessions
+        from app.models import Player
+
+        g = Grid(name="PaintRace", width=3, height=3,
+                 cells=[["wall"] * 3,
+                        ["wall", "floor", "floor"],
+                        ["wall"] * 3])
+        map_id = "paint-race-proof"
+        maps_registry[map_id] = {
+            "grid": g, "entities": {}, "players": {}}
+        try:
+            # A live session on the SAME grid object — what
+            # get_session does for a ``?session=<map_id>`` client.
+            session = get_session(map_id)
+            self.assertIs(session.grid, g)
+            gm = Player(id="gm-0", name="GM", role="gm")
+            session.players[gm.id] = gm
+            before = session.state_for(gm)
+            self.assertEqual(before["map"]["cells"][1][1], "floor")
+
+            # The response shape stays FROZEN (no session echo).
+            status, data = self.post_json(
+                f"/api/maps/{map_id}/paint",
+                {"x": 1, "y": 1, "cell_type": "wall"})
+            self.assertEqual(status, 200)
+            self.assertEqual(set(data.keys()), {"ok", "x", "y", "cell_type"})
+
+            # The session sees the whole paint (or none of it) — never a
+            # torn grid — and its stage 5b wire cache was invalidated by
+            # the paint's revision bump.
+            after = session.state_for(gm)
+            self.assertEqual(after["map"]["cells"][1][1], "wall")
+            self.assertNotEqual(before["map"], after["map"])
+        finally:
+            maps_registry.pop(map_id, None)
+            sessions.pop(map_id, None)
+
+
 class TestSaves(ServerTestCase):
     """Save-load spec §5: the additive REST routes (backend scope).
 
