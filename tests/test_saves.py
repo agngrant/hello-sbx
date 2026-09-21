@@ -215,6 +215,38 @@ class SavesIOTestCase(unittest.TestCase):
         # The grid is behaviorally identical (the open door is walkable):
         self.assertEqual(g2.door_state_at(2, 2), "O")
 
+    def test_load_bundle_with_boss_size_round_trip(self):
+        # Boss-entity spec §2/§4: the boss's size variant survives the
+        # save → load round trip, and non-boss entities keep their
+        # byte-identical shape (no ``size`` key added).
+        grid = make_grid(_ROWS, name="Crypt")
+        ents = [
+            {"id": "e1", "name": "Gore", "kind": "boss", "team": "hostile",
+             "x": 1, "y": 1, "color": None, "owner_name": None, "size": 8},
+            {"id": "e2", "name": "Scribe", "kind": "npc", "team": "neutral",
+             "x": 3, "y": 1, "color": "#f76707", "owner_name": None},
+        ]
+        save_id = self.write_save("Crypt", grid, ents)
+        _g2, e2 = save_store.load_bundle(save_id)
+        self.assertEqual(e2, ents)
+        by_id = {e["id"]: e for e in e2}
+        self.assertEqual(by_id["e1"]["size"], 8)
+        self.assertNotIn("size", by_id["e2"])
+
+    def test_load_bundle_boss_with_invalid_size_fails(self):
+        # A boss without a valid size variant is a load failure (the
+        # rebuilt Entity would otherwise raise in __post_init__).
+        for bad in (None, 3, 99):
+            grid = make_grid(_ROWS, name="BadBoss")
+            ents = [
+                {"id": "e1", "name": "Gore", "kind": "boss", "team": "hostile",
+                 "x": 1, "y": 1, "color": None, "owner_name": None,
+                 "size": bad},
+            ]
+            save_id = self.write_save("BadBoss", grid, ents)
+            with self.assertRaises(ValueError):
+                save_store.load_bundle(save_id)
+
     def test_load_missing_save_raises(self):
         with self.assertRaises(ValueError):
             save_store.load_bundle("nope")

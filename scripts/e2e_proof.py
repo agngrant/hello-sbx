@@ -957,21 +957,28 @@ def main():
                   (ent_of(st11, "Vex11")["x"],
                    ent_of(st11, "Vex11")["y"]) == (6, 5))
             # a NEUTRAL npc (left room -> right room) walks through the open
-            # safe door: legal A* path, via the door cell.
+            # safe door: legal A* path, via the door cell. The STOP cell is
+            # (6,6), not (6,5): the boss-entity occupancy check (4acafcb)
+            # correctly refuses to park a mover ON an occupied cell, and
+            # Vex11 stands at (6,5) (and section (d) below asserts it still
+            # does). Every left->right route transits (6,5) anyway — col 5
+            # is all wall except the (5,5) doorway — and find_path is
+            # entity-unaware by design (boss spec §8), so the transit is
+            # legal; only the destination must be free.
             gm11.send_json({"type": "create_entity", "name": "Npc11",
                             "kind": "npc", "team": "neutral", "x": 1, "y": 5})
             st11 = state_until(gm11)
             pl11.recv_json()             # the create broadcast (state)
             npc = ent_of(st11, "Npc11")
             gm11.send_json({"type": "move", "entity_id": npc["id"],
-                            "x": 6, "y": 5})
+                            "x": 6, "y": 6})
             m11 = gm11.recv_json()       # the GM's path frame
             steps = m11.get("path", []) if m11.get("type") == "path" else []
             check("(c) neutral npc walks THROUGH the open safe door "
                   "(path via (5,5))",
                   m11.get("type") == "path"
                   and (5, 5) in {(p["x"], p["y"]) for p in steps}
-                  and (steps[-1]["x"], steps[-1]["y"]) == (6, 5),
+                  and (steps[-1]["x"], steps[-1]["y"]) == (6, 6),
                   json.dumps(m11))
             state_until(gm11)            # the GM's move state
             pl11.recv_json()             # the player's path frame

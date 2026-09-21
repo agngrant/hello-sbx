@@ -94,10 +94,7 @@ SAFE_DOOR_TEAMS = frozenset({"party", "neutral"})
 #: spec pins — 2 → 2×1, 4 → 2×2, 6 → 2×3, 8 → 2×4, 10 → 2×5, 12 → 3×4
 #: (W×H tiles). A boss is anchored at its TOP-LEFT tile and occupies the
 #: full W×H rectangle.
-BOSS_FOOTPRINTS = (2, 4, 6, 8, 10, 12)
-
-#: Tile dimensions ``(w, h)`` for each boss size variant (spec §2 table).
-BOSS_FOOTPRINT_CELLS: dict[int, tuple[int, int]] = {
+BOSS_FOOTPRINTS: dict[int, tuple[int, int]] = {
     2: (2, 1),
     4: (2, 2),
     6: (2, 3),
@@ -106,17 +103,26 @@ BOSS_FOOTPRINT_CELLS: dict[int, tuple[int, int]] = {
     12: (3, 4),
 }
 
+#: Back-compat alias of the footprint table — a single source of truth is
+#: :data:`BOSS_FOOTPRINTS`; both names refer to the same ``size -> (w, h)``
+#: mapping.
+BOSS_FOOTPRINT_CELLS: dict[int, tuple[int, int]] = BOSS_FOOTPRINTS
+
 
 def boss_footprint_cells(tiles: int | None) -> tuple[int, int]:
     """The ``(w, h)`` tile footprint for a boss size variant (spec §2).
 
     Raises ``ValueError`` for any value outside :data:`BOSS_FOOTPRINTS`.
     """
+    if tiles is None:
+        raise ValueError(
+            f"boss footprint must be one of {sorted(BOSS_FOOTPRINTS)} (tiles), "
+            f"got {tiles!r}")
     try:
         return BOSS_FOOTPRINT_CELLS[tiles]
     except (KeyError, TypeError):
         raise ValueError(
-            f"boss footprint must be one of {BOSS_FOOTPRINTS} (tiles), "
+            f"boss footprint must be one of {sorted(BOSS_FOOTPRINTS)} (tiles), "
             f"got {tiles!r}") from None
 
 
@@ -541,7 +547,7 @@ class Entity:
     # Boss size variant in TILES (2, 4, 6, 8, 10, 12 — docs/specs/boss-entity.md);
     # ``None`` for every other kind (which occupies one 1x1 cell). Serialised by
     # to_dict ONLY for bosses (additive field); validated in ``__post_init__``.
-    footprint: int | None = None
+    size: int | None = None
 
     def __post_init__(self) -> None:
         if self.kind not in ENTITY_KINDS:
@@ -549,23 +555,19 @@ class Entity:
         if self.team not in TEAMS:
             raise ValueError(f"invalid team {self.team!r}")
         # Bosses (docs/specs/boss-entity.md) must pick one of the six size
-        # variants; every other kind is strictly 1x1 and carries no footprint.
-        if self.kind == "boss":
-            if self.footprint not in BOSS_FOOTPRINTS:
-                raise ValueError(
-                    f"boss footprint must be one of {BOSS_FOOTPRINTS} (tiles), "
-                    f"got {self.footprint!r}"
-                )
-        elif self.footprint is not None:
+        # variants; non-boss kinds ignore ``size`` and always footprint 1x1
+        # (see :meth:`footprint_cells`).
+        if self.kind == "boss" and self.size not in BOSS_FOOTPRINTS:
             raise ValueError(
-                f"footprint is only valid for boss entities, got {self.footprint!r}"
+                f"boss footprint must be one of {sorted(BOSS_FOOTPRINTS)} (tiles), "
+                f"got {self.size!r}"
             )
 
     @property
     def footprint_cells(self) -> tuple[int, int]:
         """Occupied cells as ``(w, h)`` — always ``(1, 1)`` except bosses."""
         if self.kind == "boss":
-            return boss_footprint_cells(self.footprint)
+            return boss_footprint_cells(self.size)
         return (1, 1)
 
     def to_dict(self) -> dict[str, Any]:
@@ -582,14 +584,14 @@ class Entity:
         # Additive field: only bosses (docs/specs/boss-entity.md) carry a size
         # variant; other kinds stay byte-identical for older clients.
         if self.kind == "boss":
-            d["footprint"] = self.footprint
+            d["size"] = self.size
         return d
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> Entity:
         # Additive optional field (docs/specs/boss-entity.md): older saves
         # without it keep their byte-identical shape; absence = 1x1.
-        fp = data.get("footprint")
+        sz = data.get("size")
         return cls(
             id=data["id"],
             name=data["name"],
@@ -599,7 +601,7 @@ class Entity:
             y=int(data["y"]),
             owner=data.get("owner"),
             color=data.get("color"),
-            footprint=int(fp) if fp is not None else None,
+            size=int(sz) if sz is not None else None,
         )
 
 

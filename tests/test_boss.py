@@ -106,7 +106,9 @@ def gm_joined(session):
     conn = FakeConn()
     attach(session, conn)
     drive(session, conn, {"type": "join", "name": "GM", "role": "gm"})
-    assert conn.last("state") is not None
+    # §9: the joiner's first frame is a `welcome` (state + `you`), not a raw
+    # `state` — the contract (tests/test_session.py) asserts welcome.
+    assert conn.last("welcome") is not None
     return conn
 
 
@@ -114,7 +116,9 @@ def join_player(session, name="Alice"):
     conn = FakeConn()
     attach(session, conn)
     drive(session, conn, {"type": "join", "name": name, "role": "player"})
-    assert conn.last("state") is not None
+    # §9: the joiner's first frame is a `welcome` (state + `you`), not a
+    # raw `state` — the contract (tests/test_session.py) asserts welcome.
+    assert conn.last("welcome") is not None
     return conn
 
 
@@ -143,7 +147,9 @@ def test_gm_spawns_a_boss_with_size_on_the_entity():
     assert e.owner is None
     # The anchor is the top-left corner of the full footprint.
     assert entity_cells(e) == footprint_cells(3, 3, 2, 4)
-    assert len(s.entities) == 2  # the player's join token + the boss
+    # The GM is a pure controller (no join token) — the boss is the only
+    # entity in the session.
+    assert len(s.entities) == 1
 
 
 def test_spawn_boss_out_of_bounds_is_rejected():
@@ -183,25 +189,25 @@ def test_move_onto_any_boss_footprint_cell_is_blocked():
     me = player_entity(s)
     assert (me.x, me.y) == (0, 0)
 
-    # Approach the footprint from above: (1, 1) is free, then every step
-    # towards a footprint cell must be refused (occupied / no route) and
-    # the player must stay put.
+    # Park the player on the free cell (1, 1), adjacent to the footprint.
     drive(s, gm, {"type": "place", "entity_id": me.id, "x": 1, "y": 1})
     assert (me.x, me.y) == (1, 1)
 
-    for (bx, by) in [(1, 2), (2, 1), (2, 2), (3, 2)]:
+    # Every footprint cell is refused — the player must stay put.
+    for (bx, by) in [(2, 2), (3, 2)]:
         reply = drive(s, gm, {"type": "move", "entity_id": me.id,
                               "x": bx, "y": by})
-        assert reply is None or reply["type"] == "error"
-        if reply is not None:
-            assert reply["message"] in ("destination occupied",
-                                        "no route — wall in the way")
+        assert reply is not None and reply["type"] == "error"
+        assert reply["message"] in ("destination occupied",
+                                    "no route — wall in the way")
         assert (me.x, me.y) == (1, 1), f"moved onto footprint cell ({bx},{by})"
 
-    # A non-footprint adjacent cell still moves fine (the block is
-    # footprint-specific, not a general freeze).
-    drive(s, gm, {"type": "place", "entity_id": me.id, "x": 1, "y": 3})
-    assert (me.x, me.y) == (1, 3)
+    # Non-footprint cells adjacent to the footprint still move fine (the
+    # block is footprint-specific, not a general freeze).
+    drive(s, gm, {"type": "move", "entity_id": me.id, "x": 1, "y": 2})
+    assert (me.x, me.y) == (1, 2)
+    drive(s, gm, {"type": "move", "entity_id": me.id, "x": 2, "y": 1})
+    assert (me.x, me.y) == (2, 1)
 
 
 def test_gm_cannot_move_the_boss_onto_its_own_cell():

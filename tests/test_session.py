@@ -26,10 +26,11 @@ import asyncio
 import threading
 import time
 import unittest
+from typing import Any
 
 from app.awareness import build_awareness
 from app.grid import build_sample_map
-from app.models import Entity, Grid, Player
+from app.models import Entity, Grid, Player, entity_cells
 from app.pathfinding import is_valid_step
 from app.session import (
     MAX_PLAYERS,
@@ -63,10 +64,15 @@ class FakeConn:
     async sender; here :meth:`send` appends the payload dict to :attr:`out`
     (the frame is "written" in the order the event loop executes the
     broadcasts, which matches wire order).
+
+    Pass ``sender=`` to ``__init__`` to register a DIFFERENT async sender
+    (BUG-011: simulating a dead socket whose send raises).
     """
 
-    def __init__(self) -> None:
+    def __init__(self, sender: Any = None) -> None:
         self.out: list[dict] = []
+        #: Optional override of the async sender that ``attach`` registers.
+        self.sender = sender
 
     async def send(self, obj: dict) -> None:
         self.out.append(obj)
@@ -85,7 +91,8 @@ class FakeConn:
 def attach(session: GameSession, conn: FakeConn) -> None:
     """Register ``conn``'s async sender with the session (the server does
     this at connection time; unit tests do it right after construction)."""
-    session.attach_async(conn, conn.send)
+    send = conn.sender if conn.sender is not None else conn.send
+    session.attach_async(conn, send)
 
 
 def drive(session: GameSession, conn: FakeConn, msg) -> dict | None:
@@ -234,6 +241,60 @@ class TestJoins(unittest.TestCase):
         p, err = s.join(FakeConn(), "   ", "gm")
         self.assertIsNone(p)
         self.assertEqual(err, "name required")
+
+    def test_dead_sender_does_not_block_others(self):
+        """BUG-011: one unawaitable sender must not wedge the rest of the
+        join fan-out (and its exception must not escape)."""
+        s = GameSession("t", build_sample_map())
+        gm = FakeConn()
+        attach(s, gm)
+        drive(s, gm, {"type": "join", "name": "GM", "role": "gm"})
+
+        async def dead_send(payload: dict) -> None:
+            raise RuntimeError("socket gone")
+
+        dead = FakeConn(sender=dead_send)
+        attach(s, dead)
+        drive(s, dead, {"type": "join", "name": "D", "role": "player"})
+
+        # The GM got its own welcome PLUS the state snapshot of the dead
+        # player's join: the fan-out neither wedged on the dead sender nor
+        # let its exception escape (drive would have re-raised it).
+        self.assertEqual([f["type"] for f in gm.out], ["welcome", "state"])
+
+    def test_leave_and_rejoin_recreates_fresh_entity(self):
+        """A player's leave() removes their entity entirely; re-joining
+        with the same name spawns a FRESH token (no stale rebind) under the
+        bare name — regression for the old entity leaking a label."""
+        s = GameSession("t", build_sample_map())
+        gm = FakeConn()
+        attach(s, gm)
+        s.join(gm, "GM", "gm")
+        conn = FakeConn()
+        attach(s, conn)
+        p, err = s.join(conn, "Alice", "player")
+        self.assertIsNone(err)
+        self.assertIsNotNone(p.entity_id)
+        eid = p.entity_id
+        s.leave(p.id)
+        # leave() removed the entity entirely.
+        self.assertNotIn(eid, s.entities)
+        # Re-join with the same name: a fresh player, a fresh token, bare
+        # name (the removed entity cannot be rebound).
+        conn2 = FakeConn()
+        attach(s, conn2)
+        p2, err2 = s.join(conn2, "Alice", "player")
+        self.assertIsNone(err2)
+        # A genuinely NEW Player (id strings are roster-size-based and may
+        # be reused), and NOT a save-load rebind of a stale token.
+        self.assertIsNot(p2, p)
+        self.assertFalse(p2.rebound)
+        self.assertIsNotNone(p2.entity_id)
+        # (Entity ids are roster-size-based too — the fresh token may
+        # reuse the old id string, but it is a new Entity owned by p2.)
+        fresh = s.entities[p2.entity_id]
+        self.assertEqual(fresh.owner, p2.id)
+        self.assertEqual(fresh.name, "Alice")
 
     def test_reconnect_reattaches_same_player(self):
         s = GameSession("t", build_sample_map())
@@ -1166,6 +1227,46 @@ class TestUseMap(unittest.TestCase):
         # Missing map_id -> error.
         reply = drive(s, gm_s, {"type": "use_map"})
         self.assertEqual(reply, {"type": "error", "message": "map_id required"})
+
+    def test_use_map_rebuilds_boss_with_size_and_repositions_footprint(self):
+        # Boss-entity spec: a boss loaded from a save keeps its size
+        # variant, and a footprint that no longer FITS (tail out of bounds
+        # — the anchor alone is in bounds) is re-parked so the FULL
+        # footprint is on floor.
+        from app.main import maps_registry
+        sid = "usemap-boss"
+        target = Grid(
+            name="BossGrid", width=6, height=6,
+            cells=[["floor"] * 6 for _ in range(6)],
+        )
+        maps_registry[sid] = {
+            "grid": target,
+            "entities": {},
+            "players": {},
+            "loaded_entities": [
+                # size 8 -> 2x4 at (4, 3): rows 3..6 — row 6 is OUT of
+                # bounds on a 6-row grid (the anchor (4,3) is in bounds).
+                {"id": "e9", "name": "Gore", "kind": "boss", "team": "hostile",
+                 "x": 4, "y": 3, "color": None, "owner_name": None, "size": 8},
+            ],
+        }
+        try:
+            s = GameSession("ub", build_sample_map())
+            gm_s = FakeConn()
+            s.join(gm_s, "G", "gm")
+            reply = drive(s, gm_s, {"type": "use_map", "map_id": sid})
+            self.assertIsNone(reply)
+            boss = next(e for e in s.entities.values() if e.kind == "boss")
+            self.assertEqual(boss.size, 8)
+            self.assertNotEqual((boss.x, boss.y), (4, 3))  # re-parked
+            for cx, cy in entity_cells(boss):
+                self.assertGreaterEqual(cx, 0)
+                self.assertLess(cx, target.width)
+                self.assertGreaterEqual(cy, 0)
+                self.assertLess(cy, target.height)
+                self.assertEqual(target.cells[cy][cx], "floor")
+        finally:
+            maps_registry.pop(sid, None)
 
 
 # ---------------------------------------------------------------------------

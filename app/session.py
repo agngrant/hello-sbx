@@ -650,9 +650,15 @@ class GameSession:
             await sender(payload)
 
     async def _announce_join(self, sender_conn: Any, player: Player) -> None:
-        """Welcome the joiner; give everyone else their own snapshot."""
+        """Welcome the joiner; give everyone else their own snapshot.
+
+        Snapshots are built under the lock; the per-connection sends run
+        AFTER the lock is released (BUG-011: sending while holding
+        self._lock meant a slow or never-awaited sender wedged every
+        joiner, and a dead sender's exception aborted the rest of the
+        fan-out).  One broken connection must not affect any other.
+        """
         with self._lock:
-            welcome = self.welcome_for(player)
             targets = []
             for pid, conn in self._socks.items():
                 viewer = self.players.get(pid)
@@ -661,10 +667,20 @@ class GameSession:
                 sender = self._sender_for(conn)
                 if sender is None:
                     continue
-                payload = welcome if conn is sender_conn else self.state_for(viewer)
+                # The joiner gets its own welcome (state + `you`); every
+                # OTHER viewer gets their own per-viewer snapshot — a GM
+                # included in the fan-out must see the full entity list,
+                # which a player's welcome never carries (BUG-025).
+                if conn is sender_conn:
+                    payload = self.welcome_for(player)
+                else:
+                    payload = self.state_for(viewer)
                 targets.append((sender, payload))
         for sender, payload in targets:
-            await sender(payload)
+            try:
+                await sender(payload)
+            except Exception:
+                continue
 
     # ------------------------------------------------------------------
     # Message handling (§9) — returns a reply for THIS client or None
@@ -819,9 +835,18 @@ class GameSession:
                 return {"type": "path", "entity_id": entity.id,
                         "path": [{"x": entity.x, "y": entity.y}]}
 
-            # Boss-entity spec: the mover may only stop where its FULL
+            # Boss-entity spec: the mover may only STOP where its FULL
             # footprint is in-bounds and free of every OTHER entity
-            # (footprint-aware occupancy, models.entity_cells).
+            # (footprint-aware destination check, models.entity_cells).
+            # Routing itself is entity-unaware by design — boss spec §8
+            # scopes AI/collision routing OUT, so find_path keeps its
+            # signature unchanged (BUG-025: an ``occupied_by=`` keyword
+            # was passed here for a parameter that does not exist).
+            other_cells = set()
+            for o in self.entities.values():
+                if o is not entity:
+                    other_cells.update(entity_cells(o))
+
             w, h = (boss_footprint_cells(entity.size)
                     if entity.kind == "boss" else (1, 1))
             for cx, cy in footprint_cells(x, y, w, h):
@@ -829,12 +854,9 @@ class GameSession:
                         and 0 <= cy < self.grid.height):
                     return {"type": "error",
                             "message": "destination out of bounds"}
-                for o in self.entities.values():
-                    if o is entity:
-                        continue
-                    if (cx, cy) in entity_cells(o):
-                        return {"type": "error",
-                                "message": "destination occupied"}
+                if (cx, cy) in other_cells:
+                    return {"type": "error",
+                            "message": "destination occupied"}
 
             if override:
                 # GM "ignore walls": direct move to the target, walls
@@ -851,6 +873,8 @@ class GameSession:
                 # Team-aware A* (safe-room spec §5.3): the restriction is
                 # judged by the MOVING entity's team — a hostile treats an
                 # open safe door as a wall, party/neutral walk through it.
+                # (Occupancy is enforced at the STOP above, not in the
+                # route — boss spec §8 keeps find_path entity-unaware.)
                 coords = find_path(self.grid, (entity.x, entity.y), (x, y),
                                    team=entity.team)
                 if coords is None:
@@ -882,6 +906,23 @@ class GameSession:
                 return {"type": "error", "message": "no such entity"}
             if not (0 <= x < self.grid.width and 0 <= y < self.grid.height):
                 return {"type": "error", "message": "destination out of bounds"}
+            # Boss-entity spec: a direct place is also footprint-aware —
+            # the entity's FULL footprint must be in-bounds and free of
+            # every OTHER entity (e.g. a GM may not place a mover onto a
+            # cell inside a boss's own footprint).
+            w, h = (boss_footprint_cells(entity.size)
+                    if entity.kind == "boss" else (1, 1))
+            for cx, cy in footprint_cells(x, y, w, h):
+                if not (0 <= cx < self.grid.width
+                        and 0 <= cy < self.grid.height):
+                    return {"type": "error",
+                            "message": "destination out of bounds"}
+                for o in self.entities.values():
+                    if o is entity:
+                        continue
+                    if (cx, cy) in entity_cells(o):
+                        return {"type": "error",
+                                "message": "destination occupied"}
             # Safe-room spec §5.2 (D4): a hostile is never placed on a
             # safe-room door cell (open or closed); party/neutral keep the
             # normal ignore-walls place (E11).
@@ -913,8 +954,12 @@ class GameSession:
             # where its FULL W×H footprint is in-bounds and free of other
             # entities; any other cell fails with the spec's exact message.
             if kind == "boss":
-                err = self._spawn_boss(name.strip(), team, x, y,
-                                       size=_as_int(msg.get("size", 2)))
+                # Boss tokens default to size 2 (boss-entity spec); an
+                # explicit size overrides it — but ONLY when the key is
+                # present, since ``msg.get("size", 2)`` would clobber an
+                # explicit size 0/1 before validation.
+                size = 2 if "size" not in msg else _as_int(msg.get("size"))
+                err = self._spawn_boss(name.strip(), team, x, y, size=size)
                 if err:
                     return err
                 self._run_b(self._broadcast())
@@ -1426,18 +1471,45 @@ class GameSession:
                 owner=None,
                 color=d.get("color"),
                 owner_name=d.get("owner_name"),
+                # Boss-entity spec: the validated size variant (saves.py
+                # guarantees a boss always carries one); None for the
+                # other kinds, which footprint 1×1.
+                size=d.get("size"),
             )
             taken.add(eid)
         return rebuilt
 
+    def _find_free_floor_for(self, w: int, h: int) -> tuple[int, int]:
+        """First row-major anchor whose FULL w×h footprint is in-bounds and
+        on floor/doorway cells (boss-entity spec: a boss must not be parked
+        with its tail over the wall). Falls back to
+        :meth:`_find_free_floor` (anchor-only) when no full-fit anchor
+        exists — e.g. a 3×4 boss on a grid shorter than 4 rows.
+        """
+        for y in range(self.grid.height - h + 1):
+            for x in range(self.grid.width - w + 1):
+                if all(self.grid.cells[cy][cx] in ("floor", "doorway")
+                       for cy in range(y, y + h)
+                       for cx in range(x, x + w)):
+                    return x, y
+        return self._find_free_floor()
+
     def _reposition_out_of_bounds(self) -> None:
         """The new grid can be smaller: park anything out of bounds (or on a
         newly painted wall) on a free floor/doorway cell.
+        Boss-entity spec: the fit check is FOOTPRINT-anchored — a boss is
+        out of place when ANY of its cells is out of bounds or on a wall
+        (not just its top-left anchor).
         Caller must hold ``_lock``.
         """
         for e in self.entities.values():
-            fits = 0 <= e.x < self.grid.width and 0 <= e.y < self.grid.height
-            if fits and self.grid.cells[e.y][e.x] in ("floor", "doorway"):
+            w, h = e.footprint_cells
+            fits = all(
+                0 <= cx < self.grid.width and 0 <= cy < self.grid.height
+                and self.grid.cells[cy][cx] in ("floor", "doorway")
+                for cx, cy in footprint_cells(e.x, e.y, w, h)
+            )
+            if fits:
                 continue
-            x, y = self._find_free_floor()
+            x, y = self._find_free_floor_for(w, h)
             e.x, e.y = x, y

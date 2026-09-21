@@ -36,7 +36,7 @@ import re
 import time
 from typing import Any, TypeGuard
 
-from app.models import ENTITY_KINDS, TEAMS, Grid
+from app.models import BOSS_FOOTPRINTS, ENTITY_KINDS, TEAMS, Grid
 
 # ---------------------------------------------------------------------------
 # Location (spec §4.1: REPO_ROOT/saves, i.e. the repo root's sibling of app/)
@@ -306,7 +306,18 @@ def _validated_entities(bundle: dict[str, Any]) -> list[dict[str, Any]]:
         owner_name = e.get("owner_name")
         if owner_name is not None and not isinstance(owner_name, str):
             raise ValueError("bundle entity owner_name must be a string or null")
-        out.append({
+        # Boss-entity spec §2: a boss carries its size variant (TILES);
+        # it is required for bosses and ignored (but must be an integer)
+        # for every other kind, matching Entity.__post_init__.
+        size = e.get("size")
+        if kind == "boss":
+            if not _as_strict_int(size) or size not in BOSS_FOOTPRINTS:
+                raise ValueError(
+                    "bundle boss size must be one of "
+                    f"{sorted(BOSS_FOOTPRINTS)} (tiles), got {size!r}")
+        elif size is not None and not _as_strict_int(size):
+            raise ValueError("bundle entity size must be an integer or null")
+        ent_dict = {
             "id": eid,
             "name": name,
             "kind": kind,
@@ -315,7 +326,12 @@ def _validated_entities(bundle: dict[str, Any]) -> list[dict[str, Any]]:
             "y": y,
             "color": color,
             "owner_name": owner_name,
-        })
+        }
+        # Carried only when present, so non-boss bundles keep their
+        # byte-identical shape (round-trip equality).
+        if size is not None:
+            ent_dict["size"] = size
+        out.append(ent_dict)
     return out
 
 
