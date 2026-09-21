@@ -1,0 +1,50 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "model": "elementary/deepseek-v4-flash-0731",
+  "default_agent": "Florian",
+  "agent": {
+    "florian": {
+      "description": "Orchestrator - coordinates, delegates, synthesizes",
+      "mode": "primary",
+      "prompt": "{file:./.opencode/agents/florian.md}"
+    },
+    "ellie": {
+      "description": "Researcher + Planner - deep analysis, actionable plans",
+      "model": "elementary/deepseek-v4-flash-0731",
+      "mode": "subagent",
+      "prompt": "{file:./.opencode/agents/ellie.md}"
+    },
+    "mordecai": {
+      "description": "Implementor - writes code, runs tests, git operations",
+      "model": "elementary/qwen3.8-27b",
+      "mode": "subagent", 
+      "prompt": "{file:./.opencode/agents/mordecai.md}"
+    },
+    "carl": {
+      "description": "Agent Provocateur (default) - challenges assumptions",
+      "mode": "subagent",
+      "model": "elementary/qwen3.8-27b",
+      "prompt": "{file:./.opencode/agents/carl.md}"
+    },
+    "carl_qwen": {
+      "description": "Agent Provocateur (Qwen) - challenges assumptions",
+      "mode": "subagent",
+      "model": "elementary/qwen3.8-27b",
+      "prompt": "{file:./.opencode/agents/carl.md}"
+    },
+    "carl_flash": {
+      "description": "Agent Provocateur (Flash) - challenges assumptions",
+      "mode": "subagent",
+      "model": "elementary/deepseek-v4-flash-0731",
+      "prompt": "{file:./.opencode/agents/carl.md}"
+    },
+    "carl_seek": {
+      "description": "Agent Provocateur (Seek) - challenges assumptions",
+      "mode": "subagent",
+      "model": "elementary/deepseek-r1-32b-awq",
+      "prompt": "{file:./.opencode/agents/carl.md}"
+    },
+    "plan": { "disable": true },
+    "build": { "disable": true }
+  }
+}
