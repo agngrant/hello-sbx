@@ -5,8 +5,8 @@
    Everything is driven by the WebSocket (PROJECT.md §9):
      join (lobby) → welcome → live "state" / "path" / "error" frames.
    The server is authoritative; the client only sends intents
-   (join / request_state / move / paint / create_entity /
-   delete_entity / set_team / set_awareness / set_fog).
+    (join / request_state / move / paint / create_entity /
+    delete_entity / set_team / set_awareness).
    ════════════════════════════════════════════════════════════════════ */
 
 "use strict";
@@ -68,7 +68,6 @@ const els = {
   mapThumbnail: $("#map-thumbnail"),
   connStatus: $("#conn-status"),
   connLabel: $("#conn-label"),
-  fogToggle: $("#fog-toggle"),
   sidebarToggle: $("#sidebar-toggle"),
   btnNewMap: $("#btn-new-map"),
   // map: canvas area
@@ -154,8 +153,7 @@ const state = {
                         //   state field, validated in applyState; null until
                         //   a valid table arrives → the hardcoded
                         //   BOSS_FOOTPRINTS_FALLBACK is used instead)
-  fog: false,
-  selectedEntityId: null,
+   selectedEntityId: null,
   expectCreatedToken: false, // GM "Add" armed: the next state auto-selects the new token
   tool: "select",       // "select" | "floor" | "wall" | "doorway" | "door" |
                         //   | "safeDoor" (safe-room doors spec §7.5)
@@ -373,18 +371,6 @@ function applyState(msg) {
   // bossFootprintsTable() is the single read point for the rest of the
   // file — the server value takes precedence whenever it is present.
   state.bossFootprints = validateBossFootprints(msg.boss_footprints);
-  const fogChanged = state.fog !== msg.fog;
-  state.fog = !!msg.fog;
-  // The fog toggle is GM-only and stays ENABLED for the GM: fog is applied
-  // server-side per viewer, and the GM is role-exempt — so "on" is a no-op
-  // render-wise for the GM (gm-controller spec §3.6). The title states the
-  // semantics per role.
-  els.fogToggle.checked = state.fog;
-  els.fogToggle.disabled = state.role !== "gm";
-  els.fogToggle.title = state.role === "gm"
-    ? "Toggle fog of war for players. As GM you always see everything."
-    : "GM controls fog of war";
-  document.body.classList.toggle("fog-on", state.fog);
   // Preview "Save map state" button: enabled while a map is open in a live
   // GM session (save-load spec §7.3 / E9). Kept in sync with every state
   // broadcast so it tracks join/role/grid changes.
@@ -398,8 +384,6 @@ function applyState(msg) {
     els.mapName.textContent = state.mapName || "—";
     els.noMap.hidden = true;
     layoutCanvas();
-    renderAll();
-  } else if (fogChanged) {
     renderAll();
   }
 }
@@ -2675,16 +2659,6 @@ if (els.awarenessInput) {
     if (!Number.isInteger(n) || n < 0 || n > 20) return;
     wsSend({ type: "set_awareness", entity_id: state.selectedEntityId, value: n });
   });
-}
-
-els.fogToggle.addEventListener("change", () => toggleFog());
-
-// GM fog toggle: GM-only control; "on" filters PLAYERS' snapshots
-// server-side. The GM is role-exempt and always sees everything, so this
-// changes nothing in the GM's own rendered awareness (spec §3.6).
-function toggleFog() {
-  if (state.role !== "gm") { els.fogToggle.checked = state.fog; return; }
-  wsSend({ type: "set_fog", on: els.fogToggle.checked });
 }
 
 /* Keyboard (pan-zoom spec §4; wireframes §9 updated):

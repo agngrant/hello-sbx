@@ -414,7 +414,7 @@ function buildApi() {
     "entityAtCell, drawSidebar, renderAll, drawDot, drawUnknownDot," +
     "drawGridOnCanvas, layoutCanvas, validateVisibilityMatrix," +
     "openUploadedMap, sendMove, selectEntity, paintCell," +
-    "createEntity, toggleFog, canvasHint, showGmFirstRunHint, dismissGmFirstRunHint, updateControlHint," +
+    "createEntity, canvasHint, showGmFirstRunHint, dismissGmFirstRunHint, updateControlHint," +
     "join, connectWs, setConn, scheduleReconnect, showView, wsSend, wsUrl," +
     "uploadMap, generateMap, showUploadPreview, resetUploadForm, setSourceTab, syncTabStyles, syncGenerateButton, setGenerateBusy, setUploadBusy, syncUploadButton," +
     "doorStateAt, validateDoors, sendDoor, setTool, setDoorAction," +

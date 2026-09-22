@@ -157,7 +157,7 @@ class TestBug001AllEntitiesDefined(FrontendBase):
                 "(()=>{api.onWelcome({type:'welcome',"
                 "you:{id:'p1',name:'Gamer',role:'gm',entity_id:null},"
                 "map:%s,entities:[],players:[],"
-                "awareness:[],fog:false});"
+                "awareness:[]});"
                 "return {joined:api.state.joined,role:api.state.role,"
                 "entities:api.allEntities().length};})()"
             ) % mapobj
@@ -167,8 +167,8 @@ class TestBug001AllEntitiesDefined(FrontendBase):
                 "you:{id:'p2',name:'Alice',role:'player',entity_id:'e2'},"
                 "map:%s,entities:[],you_entity:{id:'e2',name:'Alice',"
                 "kind:'player',team:'party',x:2,y:1},players:[],"
-                "awareness:[{entity_id:'e1',x:1,y:1,color:'white'}],"
-                "fog:false});"
+                "awareness:[{entity_id:'e1',x:1,y:1,color:'white'}]"
+                "});"
                 "return {joined:api.state.joined,role:api.state.role,"
                 "entities:api.allEntities().length};})()"
             ) % mapobj
@@ -226,12 +226,12 @@ class TestBug003PathAnimation(FrontendBase):
             "api.onWelcome({type:'welcome',you:{id:'p2',name:'Alice',"
             "role:'player',entity_id:'e2'},map,entities:[],"
             "you_entity:{id:'e2',name:'Alice',kind:'player',team:'party',"
-            "x:2,y:1},players:[],awareness:[],fog:false});"
+            "x:2,y:1},players:[],awareness:[]});"
             "api.onPath({type:'path',entity_id:'e2',path:[{x:2,y:1},{x:3,y:1},"
             "{x:4,y:1},{x:5,y:1}]});"
             "api.onState({type:'state',map,entities:[],"
             "you_entity:{id:'e2',name:'Alice',kind:'player',team:'party',"
-            "x:5,y:1},players:[],awareness:[],fog:false});"
+            "x:5,y:1},players:[],awareness:[]});"
             "const after=[api.state.youEntity.x,api.state.youEntity.y];"
             "const animating=api.isAnimating('e2');"
             "const trace=[];"
@@ -263,7 +263,7 @@ class TestBug003PathAnimation(FrontendBase):
             "api.onWelcome({type:'welcome',you:{id:'p2',name:'Alice',"
             "role:'player',entity_id:'e2'},map,entities:[],"
             "you_entity:{id:'e2',name:'Alice',kind:'player',team:'party',"
-            "x:2,y:1},players:[],awareness:[],fog:false});"
+            "x:2,y:1},players:[],awareness:[]});"
             "api.onPath({type:'path',entity_id:'e2',path:[{x:2,y:1},{x:3,y:1},"
             "{x:4,y:1},{x:5,y:1}]});"
             "api._timer.advance(120);"
@@ -284,7 +284,7 @@ class TestBug003PathAnimation(FrontendBase):
             "api.onWelcome({type:'welcome',you:{id:'p2',name:'Alice',"
             "role:'player',entity_id:'e2'},map,entities:[],"
             "you_entity:{id:'e2',name:'Alice',kind:'player',team:'party',"
-            "x:2,y:1},players:[],awareness:[],fog:false});"
+            "x:2,y:1},players:[],awareness:[]});"
             "api.onPath({type:'path',entity_id:'e2',path:[{x:2,y:1},{x:3,y:1},"
             "{x:4,y:1}]});"
             "api._send.reset();"
@@ -317,8 +317,8 @@ class TestAwarenessTiersPlayer(FrontendBase):
             "x:1,y:1},players:[],awareness:"
             "[{entity_id:'e1',x:3,y:1,color:'green',name:'Bob',kind:'player',"
             "label:true},"
-            "{entity_id:'<approx-1>',x:2,y:1,approximate:true,label:false}],"
-            "fog:false});")
+            "{entity_id:'<approx-1>',x:2,y:1,approximate:true,label:false}]"
+            "});")
 
     def test_canvas_renders_full_token_with_label_and_gray_approx_question(self):
         # 16x12 grid, harness canvas 800x584 → the view auto-fits to the
@@ -385,7 +385,7 @@ class TestAwarenessTiersPlayer(FrontendBase):
             "api.onWelcome({type:'welcome',you:{id:'p2',name:'Alice',"
             "role:'player',entity_id:'e2'},map,entities:[],"
             "you_entity:{id:'e2',name:'Alice',kind:'player',team:'party',"
-            "x:1,y:1},players:[],awareness:[],fog:false});"
+            "x:1,y:1},players:[],awareness:[]});"
             "api.els.mapView.hidden=false;"
             "api.renderAll();"
             "const c=api.els.canvas.getContext('2d');"
@@ -500,7 +500,7 @@ class TestBug007EntityAtCell(FrontendBase):
             "api.onWelcome({type:'welcome',you:{id:'p2',name:'Alice',"
             "role:'player',entity_id:'e2'},map,entities:[],"
             "you_entity:{id:'e2',name:'Alice',kind:'player',team:'party',"
-            "x:2,y:1},players:[],awareness:[],fog:false});"
+            "x:2,y:1},players:[],awareness:[]});"
             "const hit=api.entityAtCell(2,1);"
             "const miss=api.entityAtCell(5,3);"
             "return {hit:hit&&hit.id,miss:miss};})()"
@@ -587,7 +587,7 @@ class TestBug011JoinRejectionVisible(FrontendBase):
             "()=>Array(4).fill('floor'))};"
             "api.onWelcome({type:'welcome',you:{id:'p1',name:'G',role:'gm',"
             "entity_id:null},map,entities:[],players:[],"
-            "awareness:[],fog:false});"
+            "awareness:[]});"
             "return {lobby:api.els.lobbyStatus.textContent, joined:"
             "api.state.joined};})()"
         )
@@ -829,8 +829,8 @@ class TestBossEntityFrontend(FrontendBase):
             "{entity_id:'b1',x:4,y:1,color:'red',name:'Gore',kind:'boss',"
             "size:8,label:true},"
             "{entity_id:'e3',x:6,y:1,color:'green',name:'Bob',kind:'player',"
-            "label:true}],"
-            "fog:false});"
+            "label:true}]"
+            "});"
             "api.els.mapView.hidden=false;"
             "const c=api.els.canvas.getContext('2d');"
             # onWelcome already rendered into the same ctx (the recording
@@ -886,8 +886,8 @@ class TestBossEntityFrontend(FrontendBase):
             "you_entity:{id:'e2',name:'Alice',kind:'player',team:'party',"
             "x:1,y:1},players:[],awareness:["
             "{entity_id:'b1',x:4,y:1,color:'red',name:'Gore',kind:'boss',"
-            "size:8,label:true}],"
-            "fog:false});"
+            "size:8,label:true}]"
+            "});"
             "const doc=api.document;const made=[];"
             "const realCreate=doc.createElement;"
             "doc.createElement=(t)=>{const el=realCreate(t);"
@@ -991,7 +991,7 @@ class TestBossFootprintsWireAdoption(FrontendBase):
             "api.onWelcome({type:'welcome',you:{id:'p2',name:'Alice',"
             "role:'player',entity_id:'e2'},map,entities:[],"
             "you_entity:{id:'e2',name:'Alice',kind:'player',team:'party',"
-            "x:1,y:1},players:[],awareness:[],fog:false"
+            "x:1,y:1},players:[],awareness:[]"
             f"{extra}}});"
         )
 
@@ -1024,7 +1024,7 @@ class TestBossFootprintsWireAdoption(FrontendBase):
             + "const before=api.state.bossFootprints;"
             "api.onState({type:'state',map,entities:[],"
             "you_entity:{id:'e2',name:'Alice',kind:'player',team:'party',"
-            "x:1,y:1},players:[],awareness:[],fog:false,"
+            "x:1,y:1},players:[],awareness:[],"
             "boss_footprints:" + json.dumps(self.FALLBACK) + "});"
             "return {before,after:api.state.bossFootprints,"
             "dims12:api.bossDims({size:12})};})()"
@@ -1099,7 +1099,7 @@ class TestBossFootprintsWireAdoption(FrontendBase):
             "you_entity:{id:'e2',name:'Alice',kind:'player',team:'party',"
             "x:1,y:1},players:[],awareness:["
             "{entity_id:'b1',x:4,y:1,color:'red',name:'Gore',kind:'boss',"
-            "size:8,label:true}],fog:false,boss_footprints:{8:'2x4'}});"
+            "size:8,label:true}],boss_footprints:{8:'2x4'}});"
             "api.els.mapView.hidden=false;"
             "const c=api.els.canvas.getContext('2d');"
             "c._fillPaths.length=0;c._arcs.length=0;c._texts.length=0;"
@@ -1156,8 +1156,8 @@ class TestGmControllerView(FrontendBase):
         "if(t==='span')toasts.push(()=>el.textContent);return el};"
         "api.onWelcome({type:'welcome',"
         "you:{id:'p1',name:'Gamer',role:'gm',entity_id:null},"
-        f"map:{MAP_JS},entities:[],players:[],awareness:[],"
-        "fog:false});"
+        f"map:{MAP_JS},entities:[],players:[],awareness:[]"
+        "});"
         "doc.createElement=realCreate;"
     )
 
@@ -1171,15 +1171,13 @@ class TestGmControllerView(FrontendBase):
             "(()=>{"
             "api.onWelcome({type:'welcome',"
             "you:{id:'p1',name:'Gamer',role:'gm',entity_id:null},"
-            f"map:{self.MAP_JS},entities:[],players:[],awareness:[],"
-            "fog:false});"
+            f"map:{self.MAP_JS},entities:[],players:[],awareness:[]"
+            "});"
             "return {title:api.els.awarenessTitle.textContent,"
             "sel:api.els.selEntityName.textContent,"
             "hint:api.els.controlHint.textContent,"
             "canvasHint:api.els.canvasHint.textContent,"
             "canvasHintHidden:api.els.canvasHint.hidden,"
-            "fogEnabled:!api.els.fogToggle.disabled,"
-            "fogTitle:api.els.fogToggle.title,"
             "teamDisabled:api.els.teamSelect.disabled,"
             "deleteDisabled:api.els.btnDeleteEntity.disabled,"
             "entities:api.allEntities().length};})()"
@@ -1194,10 +1192,6 @@ class TestGmControllerView(FrontendBase):
         # §3.2 first-run canvas hint is up for a fresh session (5 s window).
         self.assertIn("You're the GM — no token of your own.", out)
         self.assertIn('"canvasHintHidden":false', out)
-        # A14: the fog toggle stays ENABLED for the GM, controller tooltip.
-        self.assertIn('"fogEnabled":true', out)
-        self.assertIn("Toggle fog of war for players. As GM you always see "
-                      "everything.", out)
         # No selection → team/delete disabled; zero tokens.
         self.assertIn('"teamDisabled":true', out)
         self.assertIn('"deleteDisabled":true', out)
@@ -1208,8 +1202,8 @@ class TestGmControllerView(FrontendBase):
             "(()=>{"
             "api.onWelcome({type:'welcome',"
             "you:{id:'p1',name:'Gamer',role:'gm',entity_id:null},"
-            f"map:{self.MAP_JS},entities:[],players:[],awareness:[],"
-            "fog:false});"
+            f"map:{self.MAP_JS},entities:[],players:[],awareness:[]"
+            "});"
             "const kids=[];"
             "api.els.awarenessList.appendChild="
             "(c)=>{kids.push(c);return c};"
@@ -1243,7 +1237,7 @@ class TestGmControllerView(FrontendBase):
             "role:'player',entity_id:'e1'},"
             f"map:{self.MAP_JS},entities:[],"
             "you_entity:{id:'e1',name:'Alice',kind:'player',team:'party',"
-            "x:1,y:1},players:[],awareness:[],fog:false});"
+            "x:1,y:1},players:[],awareness:[]});"
             "doc.createElement=realCreate;"
             "return {toasts:toasts.map(f=>f()),"
             "sel:api.state.selectedEntityId};})()"
@@ -1263,8 +1257,8 @@ class TestGmControllerView(FrontendBase):
             "(()=>{"
             "api.onWelcome({type:'welcome',"
             "you:{id:'p1',name:'Gamer',role:'gm',entity_id:null},"
-            f"map:{self.MAP_JS},entities:[],players:[],awareness:[],"
-            "fog:false});"
+            f"map:{self.MAP_JS},entities:[],players:[],awareness:[]"
+            "});"
             "api.els.newEntityName.value='Grom';"
             "api.els.newEntityKind.value='npc';"
             "api.els.newEntityTeam.value='neutral';"
@@ -1283,7 +1277,7 @@ class TestGmControllerView(FrontendBase):
             "entities:[{id:'e5',name:'Grom',kind:'npc',team:'neutral',"
             "x:1,y:1,owner:null}],players:[],"
             "awareness:[{entity_id:'e5',x:1,y:1,color:'white',name:'Grom',"
-            "kind:'npc',label:true}],fog:false});"
+            "kind:'npc',label:true}]});"
             "doc.createElement=realCreate;"
             "return {create:!!create,kind:create?create.kind:null,"
             "sel:api.state.selectedEntityId,"
@@ -1315,40 +1309,6 @@ class TestGmControllerView(FrontendBase):
         self.assertIn("Pick a destination for Grom", out)
         self.assertIn('"nameCleared":""', out)
 
-    def test_a14_fog_toggle_gm_send_and_no_rendered_change(self):
-        expr = (
-            "(()=>{"
-            "api.onWelcome({type:'welcome',"
-            "you:{id:'p1',name:'Gamer',role:'gm',entity_id:null},"
-            f"map:{self.MAP_JS},"
-            "entities:[{id:'e1',name:'Grom',kind:'npc',team:'neutral',"
-            "x:1,y:1,owner:null}],players:[],"
-            "awareness:[{entity_id:'e1',x:1,y:1,color:'white',name:'Grom',"
-            "kind:'npc',label:true}],fog:false});"
-            "const before=JSON.stringify(api.state.awareness);"
-            "api._send.reset();"
-            "api.els.fogToggle.checked=true;"
-            "api.toggleFog();"
-            "const sent=api._send.sent[0]||null;"
-            "api.onState({type:'state',"
-            f"map:{self.MAP_JS},"
-            "entities:[{id:'e1',name:'Grom',kind:'npc',team:'neutral',"
-            "x:1,y:1,owner:null}],players:[],"
-            "awareness:[{entity_id:'e1',x:1,y:1,color:'white',name:'Grom',"
-            "kind:'npc',label:true}],fog:true});"
-            "const after=JSON.stringify(api.state.awareness);"
-            "return {sent,checked:api.els.fogToggle.checked,"
-            "disabled:api.els.fogToggle.disabled,same:before===after};})()"
-        )
-        out = js(expr)
-        # A14: the GM toggle sends {type:"set_fog", on:true}; the state
-        # broadcast drives the checkbox; the GM's rendered awareness items
-        # are identical before/after (same items, same pixels).
-        self.assertIn('"sent":{"type":"set_fog","on":true}', out, out)
-        self.assertIn('"checked":true', out)
-        self.assertIn('"disabled":false', out)
-        self.assertIn('"same":true', out)
-
     def test_a19_player_empty_state_when_only_other_was_gm(self):
         expr = (
             "(()=>{"
@@ -1356,7 +1316,7 @@ class TestGmControllerView(FrontendBase):
             "role:'player',entity_id:'e1'},"
             f"map:{self.MAP_JS},entities:[],"
             "you_entity:{id:'e1',name:'Alice',kind:'player',team:'party',"
-            "x:1,y:1},players:[],awareness:[],fog:false});"
+            "x:1,y:1},players:[],awareness:[]});"
             "const kids=[];"
             "api.els.awarenessList.appendChild="
             "(c)=>{kids.push(c);return c};"
@@ -1414,11 +1374,6 @@ class TestIndexHtml(FrontendBase):
         note = re.sub(r"\s+", " ", m.group(1))
         self.assertIn("The GM has no token on the map", note)
         self.assertIn("creates and controls", note)
-
-    def test_fog_toggle_has_player_tooltip_in_html(self):
-        # The player-facing default title is in the markup; the GM title is
-        # applied per role by applyState (checked in TestGmControllerView).
-        self.assertIn('title="GM controls fog of war"', self.html)
 
     def test_legend_documents_approximate_and_hidden_contacts(self):
         # The canvas legend must document the three player visibility
@@ -1920,7 +1875,7 @@ class TestExploredMapStateAndValidate(FrontendBase):
             "you:{id:'p2',name:'Alice',role:'player',entity_id:'e2'},"
             "map,entities:[],"
             "you_entity:{id:'e2',name:'Alice',kind:'player',team:'party',"
-            "x:1,y:1},players:[],awareness:[],fog:false" + extra + "});"
+            "x:1,y:1},players:[],awareness:[]" + extra + "});"
             "return api.state.visibility;})()"
         )
 
@@ -1955,7 +1910,7 @@ class TestExploredMapStateAndValidate(FrontendBase):
             "(()=>{const map=" + json.dumps(self._MAP) + ";"
             "api.onWelcome({type:'welcome',"
             "you:{id:'p1',name:'Gamer',role:'gm',entity_id:null},"
-            "map,entities:[],players:[],awareness:[],fog:false});"
+            "map,entities:[],players:[],awareness:[]});"
             "return api.state.visibility;})()"
         )
         self.assertIn("null", out, out)
@@ -2016,7 +1971,7 @@ class TestExploredMapRender(FrontendBase):
             "you:{id:'p2',name:'Alice',role:'player',entity_id:'e2'},"
             "map,entities:[],"
             "you_entity:{id:'e2',name:'Alice',kind:'player',team:'party',"
-            "x:1,y:1},players:[],awareness:[],fog:false,"
+            "x:1,y:1},players:[],awareness:[],"
             "visibility:" + self._VIS_JS + "});"
             "api.els.mapView.hidden=false;api.renderAll();"
             "const c=api.els.canvas.getContext('2d');"
@@ -2232,7 +2187,7 @@ class TestExploredMapRender(FrontendBase):
             "you:{id:'p2',name:'Alice',role:'player',entity_id:'e2'},"
             "map,entities:[],"
             "you_entity:{id:'e2',name:'Alice',kind:'player',team:'party',"
-            "x:1,y:1},players:[],awareness:[],fog:false,"
+            "x:1,y:1},players:[],awareness:[],"
             "visibility:" + vis + "});"
             "api.els.mapView.hidden=false;api.renderAll();"
             "const c=api.els.canvas.getContext('2d');"
@@ -2259,7 +2214,7 @@ class TestExploredMapRender(FrontendBase):
             "(()=>{const map=" + self._MAP_JS + ";"
             "api.onWelcome({type:'welcome',"
             "you:{id:'p1',name:'Gamer',role:'gm',entity_id:null},"
-            "map,entities:[],players:[],awareness:[],fog:false});"
+            "map,entities:[],players:[],awareness:[]});"
             "api.els.mapView.hidden=false;api.renderAll();"
             "const c=api.els.canvas.getContext('2d');"
             "const styles=c._fills.map(f=>f.style);"
@@ -2519,7 +2474,7 @@ class TestDoorStateModel(FrontendBase):
             "you:{id:'p2',name:'Alice',role:'player',entity_id:'e2'},"
             "map,entities:[],"
             "you_entity:{id:'e2',name:'Alice',kind:'player',team:'party',"
-            "x:1,y:1},players:[],awareness:[],fog:false});"
+            "x:1,y:1},players:[],awareness:[]});"
             "return api.state.doors;})()"
         )
 
@@ -2547,17 +2502,17 @@ class TestDoorStateModel(FrontendBase):
             "you:{id:'p2',name:'Alice',role:'player',entity_id:'e2'},"
             "map,entities:[],"
             "you_entity:{id:'e2',name:'Alice',kind:'player',team:'party',"
-            "x:1,y:1},players:[],awareness:[],fog:false});"
+            "x:1,y:1},players:[],awareness:[]});"
             "map.doors={'1,1':'O'};"
             "api.onState({type:'state',map,entities:[],"
             "you_entity:{id:'e2',name:'Alice',kind:'player',team:'party',"
-            "x:1,y:1},players:[],awareness:[],fog:false});"
+            "x:1,y:1},players:[],awareness:[]});"
             "api.state.grid.cells[1][1]='doorway';"
             "const hadOpen=api.doorStateAt(1,1);"
             "const m2=Object.assign({},map);m2.doors={};"
             "api.onState({type:'state',map:m2,entities:[],"
             "you_entity:{id:'e2',name:'Alice',kind:'player',team:'party',"
-            "x:1,y:1},players:[],awareness:[],fog:false});"
+            "x:1,y:1},players:[],awareness:[]});"
             "return {hadOpen, now:api.doorStateAt(1,1),"
             "all:api.state.doors};})()"
         )
@@ -2964,7 +2919,7 @@ class TestDoorGmTool(FrontendBase):
             "(()=>{const map=" + self._MAP_JS + ";"
             "api.onWelcome({type:'welcome',"
             "you:{id:'p1',name:'Gamer',role:'gm',entity_id:null},"
-            "map,entities:[],players:[],awareness:[],fog:false});"
+            "map,entities:[],players:[],awareness:[]});"
             "api.els.canvas.width=800;api.els.canvas.height=600;"
             "api.state.cell=120;api.state.offsetX=100;api.state.offsetY=0;"
         )
@@ -3042,7 +2997,7 @@ class TestDoorGmTool(FrontendBase):
             "you:{id:'p2',name:'Alice',role:'player',entity_id:'e2'},"
             "map,entities:[],"
             "you_entity:{id:'e2',name:'Alice',kind:'player',team:'party',"
-            "x:1,y:1},players:[],awareness:[],fog:false});"
+            "x:1,y:1},players:[],awareness:[]});"
             "api.els.canvas.width=800;api.els.canvas.height=600;"
             "api.state.cell=120;api.state.offsetX=100;api.state.offsetY=0;"
             "api.state.tool='door';"
@@ -3071,7 +3026,7 @@ class TestPlayerDoorTap(FrontendBase):
             "you:{id:'p2',name:'Alice',role:'player',entity_id:'e2'},"
             "map,entities:[],"
             "you_entity:{id:'e2',name:'Alice',kind:'player',team:'party',"
-            "x:1,y:2},players:[],awareness:[],fog:false});"
+            "x:1,y:2},players:[],awareness:[]});"
             "api.els.canvas.width=800;api.els.canvas.height=600;"
             "api.state.cell=120;api.state.offsetX=100;api.state.offsetY=0;"
         )
@@ -3176,7 +3131,7 @@ class TestDoorPaintInteraction(FrontendBase):
             "(()=>{const map=" + self._MAP_JS + ";"
             "api.onWelcome({type:'welcome',"
             "you:{id:'p1',name:'Gamer',role:'gm',entity_id:null},"
-            "map,entities:[],players:[],awareness:[],fog:false});"
+            "map,entities:[],players:[],awareness:[]});"
         )
 
     def test_paint_doorway_still_sends_paint(self):
@@ -3381,7 +3336,7 @@ class TestSafeDoorStateModel(FrontendBase):
             "you:{id:'p2',name:'Alice',role:'player',entity_id:'e2'},"
             "map,entities:[],"
             "you_entity:{id:'e2',name:'Alice',kind:'player',team:'party',"
-            "x:1,y:1},players:[],awareness:[],fog:false});"
+            "x:1,y:1},players:[],awareness:[]});"
             "return api.state.safe;})()"
         )
 
@@ -3417,13 +3372,13 @@ class TestSafeDoorStateModel(FrontendBase):
             "you:{id:'p2',name:'Alice',role:'player',entity_id:'e2'},"
             "map,entities:[],"
             "you_entity:{id:'e2',name:'Alice',kind:'player',team:'party',"
-            "x:1,y:1},players:[],awareness:[],fog:false});"
+            "x:1,y:1},players:[],awareness:[]});"
             "api.state.grid.cells[2][2]='doorway';"
             "const hadOpen=api.isSafeDoor(2,2);"
             "const m2=Object.assign({},map);m2.safe={};"
             "api.onState({type:'state',map:m2,entities:[],"
             "you_entity:{id:'e2',name:'Alice',kind:'player',team:'party',"
-            "x:1,y:1},players:[],awareness:[],fog:false});"
+            "x:1,y:1},players:[],awareness:[]});"
             "return {hadOpen, now:api.isSafeDoor(2,2),"
             "all:api.state.safe};})()"
         )
@@ -3503,7 +3458,7 @@ class TestSafeDoorGmTool(FrontendBase):
             "(()=>{const map=" + self._MAP_JS + ";"
             "api.onWelcome({type:'welcome',"
             "you:{id:'p1',name:'Gamer',role:'gm',entity_id:null},"
-            "map,entities:[],players:[],awareness:[],fog:false});"
+            "map,entities:[],players:[],awareness:[]});"
             "api.els.canvas.width=800;api.els.canvas.height=600;"
             "api.state.cell=120;api.state.offsetX=100;api.state.offsetY=0;"
         )
@@ -3586,7 +3541,7 @@ class TestSafeDoorGmTool(FrontendBase):
             "you:{id:'p2',name:'Alice',role:'player',entity_id:'e2'},"
             "map,entities:[],"
             "you_entity:{id:'e2',name:'Alice',kind:'player',team:'party',"
-            "x:1,y:1},players:[],awareness:[],fog:false});"
+            "x:1,y:1},players:[],awareness:[]});"
             "api.els.canvas.width=800;api.els.canvas.height=600;"
             "api.state.cell=120;api.state.offsetX=100;api.state.offsetY=0;"
             "api.state.tool='safeDoor';"
@@ -3617,7 +3572,7 @@ class TestPlayerSafeDoorTap(FrontendBase):
             "you:{id:'p2',name:'Alice',role:'player',entity_id:'e2'},"
             "map,entities:[],"
             "you_entity:{id:'e2',name:'Alice',kind:'player',team:'party',"
-            "x:1,y:2},players:[],awareness:[],fog:false});"
+            "x:1,y:2},players:[],awareness:[]});"
             "api.els.canvas.width=800;api.els.canvas.height=600;"
             "api.state.cell=120;api.state.offsetX=100;api.state.offsetY=0;"
         )
@@ -3689,7 +3644,7 @@ class TestSafeDoorPaintInteraction(FrontendBase):
             "(()=>{const map=" + self._MAP_JS + ";"
             "api.onWelcome({type:'welcome',"
             "you:{id:'p1',name:'Gamer',role:'gm',entity_id:null},"
-            "map,entities:[],players:[],awareness:[],fog:false});"
+            "map,entities:[],players:[],awareness:[]});"
         )
 
     def test_safe_tool_does_not_emit_paint_frames(self):
@@ -3807,7 +3762,7 @@ class TestPanZoom(FrontendBase):
             "api.onWelcome({type:'welcome',"
             "you:{id:'p1',name:'G',role:'gm',entity_id:null},"
             "map,entities:" + entities_js + ",players:[],"
-            "awareness:[],fog:false});")
+            "awareness:[]});")
 
     def _vset(self, level, px, py, avail=(800, 400)):
         """JS to set the view level+pan and the canvas-wrap size, then
@@ -4064,7 +4019,7 @@ class TestPanZoom(FrontendBase):
             + "gw:api.state.grid.width};"
             + "const newmap=" + _floor_map_js(24, 16) + ";"
             + "api.onState({type:'state',map:newmap,entities:[],players:[],"
-            + "awareness:[],fog:false});"
+            + "awareness:[]});"
             + "return {before,"
             + "after:{level:api.state.view.level,"
             + "pan:[api.state.view.panX,api.state.view.panY],"
@@ -4298,7 +4253,7 @@ class TestPanZoom(FrontendBase):
             + "map,entities:[],you_entity:{id:'e2',name:'Alice',"
             + "kind:'player',team:'party',x:6,y:6},"
             + "players:[{id:'p2',entity_id:'e2',awareness_radius:4}],"
-            + "awareness:[],fog:false});"
+            + "awareness:[]});"
             + "api.state.grid.cells[8][10]='doorway';"
             + self._vset(4, 2, 3)
             + "const c=api.state.cell,ox=api.state.offsetX,"
@@ -4422,7 +4377,7 @@ class TestPanZoom(FrontendBase):
             + "map,entities:[],you_entity:{id:'e2',name:'Alice',"
             + "kind:'player',team:'party',x:6,y:6},"
             + "players:[{id:'p2',entity_id:'e2',awareness_radius:4}],"
-            + "awareness:[],fog:false});"
+            + "awareness:[]});"
             + self._vset(5, 4, 2)
             + "const c=api.state.cell,ox=api.state.offsetX,"
             + "oy=api.state.offsetY;"
@@ -4472,8 +4427,8 @@ class TestPanZoom(FrontendBase):
             + "players:[{id:'p2',entity_id:'e2',awareness_radius:4}],"
             + "awareness:[{entity_id:'e1',x:9,y:7,color:'green',"
             + "name:'Bob',kind:'player',label:true},"
-            + "{entity_id:'<a>',x:3,y:2,approximate:true,label:false}],"
-            + "fog:false});"
+            + "{entity_id:'<a>',x:3,y:2,approximate:true,label:false}]"
+            + "});"
             + self._vset(4, 3, 4)
             + "const c=api.state.cell,ox=api.state.offsetX,"
             + "oy=api.state.offsetY;"
@@ -4662,7 +4617,7 @@ class SavesBase(FrontendBase):
             "{length:4},()=>Array(6).fill('floor'))};"
             "api.onWelcome({type:'welcome',"
             "you:{id:'p1',name:'G',role:'gm',entity_id:null},"
-            "map,entities:[],players:[],awareness:[],fog:false});"
+            "map,entities:[],players:[],awareness:[]});"
         )
 
     def _gm(self, body):
@@ -4768,8 +4723,8 @@ class TestSavesGmGating(SavesBase):
             "api.onWelcome({type:'welcome',"
             "you:{id:'p2',name:'Alice',role:'player',entity_id:'e2'},"
             'map,entities:[],you_entity:{id:"e2",name:"Alice",kind:'
-            "'player',team:'party',x:1,y:1},players:[],awareness:[],"
-            "fog:false});"
+            "'player',team:'party',x:1,y:1},players:[],awareness:[]"
+            "});"
             "return {isGm:api.document.body.classList.contains('is-gm'),"
             "isPlayer:api.document.body.classList.contains('is-player'),"
             "role:api.state.role};})()"
@@ -4787,7 +4742,7 @@ class TestSavesGmGating(SavesBase):
             "{length:4},()=>Array(6).fill('floor'))};"
             "api.onWelcome({type:'welcome',"
             "you:{id:'p1',name:'G',role:'gm',entity_id:null},"
-            'map,entities:[],players:[],awareness:[],fog:false});'
+            'map,entities:[],players:[],awareness:[]});'
             "return {isGm:api.document.body.classList.contains('is-gm')};"
             "})()"
         )
@@ -5098,7 +5053,7 @@ class TestBug014PlayerRejoinToast(SavesBase):
             "api.onWelcome({type:'welcome',you:{" + you + "},"
             "map:" + TestBug014PlayerRejoinToast._MAP + ",entities:[],"
             "you_entity:{id:'e1',name:'Alice',kind:'player',team:'party',"
-            "x:1,y:1},players:[],awareness:[],fog:false});"
+            "x:1,y:1},players:[],awareness:[]});"
             "doc.createElement=realCreate;"
             "return {toasts:toasts.map(f=>f())};})()"
         )
@@ -5393,7 +5348,7 @@ class TestSavesDelete(SavesBase):
             "const map=" + _floor_map_js(20, 17) + ";"
             "api.onWelcome({type:'welcome',"
             "you:{id:'p1',name:'G',role:'gm',entity_id:null},"
-            "map,entities:[],players:[],awareness:[],fog:false});"
+            "map,entities:[],players:[],awareness:[]});"
             "api.els.canvasWrap.clientWidth=816;"
             "api.els.canvasWrap.clientHeight=416;"
             "api.state.view.level=4;api.state.view.panX=2;"
@@ -5962,7 +5917,7 @@ class TestSavesDelete(SavesBase):
             "you:{id:'p2',name:'Alice',role:'player',entity_id:'e2'},"
             "map,entities:[],you_entity:{id:'e2',name:'Alice',"
             "kind:'player',team:'party',x:1,y:1},players:[],"
-            "awareness:[],fog:false});"
+            "awareness:[]});"
             "api.state.saves=[%s];" % self._NORMAL +
             "api._fetch.reset();"
             "api.confirmDeleteSave('act-1');"
@@ -6150,7 +6105,7 @@ class TestSavesSaveMapState(SavesBase):
             "you:{id:'p2',name:'Alice',role:'player',entity_id:'e2'},"
             "map,entities:[],you_entity:{id:'e2',name:'Alice',"
             "kind:'player',team:'party',x:1,y:1},players:[],"
-            "awareness:[],fog:false});"
+            "awareness:[]});"
             "return {disabled:api.els.btnSaveMapState.disabled};})()"
         )
         d = json.loads(js(expr))
