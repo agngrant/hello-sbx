@@ -80,8 +80,8 @@ overlay** (colored dots for friends/NPCs/enemies); the GM sees everything.
 - **Detection:** `app/detection.py` — gray → resize → Otsu threshold → 3×3
   majority → classify walls → doorway heuristic (unchanged).
 - **Pathfinding:** `app/pathfinding.py` — A* (8-dir, no wall-corner cutting),
-  `has_line_of_sight` (Bresenham) for optional fog. (Kept as-is per the
-  review: it's domain logic and no package wins here.)
+  `has_line_of_sight` (Bresenham) for the awareness model. (Kept as-is per
+  the review: it's domain logic and no package wins here.)
 - **Models:** `app/models.py` — **`dataclasses`** + plain dicts for JSON.
   Field names and shapes are identical to v1 so the frontend and tests match.
   (The review's Pydantic row was intentionally NOT adopted — manual
@@ -198,7 +198,6 @@ class Session:
     grid: Grid
     entities: dict[str, Entity]
     players: dict[str, Player]
-    fog: bool = False
     def to_dict(self) -> dict: ...  # full snapshot for broadcasts
 ```
 
@@ -262,9 +261,9 @@ model (FULL on LOS / APPROXIMATE within 4 squares without LOS / INVISIBLE
 beyond). It is blocked by any wall cell strictly on the line, AND by a
 diagonal step that squeezes between two wall corners (both orthogonal "elbow"
 cells walls) — the same no-corner-cut rule as movement. Endpoints never
-block (``a == b`` → True). The ``fog`` flag is retained in the payloads for
-wire compatibility but no longer gates visibility. The GM is never fogged or
-filtered. A **CLOSED** door (normal or safe room) blocks sight exactly like a
+block (``a == b`` → True). The legacy ``fog`` wire flag was removed
+entirely — the three-tier model above is the whole visibility story.
+The GM is never fogged or filtered. A **CLOSED** door (normal or safe room) blocks sight exactly like a
 wall (door-features spec); an open door does not.
 
 > **Map tiers (explored map, additive):** the *grid* is now also tiered per
@@ -384,7 +383,6 @@ Endpoint: `ws://host/ws` (upgrade from `GET /ws` with `Upgrade: websocket`).
   awareness radius (`value`: integer 0–20; errors: `"not a player token"`,
   `"awareness must be an integer 0–20"`).
 - `{type:"paint", x, y, cell_type}` — GM edit grid.
-- `{type:"set_fog", on}` — GM toggle fog of war.
 - `{type:"door", x, y, action}` — door action on the doorway cell at (x, y)
   (door-features spec §4): `action` ∈ `unlock`/`lock`/`open`/`close`;
   `unlock`/`lock` are GM-only, players may `open`/`close` an unlocked door;
@@ -392,8 +390,8 @@ Endpoint: `ws://host/ws` (upgrade from `GET /ws` with `Upgrade: websocket`).
   `docs/design/door-features.md` §4.3.
 
 **Server → client** (JSON text frames):
-- `{type:"welcome", you:{id,name,role,entity_id}, map, entities, players, fog}`
-- `{type:"state", map, entities, players, fog}` — full snapshot broadcast to
+- `{type:"welcome", you:{id,name,role,entity_id}, map, entities, players}`
+- `{type:"state", map, entities, players}` — full snapshot broadcast to
   everyone on any mutation (small game → snapshot is simplest + testable).
   Every `map` object now carries the additive `doors` field (a
   `"<x>,<y>" → "L"/"U"/"O"` dict over the doorway cells; absent ⇒ all doors

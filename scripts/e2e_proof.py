@@ -33,8 +33,8 @@ scenario and prints a check per behaviour:
      swaps to the new grid and re-broadcasts; the players stay in the session
      (not stranded) and the GM's grid object is shared with the registry so
      a subsequent paint still works (BUG-002 regression).
-  7. Permissions over the wire: Bob can't set_fog, can't move Alice; a 7th
-     join is rejected with "session full".
+   7. Permissions over the wire: Bob can't paint, can't move Alice; a 7th
+      join is rejected with "session full".
   8. GENERATED MAP (generated-maps spec C11): GM POSTs /api/maps/generate
      (24x16, seed 42) -> the GM + a player open it in a FRESH session via
      use_map; the player spawns walkable, is re-parked onto the new grid,
@@ -357,8 +357,8 @@ def main():
         # GM paints a wall at (4,2) (a real cell change: it blocks Bob's LOS
         # to Grom) and a second, FAR npc spawns at (12,2). From each player
         # the three tiers must be visible simultaneously in the awareness
-        # array; the GM is never filtered. The fog flag is retained in the
-        # payloads for wire compatibility but no longer gates anything.
+        # array; the GM is never filtered. (The legacy ``fog`` wire flag was
+        # removed entirely — its absence from the payloads is checked below.)
         print("\n[5] three tiers: wall (4,2) + far npc (12,2)")
         gm.send_json({"type": "paint", "x": 4, "y": 2, "cell_type": "wall"})
         for c in (gm, alice, bob):
@@ -372,8 +372,8 @@ def main():
         alice.send_json({"type": "request_state"})
         bob.send_json({"type": "request_state"})
         st_gm, st_al, st_bo = gm.recv_json(), alice.recv_json(), bob.recv_json()
-        check("fog flag still present in payloads (wire compat)",
-              "fog" in st_gm and "fog" in st_al and "fog" in st_bo)
+        check("legacy fog key absent from payloads (removed)",
+              "fog" not in st_gm and "fog" not in st_al and "fog" not in st_bo)
         # --- GM: never filtered — all four, FULL + labeled. ----------------
         gm_items = st_gm["awareness"]
         gm_ids = {i["entity_id"] for i in gm_items}
@@ -496,8 +496,8 @@ def main():
 
         # 6. permissions over the wire --------------------------------------
         print("\n[6] permissions + capacity (fill to 6 players, then a 7th)")
-        bob.send_json({"type": "set_fog", "on": False})
-        check("Bob set_fog -> not allowed",
+        bob.send_json({"type": "paint", "x": 13, "y": 10, "cell_type": "wall"})
+        check("Bob paint -> not allowed",
               bob.recv_json() == {"type": "error", "message": "not allowed"})
         bob.send_json({"type": "move", "entity_id": al_ent, "x": 4, "y": 5})
         check("Bob moving Alice -> not allowed",

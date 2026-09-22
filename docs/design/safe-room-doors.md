@@ -73,7 +73,7 @@ fourth cell type); the **normal** door state machine, its wire frame
 strings (byte-for-byte unchanged — a safe door cell simply is *not* a normal
 door, so a `door` message on it gets a clean error, §4.4); the **three-tier
 entity awareness** model and `build_awareness`'s logic; the **explored-map**
-S/E/H algorithm; the `players[]` / `Player.to_dict()` shapes; the `fog` flag;
+S/E/H algorithm; the `players[]` / `Player.to_dict()` shapes;
 the GM exemption (GM view is never filtered); the sample dungeon geometry
 (`app/grid.py`); the `path` / `error` frame shapes; all **non-safe** existing
 tests (the design is additive — §12).
@@ -969,8 +969,8 @@ the no-op/selection handling without ever emitting a normal `door` frame.
 - **No new server→client message type.** `welcome`/`state`/`path`/`error`
   shapes are unchanged except the additive `map.safe` key and the (possibly
   smaller) `map.doors`. The `visibility` (explored) field, `players[]`,
-  `entities[]`, `you_entity`, `awareness`, and `fog` are all **byte-identical**
-  in shape to today.
+  `entities[]`, `you_entity`, and `awareness` are all **byte-identical** in
+  shape to today.
 - The client stores `state.safe` in `applyState` and uses `isSafeDoor` /
   `safeDoorStateAt` for rendering + the GM tool. A malformed `safe` (wrong
   charset / non-object / bad key) is treated as `{}` — defensive, never
@@ -1149,7 +1149,6 @@ consistent across both surfaces with no extra synchronization.
   already in `visible_cells` covers closed safe doors with no new code.
 - **`players[]` / `Player.to_dict()`:** unchanged (safe-door state is map
   state, not per-player).
-- **`fog`:** unchanged, still a wire-compat no-op.
 - **`path` / `error` frame shapes:** unchanged (a `safe_door` action replies
   with the existing `error` shape; a success uses the existing `state`
   broadcast, not a new frame).
@@ -1584,7 +1583,7 @@ deterministic.
 > `app/grid.py` (byte-identical sample), `app/detection.py` /
 > `app/generation.py` (behavior), the **normal-door** wire frame +
 > `DOOR_STATES` + error strings (byte-identical), the `players[]` /
-> `Player.to_dict()` shapes, the `fog` flag, and all **existing** tests.
+> `Player.to_dict()` shapes, and all **existing** tests.
 
 ---
 
@@ -1603,7 +1602,7 @@ deterministic.
   partition the doorway cells. **No new server→client broadcast type.**
 - **The normal `{type:"door", x, y, action}` frame is unchanged** — but on a
   **safe-door cell** it is rejected with `"not a normal door"`.
-- **No changes** to `you`, `entities`, `players`, `awareness`, `fog`,
+- **No changes** to `you`, `entities`, `players`, `awareness`,
   `you_entity`, `visibility`, `path`, or `error` shapes.
 - **Client contract:** store `state.safe` in `applyState` (`{}` default);
   render safe doors as a **green cross** (bar iff closed) per tier in

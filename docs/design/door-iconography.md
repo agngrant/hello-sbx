@@ -141,7 +141,7 @@ values, its error strings, and the `"not a normal door"` guard in `_on_door`
 `HOSTILE_ON_SAFE_DOOR` guard (unchanged — §5); `_closed_doors` /
 `_open_safe_doors` / `_blocked_for` / `walkable` / `is_valid_step` /
 `has_line_of_sight` (unchanged — §5); the three-tier entity awareness model;
-the explored-map S/E/H algorithm; the `players[]` shapes; the `fog` flag; the
+the explored-map S/E/H algorithm; the `players[]` shapes; the
 `path`/`error` frame shapes; the sample-dungeon geometry.
 
 ---

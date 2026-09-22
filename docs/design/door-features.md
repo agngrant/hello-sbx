@@ -72,8 +72,8 @@ APPROXIMATE / INVISIBLE) and `build_awareness`'s *logic* (it reuses
 S/E/H *algorithm* (it reuses `visible_cells`/`has_line_of_sight` — §6.2); the
 `players[]` / `Player.to_dict()` shapes; the cell type vocabulary (`floor` /
 `wall` / `doorway` — a door is a `doorway` cell + a state, **not** a new cell
-type); the `fog` flag (still a wire-compat no-op); the GM's exemption (GM view
-is never filtered and is never door-gated); the sample dungeon geometry
+type); the GM's exemption (GM view is never filtered and is never
+door-gated); the sample dungeon geometry
 (`app/grid.py` untouched — its three doorways simply *are* doors, closed+locked
 by default); the `path` / `error` frame shapes; the awareness ring / sidebar.
 
@@ -857,8 +857,8 @@ A **player** (no door tool) interacts by **tapping a doorway cell**:
     non-object) is treated as `{}` (all locked) — defensive, never crashes.
 - **No new server→client message type.** `welcome`/`state`/`path`/`error`
   shapes are unchanged except the additive `map.doors` key. The `visibility`
-  (explored) field, `players[]`, `entities[]`, `you_entity`, `awareness`, and
-  `fog` are all **byte-identical** in shape to today.
+  (explored) field, `players[]`, `entities[]`, `you_entity`, and `awareness`
+  are all **byte-identical** in shape to today.
 
 ### 8.2 REST (D8) — additive `doors` in every `map` object
 
@@ -1014,7 +1014,6 @@ consistent across both surfaces with no extra synchronization.
   "doorway is a gap in a wall" geometry all keep their exact meaning).
 - **`players[]` / `Player.to_dict()`:** unchanged (door state is map state,
   not per-player).
-- **`fog`:** unchanged, still a wire-compat no-op.
 - **`path` / `error` frame shapes:** unchanged (the `door` *action* replies
   with the existing `error` shape; a successful door action uses the existing
   `state` broadcast, not a new frame).
@@ -1383,7 +1382,7 @@ over the live server. All deterministic.
 > **Do not touch:** `app/main.py`, `app/imaging.py`, `app/ws.py`,
 > `app/awareness.py` (byte-identical), `app/grid.py` (byte-identical sample),
 > `app/detection.py` / `app/generation.py` (behavior), the `players[]` /
-> `Player.to_dict()` shapes, the `fog` flag, and all **non-A1** existing tests.
+> `Player.to_dict()` shapes, and all **non-A1** existing tests.
 
 ---
 
@@ -1398,7 +1397,7 @@ over the live server. All deterministic.
   `{"<x>,<y>": "L"|"U"|"O"}`) inside every `welcome`/`state`/REST map object
   for a grid that has ≥ 1 doorway (emitted in full whenever doorways exist,
   A9; a missing key ⇒ all locked). **No new server→client broadcast type.**
-- **No changes** to `you`, `entities`, `players`, `awareness`, `fog`,
+- **No changes** to `you`, `entities`, `players`, `awareness`,
   `you_entity`, `visibility`, `path`, or `error` shapes.
 - **Client contract:** store `state.doors` in `applyState` (`{}` default);
   render door state in `drawGridOnCanvas` (per tier); GM sends `door` messages

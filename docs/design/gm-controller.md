@@ -65,12 +65,12 @@ them.
 5. **`state_for(player)` / `you_entity`:** unchanged (players still get their
    own token via `you_entity`). Player `awareness` items now naturally exclude
    any GM token because none exists.
-6. **Fog:** `GameSession._awareness_for` already bypasses the LOS filter for
-   `role == "gm"`. Unchanged. (Note: fog filtering in v1 is **server-side**
-   in `_awareness_for` + the per-player `_seen` set; `wireframes.md §12.3`
-   described a client-side Bresenham — the shipped implementation does the
-   filtering server-side, so the GM client renders exactly the items it is
-   sent and does zero LOS math. This spec relies on that.)
+6. **Fog:** player visibility is the three-tier awareness model
+   (LOS full / proximity approximate / invisible), always active; the
+   legacy fog toggle was removed from the wire and UI entirely. The GM is
+   role-exempt — `GameSession._awareness_for` never applies the LOS filter
+   to `role == "gm"` — so the GM client renders exactly the items it is
+   sent and does zero LOS math. This spec relies on that.
 7. **`EntityKind` union (`app/models.py`):** keep the `"gm_character"` string
    in `ENTITY_KINDS` as a **deprecated legacy value** (in-memory sessions from
    older server builds may still hold one; `Entity.from_dict` must not crash).
@@ -161,10 +161,10 @@ Explicit guarantees (these are the "no own-token assumption" audit, §3.7):
   name label pill under it, awareness shape marker (▲/●/□ in team color)
   overlaid top-right — exactly the wireframes §4.1 GM treatment, now for the
   NPC/enemy tokens the GM creates plus every connected player's token.
-- **Never fogged:** `body.fog-on` still toggles on the GM client (state
-  fidelity), but the GM's rendered awareness is byte-identical with fog on or
-  off, because the server sends the GM the complete, unlabeled-filter-free
-  list either way (§3.6).
+- **Never fogged:** the GM's rendered awareness is always the complete,
+  unfiltered list — the server is role-exempt and sends every entity with
+  full info; there is no fog state (for the GM or anyone) that could
+  change that (§3.6).
 - **Radar-style awareness, GM variant:** GM markers are the small overlaid
   shape glyphs (true colors, no masking) + labels + the sidebar list — the
   same "sees all" vocabulary as wireframes §5.
@@ -176,7 +176,7 @@ Explicit guarantees (these are the "no own-token assumption" audit, §3.7):
 ```
 GM map view, desktop ≥1024px — 0 tokens (fresh session)
 ┌────────────────────────────────────────────────────────────────────────────────┐
-│ LITTLEDUNGEONS ▸ The Gilded Crypt ● Connected  [✓] Fog of war  [☰]        #topbar
+│ LITTLEDUNGEONS ▸ The Gilded Crypt ● Connected  [☰]        #topbar
 ├──────────────────────────────────────────────────────────────────────────┬─────┤
 │ #canvas-wrap                                                             │SIDE │
 │ ┌──────────────────────────────────────────────────────────────────────┐ │BAR  │
@@ -335,35 +335,33 @@ GM-only example with zero players (1 GM-created token):
 - Note for a11y: native `<select>` — removing an option is
   screen-reader-transparent.
 
-### 3.6 Fog-of-war toggle (`#fog-toggle`)
+### 3.6 Fog of war (the legacy toggle — removed)
 
-**Confirmed: the toggle stays, GM-enabled, no behavior change to the
-control.** What "fog on" now means per viewer:
+**The fog-of-war toggle no longer exists.** The top-bar fog checkbox,
+the legacy client→server fog toggle message, the `body.fog-on` class, and
+the `fog` payload field were all removed. Visibility is unconditionally
+the three-tier awareness model:
 
-| Viewer | Fog off | Fog on |
-|---|---|---|
-| **GM** | Sees every entity, labeled, true colors. | **Identical.** The GM is never fogged and no longer needs an anchor entity — the server's LOS filter is simply not applied to the GM's snapshot. "Fog on" for the GM is a no-op render-wise; the GM keeps full vision at all times. |
-| Player | Full radar (passes through walls), dots for every entity except self. | LOS-anchored to **the player's own token**, with "previously seen" memory (server-side, `_seen`). |
+| Viewer | Visibility |
+|---|---|
+| **GM** | Every entity, full info, labeled, no distance/LOS filtering — the server is role-exempt. |
+| Player | Direct line of sight → FULL item; no LOS but within `APPROX_RADIUS` squares → APPROXIMATE quantized block (no identity); anything else invisible. |
 
-Concrete spec:
+Concrete spec (post-removal):
 
-- GM: checkbox **enabled** (`.is-gm`), sends `{type:"set_fog", on}` — unchanged.
-  Tooltip copy updated to state the semantics:
-  `title="Toggle fog of war for players. As GM you always see everything."`
-  (was: no tooltip on the GM side).
-- Player: checkbox **disabled**, reflects broadcast `fog`,
-  `title="GM controls fog of war"` — unchanged.
-- Rendering: the client renders exactly the awareness items it receives;
-  with fog on, players receive the filtered set and the GM receives the full
-  set. **No client-side LOS code is required** (this supersedes the
-  client-side Bresenham note in `wireframes.md §12.3`, which the
-  implementation never needed — server filters in `_awareness_for`).
-- `body.fog-on` class still toggles for everyone (state fidelity for any
-  future styling); it must not gate GM rendering.
-- Why the GM needs no anchor: the old client-side design anchored LOS on
-  "own entity"; the GM has none and would have had no valid anchor. That
-  question no longer arises — the rule is "GM is exempt", evaluated by role,
-  not by geometry.
+- The legacy fog toggle message, sent by any sender (GM or player), now
+  returns `{"type":"error","message":"unknown message type"}` — the removed
+  wire message is rejected safely; a stale client sending it just gets an
+  error toast while everything else keeps working (covered by
+  `tests/test_session.py`).
+- There is no client-side checkbox, no per-role tooltip, and no `fog`
+  field in `welcome`/`state` payloads to reconcile.
+- Rendering: the client renders exactly the awareness items it receives.
+  **No client-side LOS code is required** — the server filters in
+  `_awareness_for` (this supersedes the client-side Bresenham note in
+  `wireframes.md §12.3`, which the implementation never needed).
+- Why the GM needs no anchor: the rule is "GM is exempt", evaluated by
+  role, not by geometry.
 
 ### 3.7 Selection & movement UX — GM (confirmed unchanged, audited)
 
@@ -387,7 +385,7 @@ unchanged.
 | `entityAtCell` / GM click-select | GM could click-and-select its own token | Selects any real token; with 0 tokens, canvas clicks fall through to the hint (`No tokens yet…` / `Select an entity, then a tile`) | none |
 | `selectEntity` (looks up name/team in `state.entities`) | — | Same; `None` when nothing selected | none |
 | `sendMove` / "Move anyway" toast | GM sometimes retried moving its *own* token through walls | Works identically on created/players' tokens; `override` path unchanged | none |
-| Fog class + rendering | — | GM never fogged server-side; client renders what it's sent (§3.6) | none |
+| Fog of war | — | Visibility is always the three-tier model (the legacy toggle was removed); GM never fogged server-side; client renders what it's sent (§3.6) | none |
 | `firstFreeFloor()` (spawn spot) | GM's own token occupied `(1,1)` on the sample map | Spawn spot picks the first free floor for *new tokens* — unaffected; note player spawns shift (§2.8) | none |
 
 **New micro-copy branch (only functional change):** `#control-hint` for
@@ -409,8 +407,9 @@ Tools.` (see §3.4a). All other hint strings unchanged.
     GM is simply invisible on the radar, as a controller should be. (Their
     name is not leaked either: awareness items never carried names for
     players.)
-  - Fog: player LOS anchoring is unchanged (own token). The removed white dot
-    could have been hidden/shown by fog before; now it's just absent.
+   - Awareness: the three-tier model anchors on the player's own token
+     (unchanged); the removed white GM dot simply never appears in a
+     player's awareness items now.
 - Edge: a player whose *only* previously-visible entity was the GM token
   (GM alone + this player) now sees the player empty state
   `"No one else is out there yet."` — correct and intentional.
@@ -426,7 +425,7 @@ Tools.` (see §3.4a). All other hint strings unchanged.
 | 3 | **GM deletes all created tokens** | Select token → `Delete entity` → inline confirm (`Really? [3 s]`) → `delete_entity` → token + row vanish; `#sel-entity-name` = `None`; tools disabled; list falls to the 0-token state **only if** no players are connected; if players are connected, their rows remain (and are protected: `cannot delete a player's own entity` toast). Summary recomputes. No error, no crash, no residual selection ring on the canvas. |
 | 4 | **GM reconnects** (tab closed, WS dropped, auto-reconnect re-sends `{type:"join", name, role:"gm"}`) | Server re-attaches the existing Player (name+role match). **No entity is re-spawned; entity count is identical before/after.** The GM's welcome reflects the current roster (`entities` = real tokens, `you.entity_id=null`). Any tokens the GM created persist at their positions; the GM's selection resets to `None` (fresh page state) — acceptable, matches today's reconnect behavior. |
 | 5 | **GM fully leaves the session** (`leave()`) | The GM's Player record is removed; since `entity_id` is `null`, no entity is deleted and **no stray token remains** (old behavior removed the GM's `gm_character`). Remaining players are unaffected; roster unchanged minus the GM's row in each other's rosters — there is no GM row. |
-| 6 | **Fog on, GM present** | §3.6: GM sees everything (labeled, unfiltered); players see LOS-filtered sets with previously-seen memory. Toggle stays enabled for the GM. Toggling fog on/off produces zero pixel change for the GM and only player-side changes. |
+| 6 | **GM present (awareness always active)** | §3.6: GM sees everything (labeled, unfiltered — role-exempt); players see the three-tier model (LOS full / proximity approximate / invisible). There is no toggle — this is the only mode. |
 | 7 | **GM joins a session where players already exist** | GM immediately sees all player tokens labeled + selectable + movable; sidebar lists them; `you.entity_id` null; no own token anywhere. First-run hint does **not** fire (roster non-empty). |
 | 8 | **Second "GM" attempts to join** | Unchanged: refused, `session full` toast in lobby. (Documented here so the no-token change isn't mistaken for a multi-GM feature.) |
 | 9 | **Stale/garbage `kind:"gm_character"` sent via `create_entity`** | Server error `kind must be one of npc/enemy` → standard error toast. (Acceptance item, §8.) |
@@ -448,7 +447,7 @@ No new breakpoints, panels, or layout. Specifics that must keep holding:
   `e1`).
 - **Touch:** create flow unchanged (tap `[Add]` spawns at last-hovered =
   last-tapped cell on touch); 44px targets unchanged.
-- **Legend / fog icon-collapse / control-bar wrap:** unchanged.
+- **Legend / control-bar wrap:** unchanged.
 - **<480px lobby:** the added lobby sentence wraps; card height grows ~1
   line; no other effect.
 
@@ -487,14 +486,16 @@ change exactly these spots:
    only rendered rows.
 5. **§6** — `#new-entity-kind (player|npc|enemy|gm_character)` →
    **`(npc|enemy)`**; add "create_entity rejects any other kind".
-6. **§4.2** — `#fog-toggle` GM tooltip copy (§3.6).
+6. **§4.2** — the fog checkbox row is removed (the toggle no longer exists;
+   §3.6).
 7. **§10.1/§10.3** — no ID or state-class changes; panel-state table: GM
    selection state "none → any entity (never self — GM has no self entity)".
 8. **§11** — `welcome` row: "select own entity (player)" — add "(GM: no
    entity, selection stays null)".
-9. **§12.3** — replace "client replicates Bresenham for fog" with
-   "fog filtering is server-side in `_awareness_for`; GM is role-exempt,
-   needs no anchor".
+9. **§12.3** — replace the client-side fog-rendering note with
+   "visibility is the server-side three-tier awareness model in
+   `_awareness_for`; the GM is role-exempt and needs no anchor; the legacy
+   fog toggle was removed".
 10. **§12.2** — `.is-own` note: players only.
 
 ---
@@ -517,19 +518,19 @@ Verifiable with the existing harness: `FakeSock`/`handle_message` (unit),
 - [ ] A7. `create_entity` with `kind:"gm_character"` → `{"type":"error","message":"kind must be one of npc/enemy"}`; same for `kind:"player"`; entity count unchanged.
 - [ ] A8. GM deletes every npc/enemy → all succeed, `state_for(gm)["entities"] == []`, no error. Deleting a connected player's token → `cannot delete a player's own entity` (unchanged).
 - [ ] A9. GM moves a created npc: A* path without override (wall → `no route — wall in the way`), `override:true` teleports through a wall, `place` still works. GM can move a **player's** token (existing `test_gm_can_move_any_entity` semantics); a player moving any non-owned token is `not allowed` (replaces the old "move GM entity" negative test).
-- [ ] A10. `set_fog on` → GM snapshot: `awareness` contains **all** entities, every item `label=True`, including entities behind walls the GM cannot see by LOS. Player snapshot: LOS-filtered with previously-seen retention (existing behavior, must still pass with no GM token present).
+- [ ] A10. GM snapshot: `awareness` contains **all** entities, every item `label=True`, including entities behind walls the GM cannot see by LOS (role-exempt). Player snapshot: the three-tier model (LOS full / proximity approximate / invisible), must pass with no GM token present. A stale fog toggle message returns `unknown message type` for any sender (see `tests/test_session.py`).
 
 **Frontend — GM view**
 - [ ] A11. Static HTML: `#new-entity-kind` contains exactly `<option value="npc">` and `<option value="enemy">` — no `player`, no `gm_character`.
 - [ ] A12. Feeding `onWelcome` a GM welcome with `you.entity_id:null`, `entities:[]` renders: no "YOU" pill, no `--own-ring` token, sidebar title `Tokens — all (GM sees all)`, one muted empty-row with the 0-token copy, summary `0 ally · 0 neutral · 0 enemy`, `#sel-entity-name` `None`, `#control-hint` = `No tokens yet — add one in GM Tools.`
 - [ ] A13. After a `state` broadcast containing one created npc: token renders with label + overlaid team marker; list row appears (`npc·neutral`, coords); summary `0 ally · 1 neutral · 0 enemy`; the new token is auto-selected (accent ring on canvas, accent border on row); clicking the tile selects/moves exactly as A9; the first-run hint is gone.
-- [ ] A14. Fog checkbox is **enabled** under `body.is-gm` and sends `{type:"set_fog", on}`; toggling on/off changes nothing in the GM's rendered awareness (same items, same pixels); checkbox state follows broadcast `fog` on `state`.
+- [ ] A14. The fog toggle is gone: no fog checkbox element in `index.html`, no `fog` field in `welcome`/`state` payloads, and the legacy fog toggle message returns `unknown message type`.
 - [ ] A15. GM welcome toast text contains the no-token controller sentence; player welcome toast is byte-identical to today's.
 - [ ] A16. Lobby `#lobby-note` contains the "GM has no token on the map" sentence.
 
 **Frontend — player view**
 - [ ] A17. Player welcome/`state` with GM in session: `you_entity` = own token; `awareness` items = other entities only; **no** item corresponds to the GM (verify by entity-id set: it equals the set of non-self entity ids, and no `gm_character` kind ever appears).
-- [ ] A18. Player radar with GM + 1 other player + 1 enemy shows exactly 2 dots (green + red) — the white GM dot is gone; fog-on filtering and previously-seen behavior unchanged for players.
+- [ ] A18. Player radar with GM + 1 other player + 1 enemy shows exactly 2 dots (green + red) — the white GM dot is gone; three-tier filtering unchanged for players.
 - [ ] A19. Player empty state: a player whose only other was the old GM token now sees `No one else is out there yet.` (GM-only session + 1 player).
 
 **Regression guard**
@@ -565,11 +566,13 @@ the GM-entity assumption):
   add assertion that no awareness item has kind `gm_character`.
 - `TestStateFor::test_player_state_has_no_entities_and_correct_awareness` —
   Alice sees **only Bob** (green); drop `by_id[gm_ent]["color"]=="white"`.
-- `TestFog::test_fog_on_filters_player_by_los_but_not_gm` — GM awareness
-  length 4 → 3 (Alice, Bob, Shade); the "never fogged" assertion survives.
+- `TestFog::test_fog_on_filters_player_by_los_but_not_gm` — **obsolete:**
+  `TestFog` no longer exists (the three-tier awareness rework removed it);
+  the "GM is never fogged" assertion lives on in
+  `TestStateFor::test_gm_state_has_full_entities_and_labeled_awareness`.
 - `TestFog` spawn comments referencing the GM at `(1,1)` / Bob at `(3,1)`
-  — update coordinates (Alice `(1,1)`, Bob `(2,1)`; re-check the
-  place-to-`(4,1)`/`place` steps still express the same geometry).
+  — **obsolete** with the class (coordinate note: Alice `(1,1)`, Bob
+  `(2,1)`).
 
 **`tests/test_ws.py`**
 - `test_join_gm_welcome_shape` — **invert:** `you.entity_id` is `None`;

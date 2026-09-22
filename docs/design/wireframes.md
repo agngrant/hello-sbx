@@ -22,7 +22,9 @@ All screens are single-page (no routing); views are shown/hidden via a
    (both send `override:true`, GM-only).
 5. **Paint tools live in the bottom control bar** (GM only), shared by the upload-preview
    and the live map.
-6. **Fog-of-war toggle in the top bar** is GM-operated; players see it as a read-only state.
+6. **Fog of war is per-player and automatic** (the explored-map visibility
+   tiers, see `docs/design/explored-map.md`) — there is no manual fog toggle;
+   the legacy one was removed.
 7. **Pan & zoom** (added post-v1): the map may exceed the viewport — a **Map view** panel
    in the right-hand `#sidebar` holds the arrow cluster (pan) and `−`/`+` (zoom) buttons, and
    the same keys work (`←→↑↓` pan, `+`/`=` / `-` zoom). Discrete zoom levels run **6×5 (max)
@@ -113,9 +115,9 @@ Hover target:    ring #4dabf7 (valid) / #e03131 (blocked, shown only to GM with 
 
 ```
 ┌──────────────────────────────────────────────────────────────────────────────────────────┐
-│ LITTLEDUNGEONS ▸ The Gilded Crypt ● Connected  [ ] Fog of war  [☰]              │  #topbar
-│  #session-title #map-name          #conn-status        #fog-toggle          #sidebar-
-│                                                                     (GM only: [New map…]) toggle
+│ LITTLEDUNGEONS ▸ The Gilded Crypt ● Connected  [☰]              │  #topbar
+│  #session-title #map-name          #conn-status        #sidebar-toggle
+│                                                                     (GM only: [New map…])
 ├─────────────────────────────────────────────────────────────────────────────┬────────────┤
 │ #canvas-wrap (flex:1)                                                       │ #sidebar   │
 │ ┌─────────────────────────────────────────────────────────────────────────┐ │ 320px     │
@@ -169,7 +171,6 @@ Draw order:
 | Element | States |
 |---|---|
 | `#conn-status` | `● Connected` (green) · `● Connecting…` (amber, pulsing) · `● Reconnecting (n)…` (amber) · `● Offline` (red). Dot 10px + 12px label. |
-| `#fog-toggle` | Checkbox. **GM:** enabled, sends `{type:"set_fog", on}`. **Player:** disabled, reflects broadcast `fog` value, `title="GM controls fog of war"`. |
 | `#sidebar-toggle` | Hidden ≥ 1024px. Opens/closes sidebar drawer (§8). |
 | `[New map…]` | GM only, opens `#upload-view`. |
 | `#map-name` | From `welcome.map.name`; truncates with ellipsis (min-width 0 flex). |
@@ -425,7 +426,7 @@ above the awareness list or below — order in sidebar: **GM Tools → Awareness
 | | Desktop ≥ 1024px | Tablet 768–1023px | < 768px (graceful bonus) |
 |---|---|---|---|
 | Layout | Sidebar **docked** right, 320px, full height | Sidebar **drawer**: hidden; `#sidebar-toggle` (☰) in top bar slides it over the canvas from the right with a `#scrim`; tap scrim or ☰ to close | Same drawer; `#session-title` ("LITTLEDUNGEONS") hidden, `#map-name` takes the left |
-| Top bar | All items | `#fog-toggle` collapses to icon-button with state dot (full label in `title` + tooltip) | Same as tablet |
+| Top bar | All items | — (no fog control) | Same as tablet |
 | Control bar | Single row | Single row, buttons 44px min | Wraps to 2 rows: tools row / hint row |
 | Legend | Overlay pill bottom-left of canvas | Overlay pill, wraps 2 lines | Collapses behind a `?` chip in top bar (expandable popover) |
 | Upload preview | Two panes side-by-side | Stacked (source image max-height 40vh, grid below) | Same stacked |
@@ -499,7 +500,6 @@ above the awareness list or below — order in sidebar: **GM Tools → Awareness
 | `#map-name` | span | topbar | from `map.name` |
 | `#btn-new-map` | button | topbar | `.gm-only` |
 | `#conn-status` | span | topbar | `role="status"`; child `#conn-dot`, `#conn-label`; classes `.is-connected/.is-connecting/.is-offline` |
-| `#fog-toggle` | input[checkbox] | topbar | disabled unless `.is-gm` |
 | `#sidebar-toggle` | button | topbar | hidden ≥1024px |
 | `#scrim` | div | map | drawer backdrop |
 | `#canvas-wrap` | div | map | `position:relative` (holds canvas + overlays); class `.mode-paint` when painting |
@@ -532,7 +532,6 @@ above the awareness list or below — order in sidebar: **GM Tools → Awareness
 | `.is-gm` / `.is-player` | `<body>` | from `welcome.you.role`; gates all `.gm-only` elements |
 | `.mode-select` / `.mode-paint-floor` / `.mode-paint-wall` / `.mode-paint-doorway` | `#canvas-wrap` | active tool |
 | `.has-selection` | `#canvas-wrap` | an entity is selected (crosshair cursor off) |
-| `.fog-on` | `<body>` | fog state (affects render only; also styles `#fog-toggle` area) |
 | `.is-open` | `#sidebar` | drawer open (tablet) |
 | `.is-connected` / `.is-connecting` / `.is-offline` | `#conn-status` | WS state |
 | `.is-animating` | n/a (per-entity flag in JS) | path in flight |
@@ -547,7 +546,6 @@ above the awareness list or below — order in sidebar: **GM Tools → Awareness
 | Selection | none → entity (own for player; any for GM); synced between canvas, awareness list rows, `#entity-tools` fields |
 | Tool mode | select (default) → paint floor/wall/doorway (GM); one at a time |
 | Override | off/on (GM only); affects move payloads + one-shot "Move anyway" |
-| Fog | off (default) / on; GM sets, all render; player toggle disabled |
 | Toasts | empty / info / error / error + `#toast-action` ("Move anyway", GM only, one-shot) |
 
 ---
@@ -557,14 +555,14 @@ above the awareness list or below — order in sidebar: **GM Tools → Awareness
 | Server message | UI action |
 |---|---|
 | `welcome` | set `body.is-gm/.is-player`, fill top bar, build entities, select own entity (player), show upload vs map view |
-| `state` | reconcile grid (re-render if map changed), reconcile entities/players (list + canvas), update `#fog-toggle`, `#map-name` |
+| `state` | reconcile grid (re-render if map changed), reconcile entities/players (list + canvas), update `#map-name` |
 | `path` | start animation for `entity_id` (120 ms/cell) |
 | `error` | `#toasts` toast; if `no route` + GM + original had no override → attach `#toast-action` "Move anyway" |
 | client `move` rejected silently? | N/A — server always replies `error` to the sender on rejection |
 
 Client message triggers (recap): join (lobby), `request_state` (on connect +
 reconnect), `move` (click/keys), `paint` (drag), `create_entity` /
-`delete_entity` / `set_team` (GM tools), `set_fog` (GM toggle).
+`delete_entity` / `set_team` (GM tools).
 
 ---
 
@@ -575,11 +573,12 @@ reconnect), `move` (click/keys), `paint` (drag), `create_entity` /
    Player). Render from welcome only.
 2. **Upload creates the map immediately** (API has no draft/delete-map); the
    preview screen edits the live map, "Start" is a UX transition only.
-3. **Fog rendering is client-side** for players: on `fog`, each player client
-   runs Bresenham LOS (same rules as §5) over the shared grid to hide entities
-   without clear sight, with a "previously seen" memory set; GM never fogged.
-   (Server keeps the canonical rule in `awareness.py`; client replicates for
-   rendering since `state` sends full `entities` to all clients.)
+3. **Fog of war is server-computed** for players: the per-player `visibility`
+   matrix (explored-map tiers, `docs/design/explored-map.md`) plus the entity
+   `awareness` list drive what a player sees — there is no client-side fog
+   toggle. (The server keeps the canonical rules in `awareness.py` and
+   `visibility.py`.) The legacy client-side fog pass (keyed off the `fog`
+   flag) was removed.
 4. **Paint over an occupied cell** is allowed; server keeps the entity in place
    (known limitation, fine for v1).
 5. **Pan & zoom** (added post-v1, superseding the original "no zoom/pan" trade-off):

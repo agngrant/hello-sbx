@@ -7,7 +7,9 @@ and never-seen cells **not drawn at all**. The tiers are computed
 server-side per player on every state recompute. The GM's map is unchanged
 (full detail, always). **The entity awareness system is unchanged** — the
 awareness overlay (tokens/dots/"?" markers) renders exactly as it does today
-on top of the tiered map, and the `fog` field stays a wire-compat no-op.
+on top of the tiered map. (The legacy `fog` wire field and its UI toggle have
+since been removed; the tiered map below is the game's actual fog-of-war
+mechanic.)
 **Source of truth:** `PROJECT.md`. Where this doc and `PROJECT.md` diverge,
 `PROJECT.md` wins. (No divergence expected: this feature reuses the frozen
 data model, cell types, WS message set, awareness model, and movement rules —
@@ -42,7 +44,7 @@ APPROXIMATE / INVISIBLE), `build_awareness`, awareness items, the
 §10); movement / A* / corner-cut rule / permissions; upload / generate
 endpoints; the WS message set (only the additive `visibility` field); the
 `players[]` / `Player.to_dict()` shapes; the sample dungeon; the GM's map,
-awareness, tools, and payload; the `fog` flag (remains a wire-compat no-op).
+awareness, tools, and payload.
 
 ---
 
@@ -76,7 +78,7 @@ and should not change behaviour."* — the behavior is:
    the map is swapped (`use_map`), which clears all explored sets (D3).
 4. **Sight is recomputed live.** Every state recompute (any mutation that
    triggers `_broadcast`: move, place, create/delete entity, set_team,
-   set_awareness, paint, set_fog, use_map, join) recomputes S from the
+    set_awareness, paint, use_map, join) recomputes S from the
    player's CURRENT token position and the CURRENT grid — so a GM-painted
    wall instantly hides what it blocks for players, and a GM's `place`
    instantly re-anchors the re-parked token's sight (the server never trusts
@@ -471,7 +473,6 @@ def state_for(self, viewer):
         "entities": [e.to_dict() for e in self.entities.values()] if is_gm else [],
         "you_entity": own.to_dict() if (own is not None and not is_gm) else None,
         "awareness": self._awareness_for(viewer),
-        "fog": self.fog,
     }
     if not is_gm:
         pos = (own.x, own.y) if own is not None else None
@@ -550,17 +551,18 @@ def state_for(self, viewer):
 
 - No new WS **message types** (client→server or server→client).
 - No changes to `welcome`'s `you`, `map`, `entities`, `players`, `awareness`,
-  `fog`, or to `path` / `error` frames.
+  or to `path` / `error` frames.
 - **`map` still carries the full grid for players** — same as today (players
   already receive the full `cells` array; this feature adds no data leak).
   The `visibility` matrix is a *render directive* over data the client
   already holds.
-- **`fog` is unchanged** — stored, broadcast, and still a **no-op** that does
-  not gate anything. The old fog mechanism was removed when the three-tier
-  awareness model landed; the **explored map is now the actual fog-of-war
-  mechanic** (memory + line-of-sight over the *map*, not over *entities*).
-  The GM's `set_fog` toggle and the UI's fog checkbox keep working exactly
-  as today (no-op), and nothing in this feature reads or writes the flag.
+- **The legacy `fog` wire field is removed.** It was a no-op that gated
+  nothing (the old fog mechanism was retired when the three-tier awareness
+  model landed); its payload key, its client→server toggle message, and the
+  UI checkbox have all been deleted. The **explored map is now the actual
+  fog-of-war mechanic** (memory + line-of-sight over the *map*, not over
+  *entities*). Nothing in this feature reads or writes a fog flag — there is
+  no longer one on the wire.
 
 ---
 
@@ -906,7 +908,6 @@ negligible, pruned on leave, cleared on swap).
   WS `welcome`/`state` player payloads.
 - **WS message set:** no new message types, in either direction; the only
   payload delta is the additive player-side `visibility` field.
-- **`fog` field:** unchanged, still a wire-compat no-op (§4.2).
 - **GM:** payload, rendered map, awareness, tools, legend — unchanged (§5).
 - **`players[]` / `Player.to_dict()` shape:** unchanged (explored state is
   session-level, §3.3).
@@ -1123,7 +1124,7 @@ def cell(mask, x, y) -> str:  # mask[y][x]
 - **One additive server→client field:** `"visibility": ["HHHH…", …]` —
   player `welcome`/`state` payloads only; **absent for the GM**; row `y`,
   char `x`, alphabet `S`/`E`/`H`, `height` rows of `width` chars.
-- `map`, `players`, `entities`, `you_entity`, `awareness`, `fog`, `path`,
+- `map`, `players`, `entities`, `you_entity`, `awareness`, `path`,
   `error` — all byte-identical in shape to today.
 - The explored set is **never** on the wire (server state only); the matrix
   is its per-viewer rendering.

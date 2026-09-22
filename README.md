@@ -89,9 +89,9 @@ and binds `127.0.0.1:8000`.
      tokens (bosses in one of six fixed sizes — see below) spawned on the
      last hovered tile, and delete any entity. The GM itself has no token
      on the map — there is nothing to select for the GM.
-  - **Fog of war:** the old fog-of-war toggle is retained on the wire for
-    compatibility but no longer changes what players see — visibility is now
-    always the line-of-sight + proximity model below.
+  - **Fog of war:** the legacy fog-of-war toggle was removed from the wire
+    and the UI — visibility is always the line-of-sight + proximity model
+    below (three-tier awareness + the explored map).
 
 ### Navigating the map (pan & zoom)
 
@@ -398,8 +398,8 @@ python -m unittest discover -s tests -t .   # also supported (suite is unittest-
   16-bit multi-channel *test coverage* — 8-bit multi-channel is fully tested).
 - **Visibility is a three-tier model, not a wall-passing radar.** A player sees
   full info only on entities with clear line of sight, an approximate (identity-free)
-  marker within 4 squares when sight is blocked, and nothing beyond. The old
-  fog-of-war toggle no longer affects visibility (kept on the wire for compat).
+  marker within 4 squares when sight is blocked, and nothing beyond. The legacy
+  fog-of-war toggle was removed entirely — this model is always active.
 - **Shared map state across sessions on an unregistered map id.** Multiple
   sessions on a map that is not explicitly registered (e.g. the built-in
   sample map reached via a bare session id) share the same live grid, so door

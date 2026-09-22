@@ -56,7 +56,7 @@ mirrors), `docs/design/door-features.md` + `docs/design/door-iconography.md`
 | F2 | **Ownership by name.** On save, each entity stores the controlling player's **name** (`owner_name`; `null` for GM-controlled entities). On load, entities carry `owner_name`. When a player joins with a matching name, the server binds that entity to the player (`owner` = new player id, `player.entity_id` assigned, the "YOU" ring is restored because it is driven purely by `you.entity_id`). **First-join wins a name**; unmatched / orphaned entities stay **GM-controlled** — nothing is ever lost. |
 | F3 | **Persistence.** One JSON **file per save** in a **`saves/` directory under the repo root**. The save *record* (listed in the menu) is: `id` (short slug/timestamped), `name` (user label), `map_name`, `width`, `height`, `created_at`, `entity_count`. |
 | F4 | **REST (additive only, NO wire-protocol change).** `GET /api/saves` (list, any role) · `POST /api/saves` (GM — save current map) · `POST /api/saves/{id}/load` (GM — load → register map) · `DELETE /api/saves/{id}` (GM, nice-to-have). No new WS message types; existing `welcome`/`state`/`path`/`error` frames are byte-identical in shape (see §8, AC16). |
-| F5 | **NOT captured:** player connections, awareness radii, fog, WS/visibility state — all recomputed live from the surviving state (players dict, per-viewer awareness, per-player explored memory, fog flag). |
+| F5 | **NOT captured:** player connections, awareness radii, WS/visibility state — all recomputed live from the surviving state (players dict, per-viewer awareness, per-player explored memory). |
 
 ### 2.1 Derived consequences (fixed by F1–F5)
 
@@ -334,7 +334,7 @@ if effective_role == "player":
   explored memory (existing D3 behavior).
 * Does not delete the save file. A loaded save stays in the list forever
   until the GM deletes it.
-* Does not restore fog, awareness radii, explored cells, or connections (F5
+* Does not restore awareness radii, explored cells, or connections (F5
   — recomputed live; A1).
 
 ## 7. UI — GM save/load menu
@@ -760,10 +760,9 @@ Every AC is testable with the existing harness: `tests/` (REST via
 ## 11. Assumptions
 
 * **A1 — Nothing live is persisted.** Player connections, awareness
-  radii, fog, explored-map memory, per-viewer WS state are NOT in the
-  bundle; after load they are recomputed (fog `false` until the GM
-  toggles it; radii default until the GM sets them; explored memory
-  rebuilt from scratch). (F5)
+  radii, explored-map memory, per-viewer WS state are NOT in the
+  bundle; after load they are recomputed (radii default until the GM
+  sets them; explored memory rebuilt from scratch). (F5)
 * **A2 — Default session.** The save routes operate on the in-memory
   `"default"` session (the app's normal single-session tabletop use).
   Multi-session ids are out of scope.
