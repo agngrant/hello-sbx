@@ -220,7 +220,6 @@ class GameSession:
         self.grid = grid
         self.entities: dict[str, Entity] = {}
         self.players: dict[str, Player] = {}
-        self.fog: bool = False
 
         self._lock = threading.RLock()
         self._socks: dict[str, Any] = {}              # player id -> connection (WebSocket)
@@ -489,12 +488,10 @@ class GameSession:
         function of the current positions — direct line of sight → FULL
         item (name, kind, color, labeled); no line of sight but within
         ``APPROX_RADIUS`` squares → APPROXIMATE quantized block (no
-        identity); anything else is invisible.  The **GM** is exempt:
+        identity); anything else is invisible.          The **GM** is exempt:
         every entity, full info, labeled, no distance/LOS filtering.
 
-        The ``fog`` flag (kept in the state payloads for wire
-        compatibility) no longer gates visibility — the model above is
-        always active for players and subsumes fog-on; there is no
+        The model is always active for players; there is no
         "previously seen" memory (that mechanism was removed).
         """
         return build_awareness(viewer, self.entities, self.grid)
@@ -544,7 +541,6 @@ class GameSession:
             "entities": [e.to_dict() for e in self.entities.values()] if is_gm else [],
             "you_entity": own.to_dict() if (own is not None and not is_gm) else None,
             "awareness": self._awareness_for(viewer),
-            "fog": self.fog,
             "boss_footprints": dict(BOSS_FOOTPRINTS),
         }
         if not is_gm:
@@ -764,8 +760,6 @@ class GameSession:
             return self._gm_only(is_gm, lambda: self._on_set_awareness(msg))
         if mtype == "paint":
             return self._gm_only(is_gm, lambda: self._on_paint(msg))
-        if mtype == "set_fog":
-            return self._gm_only(is_gm, lambda: self._on_set_fog(msg))
         if mtype == "use_map":
             return self._gm_only(is_gm, lambda: self._on_use_map(msg))
         if mtype == "door":
@@ -1346,15 +1340,6 @@ class GameSession:
         """
         return any(cell == (x, y) for e in self.entities.values()
                    for cell in entity_cells(e))
-
-    def _on_set_fog(self, msg: dict[str, Any]) -> dict[str, Any] | None:
-        # Wire compatibility: the ``fog`` flag is stored and broadcast, but
-        # it no longer gates player visibility — the three-tier model
-        # (LOS full / proximity approximate / invisible) is always active.
-        with self._lock:
-            self.fog = bool(msg.get("on", False))
-            self._run_b(self._broadcast())
-        return None
 
     def _on_use_map(self, msg: dict[str, Any]) -> dict[str, Any] | None:
         """GM: switch this session to play the map registered as ``map_id``.

@@ -149,7 +149,7 @@ class TestWebSocketServer(unittest.TestCase):
             # GM sees everything: the full entity list is present (empty —
             # the GM holds nothing yet).
             self.assertEqual(w["entities"], [])
-            # welcome carries the map + players + fog + per-viewer awareness
+            # welcome carries the map + players + per-viewer awareness
             m = w["map"]
             self.assertEqual(m["name"], "Sample Dungeon")
             self.assertEqual((m["width"], m["height"]), (16, 12))
@@ -159,7 +159,7 @@ class TestWebSocketServer(unittest.TestCase):
             self.assertEqual(m["cells"][4][10], "doorway")
             self.assertEqual(m["cells"][7][9], "doorway")
             self.assertEqual(len(w["players"]), 1)
-            self.assertIs(w["fog"], False)
+            self.assertNotIn("fog", w)
             self.assertEqual(w["awareness"], [])  # no tokens yet
 
     def test_first_player_without_gm_becomes_gm(self):

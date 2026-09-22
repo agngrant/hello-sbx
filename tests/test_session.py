@@ -36,6 +36,7 @@ from app.session import (
     MAX_PLAYERS,
     NO_ROUTE,
     SESSION_FULL,
+    UNKNOWN_TYPE,
     GameSession,
 )
 from tests.oracles import oracle_visible
@@ -529,7 +530,7 @@ class TestMovement(SessionTestCase):
 
 
 # ---------------------------------------------------------------------------
-# GM tools (place / create / delete / set_team / paint / fog)
+# GM tools (place / create / delete / set_team / paint)
 # ---------------------------------------------------------------------------
 
 
@@ -667,13 +668,14 @@ class TestGmTools(SessionTestCase):
         st = self.session.state_for(self.gm)
         self.assertEqual(st["map"]["cells"][2][2], "wall")
 
-    def test_set_fog_by_gm_and_rejection_for_player(self):
-        reply = drive(self.session, self.p1_s, {"type": "set_fog", "on": True})
-        self.assertEqual(reply, {"type": "error", "message": "not allowed"})
-        self.assertFalse(self.session.fog)
+    def test_set_fog_is_rejected_as_unknown_type(self):
+        # The legacy ``set_fog`` wire message was removed (the fog flag was
+        # a no-op that never gated visibility): it now falls through to the
+        # unknown-type error for ANY sender, GM included.
         reply = drive(self.session, self.gm_s, {"type": "set_fog", "on": True})
-        self.assertIsNone(reply)
-        self.assertTrue(self.session.fog)
+        self.assertEqual(reply, {"type": "error", "message": UNKNOWN_TYPE})
+        reply = drive(self.session, self.p1_s, {"type": "set_fog", "on": True})
+        self.assertEqual(reply, {"type": "error", "message": UNKNOWN_TYPE})
 
 
 # ---------------------------------------------------------------------------
@@ -688,7 +690,7 @@ class TestStateFor(SessionTestCase):
         self.assertEqual(st["you_entity"], None)  # GM has no own token
         self.assertEqual(len(st["entities"]), 2)  # Alice + Bob (no GM entity)
         self.assertEqual(len(st["players"]), 3)
-        self.assertFalse(st["fog"])
+        self.assertNotIn("fog", st)
         aw = st["awareness"]
         self.assertEqual(len(aw), 2)  # GM sees ALL tokens (no own item exists)
         for item in aw:
@@ -921,10 +923,11 @@ class TestPlayerVisibilityTiers(unittest.TestCase):
     def _p1_ids(self):
         return {i["entity_id"] for i in self.session.state_for(self.p1)["awareness"]}
 
-    def test_model_is_always_active_fog_on_or_off(self):
-        # The old pass-through-wall radar is gone: with fog OFF the wall
-        # still separates the columns — Bob/Shade are approximate, not full.
-        self.assertFalse(self.session.fog)
+    def test_model_is_always_active(self):
+        # The old pass-through-wall radar is gone: the wall still separates
+        # the columns — Bob/Shade are approximate, not full. (The legacy
+        # fog flag that used to gate this is gone; the three-tier model is
+        # always active.)
         aw = self.session.state_for(self.p1)["awareness"]
         ids = {i["entity_id"] for i in aw}
         self.assertNotIn(self.bob_ent, ids)
@@ -932,15 +935,6 @@ class TestPlayerVisibilityTiers(unittest.TestCase):
         self.assertEqual(sorted(i["entity_id"] for i in aw), ["<approx-1>", "<approx-2>"])
         self.assertTrue(all(i["approximate"] for i in aw))
         self.assertTrue(all("name" not in i and "color" not in i for i in aw))
-        # And toggling fog on/off changes NOTHING (the flag is retained for
-        # wire compatibility but no longer gates visibility).
-        drive(self.session, self.gm_s, {"type": "set_fog", "on": True})
-        self.assertTrue(self.session.fog)
-        on_aw = self.session.state_for(self.p1)["awareness"]
-        drive(self.session, self.gm_s, {"type": "set_fog", "on": False})
-        off_aw = self.session.state_for(self.p1)["awareness"]
-        self.assertEqual(on_aw, off_aw)
-        self.assertTrue(all(i["approximate"] for i in on_aw))
 
     def test_full_tier_on_line_of_sight(self):
         # Bob is moved into the same open column as Alice (1,4): clear LOS
@@ -1890,7 +1884,6 @@ class TestExploredMapGmPayload(unittest.TestCase):
                  "name": "Bob", "kind": "player", "label": True,
                  "size": None},
             ],
-            "fog": False,
             "boss_footprints": BOSS_FOOTPRINTS,
         }
         st = s.state_for(gm)
@@ -1994,11 +1987,11 @@ class TestExploredMapPlayersShapeUnchanged(unittest.TestCase):
         gm_st = s.state_for(gm)
         p1_st = s.state_for(p1)
         self.assertEqual(sorted(gm_st), [
-            "awareness", "boss_footprints", "entities", "fog", "map",
+            "awareness", "boss_footprints", "entities", "map",
             "players", "type", "you_entity",
         ])
         self.assertEqual(sorted(p1_st), [
-            "awareness", "boss_footprints", "entities", "fog", "map",
+            "awareness", "boss_footprints", "entities", "map",
             "players", "type", "visibility", "you_entity",
         ])
         for st in (gm_st, p1_st):
