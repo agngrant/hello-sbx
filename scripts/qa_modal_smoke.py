@@ -2,11 +2,12 @@
 """Live smoke for the save-delete full-screen modal (feat/save-load).
 
 Boots the REAL server on an ephemeral port, then:
-  * checks the SERVED index.html / app.js / style.css carry the modal shell +
-    markers (and none of the removed in-row artifacts);
+  * checks the SERVED index.html / js/ modules / style.css carry the modal
+    shell + markers (and none of the removed in-row artifacts);
   * drives a real GM session over REST: create a save, delete it through the
-    modal path (real app.js under Node with REAL fetch -> real DELETE),
-    verify success + 404 error paths (the exact message the frontend toasts);
+    modal path (real js/ module graph under Node with REAL fetch -> real
+    DELETE), verify success + 404 error paths (the exact message the
+    frontend toasts);
   * a second Node driver checks pan/drawer/modal-closed regression behavior.
 Exit 0 iff every check passes. QA artifact (scripts/qa_*.py convention).
 """
@@ -155,18 +156,30 @@ def main():
               '<button id="save-delete-modal-cancel" class="btn">Cancel</button>' in html
               and '<button id="save-delete-modal-confirm" class="btn btn-danger">Delete</button>' in html)
 
-        _, js = get_text(port, "/app.js")
+        # The frontend is an ES module graph: serve the entry point from
+        # index.html, follow its `import ... from "./x.js"` specifiers one
+        # level deep, and check the combined source.
+        srcs = re.findall(r'<script[^>]*\bsrc="([^"]+)"', html)
+        js_paths = ["/" + s for s in srcs]
+        for p in list(js_paths):
+            _, body = get_text(port, p)
+            for spec in re.findall(r'from\s+"(\./[^"]+)"', body):
+                rel = os.path.normpath(os.path.join(os.path.dirname(p[1:]),
+                                                    spec[2:]))
+                if "/" + rel not in js_paths:
+                    js_paths.append("/" + rel)
+        js = "\n".join(get_text(port, p)[1] for p in js_paths)
         js_nc = re.sub(r"/\*.*?\*/", "", js, flags=re.DOTALL)      # strip block comments
         js_nc = re.sub(r"^\s*//.*$", "", js_nc, flags=re.MULTILINE)   # then line comments
-        check("served app.js: syncSaveModal present", "function syncSaveModal" in js)
-        check("served app.js: modal wiring present",
+        check("served js/: syncSaveModal present", "function syncSaveModal" in js)
+        check("served js/: modal wiring present",
               "els.saveDeleteModalConfirm.addEventListener" in js
               and "saveModalReturnFocusId" in js)
-        check("served app.js: NO in-row artifacts",
+        check("served js/: NO in-row artifacts",
               "save-row-confirm" not in js and "is-confirming" not in js)
-        check("served app.js: deleteSave( exactly 2", js.count("deleteSave(") == 2,
+        check("served js/: deleteSave( exactly 2", js.count("deleteSave(") == 2,
               str(js.count("deleteSave(")))
-        check("served app.js: no window.confirm call",
+        check("served js/: no window.confirm call",
               "window.confirm" not in js_nc)
 
         _, css = get_text(port, "/style.css")
@@ -193,7 +206,7 @@ def main():
         ondisk = os.path.exists(os.path.join(ROOT, "saves", f"{sid}.json"))
         check("save file on disk", ondisk, f"{sid}.json")
 
-        # ---- modal path: real app.js + REAL fetch -> real DELETE --------
+        # ---- modal path: real js/ module graph + REAL fetch -> DELETE ---
         rc, res, out = run_node(os.path.join(ROOT, "scripts", "qa_modal_live.js"), str(port))
         print("  [modal live driver]")
         print("   " + (out or "").replace("\n", "\n   "))
@@ -220,7 +233,7 @@ def main():
               status == 404 and bdy.get("error") == f"save not found: {sid}",
               json.dumps((status, bdy)))
 
-        # ---- pan / drawer / modal-closed regression (real app.js) --------
+        # ---- pan / drawer / modal-closed regression (real js/ modules) --
         rc, res, out = run_node(os.path.join(ROOT, "scripts", "qa_modal_panzoom.js"), str(port))
         print("  [pan/drawer regression driver]")
         print("   " + (out or "").replace("\n", "\n   "))

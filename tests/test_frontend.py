@@ -2,8 +2,10 @@
 
 The QA pass (docs/qa/test-plan.md §D) noted the 168 backend tests never
 executed the browser-only frontend. These tests DO execute the real
-``app/static/app.js`` (and read the real ``app/static/index.html``) by running
-it under Node with a stub DOM/WebSocket (``tests/js/harness.js``). No
+``app/static/js`` ES module graph (entry ``js/main.js``; it imports
+state/render/game/net/ui) by importing it under Node with a stub
+DOM/WebSocket (``tests/js/harness.js``) and reading the real
+``app/static/index.html``. No
 third-party package is required; the tests simply skip if Node is not on
 ``PATH`` (they are pure-stdlib otherwise).
 
@@ -46,7 +48,7 @@ Generated maps (generated-maps spec §6 / C12 — frontend):
   ``#gen-name``, ``#gen-cols``/``#gen-rows`` with min="8" max="60",
   ``#gen-seed``, ``#btn-generate``, ``#pane-source``, ``#preview-title``)
   AND every pre-existing upload id is still present (regression guard).
-* The real app.js under the stub DOM: booting doesn't throw;
+* The real js/ module graph under the stub DOM: booting doesn't throw;
   ``setSourceTab("generate")`` hides ``#upload-form``, shows ``#gen-form``
   and sets ``state.uploadSource === "generate"`` (and is a no-op while the
   preview is up); ``syncGenerateButton`` gates ``#btn-generate`` on a
@@ -77,7 +79,9 @@ import subprocess
 import unittest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-APPJS = os.path.join(ROOT, "app", "static", "app.js")
+# The frontend is an ES module graph under app/static/js/; main.js is the
+# entry point the browser loads (index.html) and the harness's import root.
+APPJS = os.path.join(ROOT, "app", "static", "js", "main.js")
 INDEX = os.path.join(ROOT, "app", "static", "index.html")
 HARNESS = os.path.join(ROOT, "tests", "js", "harness.js")
 
@@ -87,19 +91,24 @@ def _node() -> str | None:
 
 
 def js(expr: str) -> str:
-    """Load the app (harness re-exports it as ``api``) and evaluate the JS
-    expression ``expr``, returning the result as a JSON string.
+    """Load the app (harness re-exports the module graph as ``api``) and
+    evaluate the JS expression ``expr``, returning the result as a JSON
+    string.
 
     The expression is passed via an environment variable so no shell/JS
-    quote-escaping is involved. The result may be a thenable (e.g. the
-    promise from ``generateMap()``) — the node program awaits it; sync
-    results pass through ``Promise.resolve`` unchanged.
+    quote-escaping is involved. buildApi() is async (it dynamically imports
+    the real ES module graph, whose top-level boot runs at import). The
+    result may be a thenable (e.g. the promise from ``generateMap()``) — the
+    node program awaits it; sync results pass through ``Promise.resolve``
+    unchanged.
     """
     program = (
-        'const {buildApi}=require(process.env.HARNESS);\n'
-        'const api=buildApi();\n'
+        '(async()=>{const {buildApi}=require(process.env.HARNESS);\n'
+        'const api=await buildApi();\n'
         'const out=eval(process.env.EXPR);\n'
-        'Promise.resolve(out).then(o=>{process.stdout.write(JSON.stringify(o));});\n'
+        'const o=await Promise.resolve(out);\n'
+        'process.stdout.write(JSON.stringify(o));\n'
+        '})();\n'
     )
     env = dict(os.environ)
     env["APPJS_PATH"] = APPJS
@@ -625,7 +634,7 @@ class TestLobbyBootRegression(FrontendBase):
     """
 
     def test_boot_completes_with_real_swatch_chips(self):
-        # buildApi() evaluates the REAL app.js end-to-end. With the six
+        # buildApi() imports the REAL js/ module graph end-to-end. With the six
         # real index.html .door-swatch chips attached to #legend this is
         # the same statement sequence a real browser executes at load.
         # Old code: TDZ ReferenceError inside the eval -> node exits
@@ -704,7 +713,7 @@ class TestBossEntityFrontend(FrontendBase):
     """Boss entity rendering (docs/specs/boss-entity.md). The WIRE carries
     only ``size`` (2/4/6/8/10/12) + the top-left anchor cell — never W/H —
     so the blob dimensions (AC1/AC2) and the skull center (AC4) must derive
-    from the spec §2/§4.1 tables in app.js; the GM spawn form arms the size
+    from the spec §2/§4.1 tables in the js/ modules; the GM spawn form arms the size
     selector only for the boss kind; the legend chip renders the ACTUAL
     canvas art (AC7)."""
 
@@ -1471,12 +1480,12 @@ class TestIndexHtmlGeneratedMaps(FrontendBase):
 
 
 class TestGeneratedMapsFrontend(FrontendBase):
-    """C12 (JS half): the real app.js under the stub DOM. Booting must not
+    """C12 (JS half): the real js/ module graph under the stub DOM. Booting must not
     throw; the source tabs switch forms + state; generate is gated; and
     generateMap() runs end-to-end against the harness' recorded fetch stub."""
 
     def test_boot_with_stubbed_dom_does_not_throw(self):
-        # buildApi() evals the real app.js (including all the new
+        # buildApi() imports the real js/ module graph (including all the new
         # generate-form listeners); reaching here means boot is clean.
         out = js(
             "({state:typeof api.state,src:api.state.uploadSource,"
@@ -3739,7 +3748,7 @@ class TestPanZoom(FrontendBase):
     The harness re-exports the real view-math (LEVELS, fitLevel, viewStep,
     viewBounds, applyView, panBy, zoomBy, fitToMap, syncNavControls,
     focusInField, cellFromEvent) and carries the six nav buttons plus a
-    controllable canvas-wrap size, so these tests run the REAL app.js code.
+    controllable canvas-wrap size, so these tests run the REAL js/ module code.
     """
 
     # Shared JS fragments.
@@ -4588,7 +4597,7 @@ class TestPanZoom(FrontendBase):
 #  Two GM-only surfaces sharing one list fetch: the map-view sidebar
 #  #saves-panel and the lobby "Saved maps" tab. All traffic is plain REST;
 #  a load POSTs then fires use_map on the SAME socket (BUG-002-safe).
-#  These tests execute the REAL app.js under the harness stub DOM.
+#  These tests execute the REAL js/ module graph under the harness stub DOM.
 
 
 class SavesBase(FrontendBase):
@@ -5936,13 +5945,20 @@ class TestSavesDelete(SavesBase):
 
     # ── AC14 — no regressions; in-row approach removed ───────────────────
     def test_ac14a_no_inrow_artifacts_no_unconfirmed_delete_static(self):
-        with open(APPJS, encoding="utf-8") as fh:
-            src = fh.read()
+        # The frontend is an ES module graph (app/static/js/*.js): scan
+        # every module, not just the entry point.
+        jsdir = os.path.dirname(APPJS)
+        srcs = [
+            open(os.path.join(jsdir, f), encoding="utf-8").read()
+            for f in sorted(os.listdir(jsdir)) if f.endswith(".js")
+        ]
+        self.assertTrue(srcs, "no frontend modules found under js/")
+        src = "\n".join(srcs)
         self.assertNotIn("save-row-confirm", src,
                          "the in-row confirm bar is fully removed")
         self.assertNotIn("is-confirming", src,
                          "the confirming row modifier is gone")
-        # Strip comments before the window.confirm check: app.js PROSE
+        # Strip comments before the window.confirm check: module PROSE
         # mentions "No window.confirm — ..."; the guard is that no CALL
         # exists outside comments.
         no_comments = re.sub(r"/\*.*?\*/", "", src, flags=re.DOTALL)

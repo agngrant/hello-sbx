@@ -335,13 +335,13 @@ app/
 ├── session.py     # GameSession: authoritative state, permissions, broadcast
 └── static/
     ├── index.html # lobby / upload / map views + controls (no build step)
-    ├── app.js     # WebSocket client, state-driven render, awareness, GM tools
+    ├── js/        # frontend ES modules (no build step): state, render, game, net, ui + main.js entry
     └── style.css
 scripts/
 └── e2e_proof.py   # live-server end-to-end proof (GM + 2 players over the real WS)
 tests/
 ├── wsclient.py            # raw-socket WebSocket client used by the tests
-├── js/harness.js          # Node harness that runs the REAL app.js under a stub DOM
+├── js/harness.js          # Node harness that runs the REAL app/static/js module graph under a stub DOM
 ├── test_grid.py test_imaging.py test_detection.py test_pathfinding.py
 ├── test_awareness.py test_session.py test_api.py test_ws.py test_frontend.py
 run.sh                     # convenience launcher (prefers ./.venv/bin/python)
@@ -365,7 +365,8 @@ python -m unittest discover -s tests -t .   # also supported (suite is unittest-
   visibility tiers, reconnects, `use_map`), the REST
   API (live `http.client` against a real port), and the WebSocket protocol.
 - The **frontend is actually executed**, not just text-matched: `test_frontend.py`
-  drives the real `app/static/app.js` in Node via `tests/js/harness.js` (a controllable
+  drives the real `app/static/js` ES module graph (entry `js/main.js`) in Node via
+  `tests/js/harness.js` (a controllable
   timer + a stub DOM/WebSocket). (If Node isn't installed those tests are the ones that
   skip; everything else runs.)
 - **Live end-to-end proof:** `python scripts/e2e_proof.py` starts its own server and

@@ -159,7 +159,7 @@ class TestStatic(ServerTestCase):
         self.assertEqual(status, 200)
         self.assertIn("text/css", headers.get("content-type", ""))
 
-        status, headers, data = self.request("GET", "/app.js")
+        status, headers, data = self.request("GET", "/js/main.js")
         self.assertEqual(status, 200)
         self.assertIn("javascript", headers.get("content-type", ""))
         self.assertIn("LittleDungeons", data.decode("utf-8"))

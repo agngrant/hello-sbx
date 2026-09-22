@@ -132,7 +132,7 @@ agentteam/
 │   ├── session.py            # GameSession: authoritative state, perms, broadcast
 │   └── static/
 │       ├── index.html
-│       ├── app.js
+│       ├── js/               # frontend ES modules (no build step): state, render, game, net, ui + main.js entry
 │       └── style.css
 └── tests/
     ├── wsclient.py           # raw-socket WebSocket client for tests

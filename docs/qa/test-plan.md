@@ -75,6 +75,17 @@ Ranked by severity.
 3. **WS tests use a stdlib client, not the JS client.** Message shapes are asserted against a Python client; the actual browser's `onmessage`/render path is untested.
 4. **Concurrency is exercised but not interleaved.** Tests are mostly single-operation-per-client; the unlocked-reply race (BUG-005) needs two simultaneous operations on one socket to surface.
 
+> **Post-split update (ES modules).** The frontend is no longer a single
+> `app/static/app.js` — it is an ES module graph under `app/static/js/`
+> (entry `js/main.js`, importing state/render/game/net/ui). The Node
+> harness (`tests/js/harness.js`) now **imports that real graph** under
+> the stub DOM, so the frontend logic IS executed by `test_frontend.py`
+> and the `scripts/qa_*.js` probes (including the live DELETE smoke).
+> Item 1's gap has therefore narrowed from "frontend never executed" to
+> "no real browser": actual paint/layout and real-DOM semantics (focus,
+> `activeElement`, canvas hit-testing) are still not covered — a
+> Playwright probe (§E) would close that.
+
 ## D2. Latent / minor observations (not filed as bugs — not reachable or non-blocking)
 
 - **`GET /api/maps/{id}` (latent 500).** `main.py:283-284` serializes `list(entry["entities"].values())` / `list(entry["players"].values())` directly into `json.dumps`. Those registry dicts hold **dataclass** objects and would raise `TypeError: Object of type Entity is not JSON serializable` → 500. **But** they are initialized `{}` at `main.py:69` and **never populated** anywhere (the live entities live in the `GameSession`, not the registry entry), so the list is always empty and the 500 is unreachable today. The `main.py:69` comment ("populated live by GameSession") is inaccurate. **Fix if/when it is used:** serialize with `e.to_dict()`/`p.to_dict()`, or remove the fields. (Verified non-reachable by searching `app/` for writes to `entry["entities"]`/`entry["players"]` — none exist.)

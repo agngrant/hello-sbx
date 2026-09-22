@@ -1,18 +1,30 @@
 "use strict";
 /*
- * LittleDungeons frontend harness — executes the REAL app/static/app.js under Node
- * with a stub DOM / WebSocket so unit tests (tests/test_frontend.py) can
- * actually run the frontend logic instead of just inspecting it as a string.
+ * LittleDungeons frontend harness — executes the REAL app/static/js/* ES
+ * module graph (main.js is the entry point; it imports state/render/game/
+ * net/ui) under Node with a stub DOM / WebSocket so unit tests
+ * (tests/test_frontend.py) can actually run the frontend logic instead of
+ * just inspecting it as a string.
  *
- * The JS source is eval'd into this function scope, so every top-level
- * `function`/`let` in app.js is reachable here and re-exported on the
- * returned API object.
+ * buildApi() is async: it installs the stubs on globalThis (ES modules
+ * resolve bare identifiers against the global scope — there is no enclosing
+ * function scope to hide them in), then dynamically imports the module graph.
+ * Importing main.js runs the app's boot (registerListeners + the five boot
+ * calls), exactly as the classic script did at load time. Each buildApi()
+ * call runs in its own fresh Node process (the Python runner spawns one per
+ * expression), so the ESM cache never leaks state between tests.
+ *
+ * The returned API object merges the five modules' export namespaces with
+ * LIVE getters (a named export is a live binding — e.g. `ws` and `hoverCell`
+ * keep tracking the values set through setWs/setHoverCell) plus the harness
+ * handles (_timer, _send, _fetch, _rfr, _window, _ws) and the document stub.
  */
 
 const fs = require("fs");
+const path = require("path");
 
 /* ---- controllable timer (BUG-003) --------------------------------------
-   Mirrors the setTimeout/clearTimeout contract app.js relies on:
+    Mirrors the setTimeout/clearTimeout contract the app relies on:
    - schedule(delay, fn) -> id
    - clear(id)
    - advance(ms) fires any timers whose deadline <= the virtual clock.
@@ -175,12 +187,11 @@ function makeEl() {
       }
     },
     // Lets tests trigger registered handlers (e.g. a button click) through
-    // the REAL app.js code path instead of calling the handler directly.
+    // the REAL app code path instead of calling the handler directly.
     dispatchEvent(ev) {
       for (const fn of this._listeners[ev.type] || []) fn(ev);
       return true;
     },
-    setAttribute() {}, getAttribute() { return null; },
     setAttribute() {}, getAttribute() { return null; },
     children: [],
     parentNode: null,
@@ -277,18 +288,18 @@ function loadLegendSwatches(indexPath) {
 }
 
 function buildApi() {
-  const APPJS_PATH = process.env.APPJS_PATH;
+  const MAIN_JS_PATH = process.env.APPJS_PATH; // js/main.js (the entry point)
   const INDEX_HTML_PATH = process.env.INDEX_HTML_PATH;
   // LEGEND_SWATCHES defaults ON when INDEX_HTML_PATH is provided (opt out
   // with "0"): the suite wants the real lobby DOM by default.
    const chips = INDEX_HTML_PATH && process.env.LEGEND_SWATCHES !== "0"
-     ? loadLegendSwatches(INDEX_HTML_PATH)
-     : { door: [], boss: [] };
+    ? loadLegendSwatches(INDEX_HTML_PATH)
+    : { door: [], boss: [] };
   const timer = makeTimer();
   const __SEND = makeSend();
 
   // Listener registries for the document / window stubs (pan-zoom §4/§E8):
-  // app.js registers a document keydown + a window resize handler; the tests
+  // the app registers a document keydown + a window resize handler; the tests
   // dispatch events into these so the REAL handler code runs.
   const __DOC_LISTENERS = {};
   const __WIN_LISTENERS = {};
@@ -331,7 +342,7 @@ function buildApi() {
       if (l) { const i = l.indexOf(fn); if (i >= 0) l.splice(i, 1); }
     },
     // Test helper: dispatch a keydown (or other) event to the registered
-    // document listeners (the real app.js keydown handler).
+    // document listeners (the real app keydown handler).
     dispatch(type, ev) {
       for (const fn of __DOC_LISTENERS[type] || []) fn(ev);
     },
@@ -359,7 +370,7 @@ function buildApi() {
       if (l) { const i = l.indexOf(fn); if (i >= 0) l.splice(i, 1); }
     },
     // Test helper: dispatch a window event (e.g. resize) to the registered
-    // window listeners (the real app.js debounced resize handler).
+    // window listeners (the real app's debounced resize handler).
     dispatch(type, ev) {
       for (const fn of __WIN_LISTENERS[type] || []) fn(ev);
     },
@@ -401,45 +412,64 @@ function buildApi() {
     return Promise.resolve(__FETCH.next());
   };
   const FileReader = class { readAsDataURL() {} };
-  // Shadow the globals so app.js drives the controllable timer.
+  // The controllable timer as the GLOBAL setTimeout/clearTimeout: ES modules
+  // resolve bare identifiers against the global scope, so the app's timer
+  // calls (toast capping, GM first-run hint, reconnect backoff, resize
+  // debounce) must land on this virtual clock.
   const setTimeout = (fn, ms) => timer.schedule(ms, fn);
   const clearTimeout = (id) => timer.clear(id);
 
-  const src = fs.readFileSync(APPJS_PATH, "utf8");
-  // Re-export the app's top-level functions/state for the Python tests.
-  const EXPORTS =
-    ";global.__TAPI__ = { state, els, document, T," +
-    "allEntities, onPath, stopAnim, findEntity, isAnimating," +
-    "applyState, onWelcome, onState, onServerMessage, onError," +
-    "entityAtCell, drawSidebar, renderAll, drawDot, drawUnknownDot," +
-    "drawGridOnCanvas, layoutCanvas, validateVisibilityMatrix," +
-    "openUploadedMap, sendMove, selectEntity, paintCell," +
-    "createEntity, canvasHint, showGmFirstRunHint, dismissGmFirstRunHint, updateControlHint," +
-    "join, connectWs, setConn, scheduleReconnect, showView, wsSend, wsUrl," +
-    "uploadMap, generateMap, showUploadPreview, resetUploadForm, setSourceTab, syncTabStyles, syncGenerateButton, setGenerateBusy, setUploadBusy, syncUploadButton," +
-    "doorStateAt, validateDoors, sendDoor, setTool, setDoorAction," +
-    "drawDoorCell, renderLegendDoorSwatches, renderLegendBossSwatch, drawDoorClosed, drawPadlock, drawDoorOpen," +
-    // Boss entity (boss-entity spec): §2/§4.1 tables + dims helper + the
-    // server-provided footprint table adoption (validateBossFootprints /
-    // bossFootprintsTable / bossFootprintLabel).
-    "BOSS_FOOTPRINTS_FALLBACK, BOSS_SKULL_POS, bossDims, bossFootprintsTable," +
-    "validateBossFootprints, bossFootprintLabel, syncGmTools," +
-    "SAFE_STATES," +
-    "isSafeDoor, safeDoorStateAt, validateSafe, sendSafeDoor, setSafeAction," +
-    // Save / Load menu (save-load spec §7): list + save + load + delete.
-    "refreshSaves, renderSaves, renderSavesTab, buildSaveRow, formatSaveDate, saveCurrentMap, loadSave, loadSaveFromTab, deleteSave, confirmDeleteSave, cancelSaveDelete, syncSaveModal, findSaveByName, showSaveConfirm, hideSaveConfirm, announceLoadedSaveRejoin, showRejoinNote, hideRejoinNote, showLoadedSavePreview, onSaveCurrentMapClick, syncSaveMapStateButton," +
-    // Pan & Zoom (pan-zoom spec): view math + controls.
-    "LEVELS, fitLevel, viewStep, viewBounds, applyView, applyViewNow, fitToMap," +
-    "panBy, zoomBy, syncNavControls, focusInField, cellFromEvent," +
-    "_timer: timer, _send: __SEND, _fetch: __FETCH, _rfr: __RFR, _window: window };";
-  // eslint-disable-next-line no-eval
-  eval(src + EXPORTS);
+  globalThis.document = document;
+  globalThis.window = window;
+  globalThis.WebSocket = WebSocket;
+  globalThis.fetch = fetch;
+  globalThis.FileReader = FileReader;
+  globalThis.requestAnimationFrame = requestAnimationFrame;
+  globalThis.location = location;
+  globalThis.setTimeout = setTimeout;
+  globalThis.clearTimeout = clearTimeout;
 
-  const api = global.__TAPI__;
-  api._timer = timer;
-  api._send = __SEND;
-  api._ws = WebSocket;
-  return api;
+  // Import the REAL module graph. main.js's top-level boot (guarded by
+  // window/document presence, which the stubs satisfy) registers every
+  // listener and runs the five boot calls — the same load-time behavior the
+  // classic script had. The five library namespaces are then read back from
+  // the module cache (already loaded by main.js's import chain).
+  const dir = path.dirname(MAIN_JS_PATH);
+  const fileUrl = (name) => "file://" + path.join(dir, name);
+  return import(fileUrl("main.js")).then(() =>
+    Promise.all([
+      import(fileUrl("state.js")),
+      import(fileUrl("render.js")),
+      import(fileUrl("game.js")),
+      import(fileUrl("net.js")),
+      import(fileUrl("ui.js")),
+    ])
+  ).then(([stateNs, renderNs, gameNs, netNs, uiNs]) => {
+    const api = {};
+    for (const ns of [stateNs, renderNs, gameNs, netNs, uiNs]) {
+      for (const name of Object.getOwnPropertyNames(ns)) {
+        if (name === "default" || name === "__proto__") continue;
+        if (name in api) {
+          throw new Error("duplicate export name across modules: " + name);
+        }
+        // LIVE getter: a named export is a live binding, so e.g. `ws` and
+        // `hoverCell` keep tracking setWs/setHoverCell after boot.
+        Object.defineProperty(api, name, {
+          get: () => ns[name],
+          enumerable: true,
+          configurable: true,
+        });
+      }
+    }
+    api.document = document;
+    api._timer = timer;
+    api._send = __SEND;
+    api._fetch = __FETCH;
+    api._rfr = __RFR;
+    api._window = window;
+    api._ws = WebSocket;
+    return api;
+  });
 }
 
 module.exports = { buildApi };
