@@ -3,6 +3,7 @@
 # version that actually installed. All 7 probe candidates succeeded.
 fastapi==0.141.1
 pillow==12.3.0
+playwright==1.63.0
 pydantic==2.13.5
 pytest==9.1.1
 pytest-timeout==2.4.0

@@ -86,6 +86,36 @@ Ranked by severity.
 > `activeElement`, canvas hit-testing) are still not covered — a
 > Playwright probe (§E) would close that.
 
+> **Real-browser probe (implemented 2026-09-23, not yet executed).**
+> `scripts/qa_browser_smoke.py` (Playwright, `playwright==1.63.0` added to
+> `requirements.txt`) boots the real server on a test port (default 8765;
+> `--port` to change, `--url` to attach to an already-running server) and
+> loads the app root in headless Chromium. It asserts: (1) the lobby
+> renders (`#lobby-view` visible, `#map-view` hidden); (2) the boot-time
+> `connectWs()` fires — the WebSocket event **and** the completed
+> handshake with the real server (`#conn-status.is-connected`,
+> `#conn-label` → "Connected"); (3) all six `js/` ES modules fetch 200;
+> (4) zero `console.error` messages and zero uncaught page exceptions —
+> the silent-killer guard for a real-browser ES-module boot. Run:
+>
+> ```sh
+> .venv/bin/python -m playwright install chromium   # once; needs network
+> .venv/bin/python scripts/qa_browser_smoke.py [--port N | --url URL]
+> ```
+>
+> **Environment note:** the probe was written in a network-restricted
+> sandbox where **no browser could be installed** — the default-deny
+> proxy allowlist permits pypi.org / github.com / dl.google.com but
+> blocks every browser CDN (cdn.playwright.dev, storage.googleapis.com)
+> and every distro package host (apt mirrors, Debian, conda, flathub),
+> and the image lacks the ~20 X11/GTK shared libraries Chrome needs.
+> (The Chrome **arm64 .deb itself** is downloadable from dl.google.com —
+> only the libraries are missing.) So the probe has **NOT been executed
+> in a real browser**; it is an artifact that runs in any
+> browser-capable environment. `--executable /path/to/chrome` can point
+> at a system Chrome/Chromium when the Playwright-managed build is not
+> installable (e.g. behind the same restricted network).
+
 ## D2. Latent / minor observations (not filed as bugs — not reachable or non-blocking)
 
 - **`GET /api/maps/{id}` (latent 500).** `main.py:283-284` serializes `list(entry["entities"].values())` / `list(entry["players"].values())` directly into `json.dumps`. Those registry dicts hold **dataclass** objects and would raise `TypeError: Object of type Entity is not JSON serializable` → 500. **But** they are initialized `{}` at `main.py:69` and **never populated** anywhere (the live entities live in the `GameSession`, not the registry entry), so the list is always empty and the 500 is unreachable today. The `main.py:69` comment ("populated live by GameSession") is inaccurate. **Fix if/when it is used:** serialize with `e.to_dict()`/`p.to_dict()`, or remove the fields. (Verified non-reachable by searching `app/` for writes to `entry["entities"]`/`entry["players"]` — none exist.)
