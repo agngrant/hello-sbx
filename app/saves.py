@@ -49,6 +49,14 @@ REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 #: (Module-global on purpose: tests redirect it to a temp dir.)
 SAVES_DIR = os.path.join(REPO_ROOT, "saves")
 
+# Save-bundle schema version (forward-compat gate). Bump when a bundle
+# change requires the loader to know how to read it. An ABSENT ``schema``
+# key is a legacy bundle, treated as v1 (the key is strictly additive —
+# pre-existing bundles parse unchanged); a value > SCHEMA_VERSION means the
+# save was created by a NEWER build and is rejected (we can read older
+# shapes, never forward-migrate).
+SCHEMA_VERSION = 1
+
 # A11: grid bounds (the upload/generate caps); a bundle with out-of-range
 # dimensions is corrupt (E3).
 MIN_EDGE = 1
@@ -195,6 +203,8 @@ def save_bundle(record: dict[str, Any], grid: Grid, entities: list[dict[str, Any
         save_id = fresh_save_id(record.get("name") or "")
     grid_dict = grid.to_dict()
     bundle: dict[str, Any] = {
+        "schema": SCHEMA_VERSION,  # forward-compat gate (absent in legacy
+        # v1 bundles — strictly additive, never changes any other field)
         "id": save_id,
         "name": record.get("name"),
         "map_name": record.get("map_name", grid_dict.get("name")),
@@ -335,6 +345,26 @@ def _validated_entities(bundle: dict[str, Any]) -> list[dict[str, Any]]:
     return out
 
 
+def _check_schema_version(bundle: dict[str, Any]) -> None:
+    """Tolerant save-bundle schema gate (forward-compat, additive).
+
+    * absent ``schema`` key → legacy bundle, accepted as v1 (bundles
+      written before the key existed keep parsing unchanged);
+    * ``schema <= SCHEMA_VERSION`` → accepted (we read our own and older
+      shapes);
+    * ``schema > SCHEMA_VERSION`` → rejected: the save was created by a
+      NEWER build whose shapes we cannot read (we never forward-migrate).
+
+    Non-int ``schema`` values are tolerated (treated as legacy) — only a
+    well-formed, strictly-newer version is a load failure.
+    """
+    schema = bundle.get("schema")
+    if _as_strict_int(schema) and schema > SCHEMA_VERSION:
+        raise ValueError(
+            f"save was created by a newer version (schema {schema} > "
+            f"{SCHEMA_VERSION}) — update the app before loading it")
+
+
 def load_bundle(save_id: str) -> tuple[Grid, list[dict[str, Any]]]:
     """Read + fully validate ``saves/<save_id>.json`` (spec §4.3).
 
@@ -343,6 +373,11 @@ def load_bundle(save_id: str) -> tuple[Grid, list[dict[str, Any]]]:
     coercion applies) and the entity list, each entity carrying its
     ``owner_name`` (string or ``None``) for the join-rebind step
     (``GameSession.join``).
+
+    A bundle carrying a ``schema`` newer than this build's
+    :data:`SCHEMA_VERSION` is rejected as corrupt (the save was written
+    by a newer version); a bundle WITHOUT the key is legacy v1 and loads
+    unchanged.
 
     Raises :class:`ValueError` on a missing file, unparseable JSON, or ANY
     schema violation (E3/A12 — the route answers the same clean
@@ -362,6 +397,7 @@ def load_bundle(save_id: str) -> tuple[Grid, list[dict[str, Any]]]:
         raise ValueError(f"save not found: {save_id}") from None
     if not isinstance(bundle, dict):
         raise ValueError(f"save not found: {save_id}")
+    _check_schema_version(bundle)
     grid = _validated_grid(bundle)
     # The record's top-level width/height must agree with the grid (a
     # truncated/hand-edited bundle with a dimension mismatch is corrupt —

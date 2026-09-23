@@ -831,6 +831,46 @@ class TestSaves(ServerTestCase):
         self.assertEqual((s.entities["e1"].x, s.entities["e1"].y),
                          pos_before)                # entity not moved
 
+    def test_save_worker_serializes_frozen_grid_copy(self):
+        # Off-lock save data-race fix: save_bundle's grid.to_dict() runs
+        # in an asyncio.to_thread worker AFTER the session lock is
+        # released, so the worker must receive a FROZEN copy of the grid
+        # (captured under the lock), never the live shared grid object —
+        # a REST paint can interleave in that window and tear a live
+        # grid mid-serialization. Spy on save_bundle to capture the grid
+        # the worker actually receives.
+        import app.saves as save_store
+        from app.main import sessions
+
+        s = sessions["default"]
+        live = s.grid
+        captured = []
+        orig = save_store.save_bundle
+
+        def spy(record, grid, entities):
+            captured.append(grid)
+            return orig(record, grid, entities)
+
+        save_store.save_bundle = spy
+        try:
+            status, _ = self._post_save(name="FrozenCopy")
+        finally:
+            save_store.save_bundle = orig
+        self.assertEqual(status, 200)
+        self.assertEqual(len(captured), 1)
+        snap = captured[0]
+        # A DISTINCT object — the live grid was never handed to the
+        # worker thread:
+        self.assertIsNot(snap, live)
+        # Same content at snapshot time:
+        self.assertEqual(snap.to_dict(), live.to_dict())
+        # Independent cell rows — a later paint of the live grid cannot
+        # be reflected in what the worker serialized:
+        self.assertIsNot(snap.cells[1], live.cells[1])
+        live.cells[1][1] = "wall"  # (1,1) is a floor in the sample map
+        self.assertEqual(live.cells[1][1], "wall")
+        self.assertNotEqual(snap.cells[1][1], "wall")  # frozen pre-paint
+
     def test_save_name_default_and_trim(self):
         status, data = self._post_save(name="  Padded  ")
         self.assertEqual(status, 200)

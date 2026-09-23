@@ -20,6 +20,7 @@ test cleanup owns it).
 
 from __future__ import annotations
 
+import copy
 import json
 import os
 import shutil
@@ -108,6 +109,9 @@ class SavesIOTestCase(unittest.TestCase):
             bundle = json.load(f)
         # Record fields (spec 4.3) are top-level:
         self.assertEqual(bundle["id"], save_id)
+        # The forward-compat schema version is top-level (strictly
+        # ADDITIVE — every other field keeps its exact shape):
+        self.assertEqual(bundle["schema"], save_store.SCHEMA_VERSION)
         self.assertEqual(bundle["name"], "Act Three — Crypt")
         self.assertEqual(bundle["map_name"], "Save Test Map")
         self.assertEqual((bundle["width"], bundle["height"]), (5, 5))
@@ -196,6 +200,71 @@ class SavesIOTestCase(unittest.TestCase):
         self.assertEqual(by_id["e1"]["owner_name"], "Alice")
         self.assertIsNone(by_id["e2"]["owner_name"])
         self.assertIsNone(by_id["e3"]["owner_name"])
+
+    # -- schema versioning (forward-compat gate) -----------------------------
+
+    def _rewrite_bundle(self, save_id: str, mutate) -> None:
+        """Read a written bundle from disk, apply ``mutate`` to the parsed
+        dict, write it back — simulates hand-edited or other-version
+        bundles without touching save_bundle."""
+        path = os.path.join(self._tmp, f"{save_id}.json")
+        with open(path, "r", encoding="utf-8") as f:
+            bundle = json.load(f)
+        mutate(bundle)
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(bundle, f, ensure_ascii=False, indent=2)
+            f.write("\n")
+
+    def test_save_bundle_includes_schema_version(self):
+        # Every NEW bundle carries the top-level "schema" key, and it is
+        # strictly additive (no other field changed shape):
+        save_id = self.write_save()
+        path = os.path.join(self._tmp, f"{save_id}.json")
+        with open(path, "r", encoding="utf-8") as f:
+            bundle = json.load(f)
+        self.assertEqual(bundle["schema"], save_store.SCHEMA_VERSION)
+        self.assertEqual(
+            set(bundle.keys()),
+            {"schema", "id", "name", "map_name", "width", "height",
+             "created_at", "entity_count", "grid", "entities"})
+
+    def test_load_bundle_accepts_matching_schema(self):
+        # A bundle whose schema matches this build loads normally:
+        save_id = self.write_save()
+        self._rewrite_bundle(
+            save_id, lambda b: b.update(schema=save_store.SCHEMA_VERSION))
+        grid, entities = save_store.load_bundle(save_id)
+        self.assertEqual((grid.width, grid.height), (5, 5))
+        self.assertEqual(entities, sample_entities())
+
+    def test_load_bundle_rejects_too_new_schema(self):
+        # A bundle created by a NEWER build (schema > SCHEMA_VERSION) is
+        # rejected with a clear error — we read older shapes, never
+        # forward-migrate:
+        save_id = self.write_save()
+        self._rewrite_bundle(save_id, lambda b: b.update(schema=999))
+        with self.assertRaises(ValueError) as ctx:
+            save_store.load_bundle(save_id)
+        self.assertIn("newer version", str(ctx.exception))
+        # A12: the file is left on disk untouched:
+        self.assertTrue(os.path.isfile(
+            os.path.join(self._tmp, f"{save_id}.json")))
+
+    def test_load_bundle_legacy_without_schema_key(self):
+        # A LEGACY bundle with NO "schema" key is treated as v1 and loads
+        # unchanged (the key is strictly additive):
+        save_id = self.write_save()
+        self._rewrite_bundle(save_id, lambda b: b.pop("schema", None))
+        grid, entities = save_store.load_bundle(save_id)
+        self.assertEqual((grid.width, grid.height), (5, 5))
+        self.assertEqual(grid.cells, [list(r) for r in _ROWS])
+        self.assertEqual(entities, sample_entities())
+        # A malformed (non-int) schema is likewise tolerated — only a
+        # well-formed, strictly-newer version fails the load:
+        save_id2 = self.write_save("Tolerant")
+        self._rewrite_bundle(save_id2, lambda b: b.update(schema="v2"))
+        grid2, _ = save_store.load_bundle(save_id2)
+        self.assertEqual((grid2.width, grid2.height), (5, 5))
 
     def test_load_bundle_with_doors_and_safe_round_trip(self):
         # E4/AC12: doors + safe + mixed entities survive byte-for-byte.
@@ -694,6 +763,39 @@ class TestSaveSnapshotOwnership(unittest.TestCase):
             id="e1", name="Ghost", kind="npc", team="neutral",
             x=1, y=1, owner="p404")  # no such player
         self.assertIsNone(self._owner_name_map(s)["e1"])
+
+
+class GridSnapshotCopyTest(unittest.TestCase):
+    """Off-lock save data-race fix — the snapshot semantics the save
+    endpoint relies on: the worker thread serializes a frozen deep COPY
+    taken under the session lock (``copy.deepcopy`` in app/server.py),
+    never the live shared grid. A deep-copied snapshot must be a distinct
+    object that does not reflect later mutations to the live grid (the
+    REST-paint interleaving the fix removes)."""
+
+    def test_deepcopy_snapshot_is_independent_of_live_grid(self):
+        live = make_grid(_ROWS)
+        live.doors = {"2,2": "O"}
+        snap = copy.deepcopy(live)
+        # A distinct object with its own cells (and per-row) lists:
+        self.assertIsNot(snap, live)
+        self.assertIsNot(snap.cells, live.cells)
+        self.assertIsNot(snap.cells[2], live.cells[2])
+        # Same content at snapshot time:
+        self.assertEqual(snap.to_dict(), live.to_dict())
+        # A paint on the LIVE grid after the snapshot is invisible to it
+        # (and vice versa — the snapshot never aliases live state):
+        live.cells[2][1] = "wall"
+        live.sync_doors_after_cell_set(2, 1)
+        self.assertEqual(live.cells[2][1], "wall")
+        self.assertEqual(snap.cells[2][1], "floor")  # frozen pre-paint
+        live.cells[2][1] = "floor"  # restore for the reverse direction
+        snap.cells[2][1] = "wall"
+        self.assertEqual(live.cells[2][1], "floor")  # live untouched
+        # The door record is copied too (not aliased):
+        self.assertIsNot(snap.doors, live.doors)
+        snap.doors["2,2"] = "L"
+        self.assertEqual(live.doors["2,2"], "O")
 
 
 if __name__ == "__main__":

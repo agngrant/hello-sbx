@@ -32,6 +32,7 @@ The FastAPI ``app`` object is also served directly by ``uvicorn`` in
 from __future__ import annotations
 
 import asyncio
+import copy
 import json
 import os
 import socket
@@ -372,6 +373,15 @@ def build_app() -> FastAPI:
         # spec 4.3.
         with session._lock:
             grid = session.grid
+            # Off-lock save data-race fix: the grid is serialized by the
+            # save_bundle worker thread AFTER this lock is released, and a
+            # REST paint (lock_all_sessions) can interleave in that window
+            # and tear the save's grid mid-to_dict(). Freeze a consistent
+            # DEEP COPY here under the lock — the worker serializes ONLY
+            # this snapshot, never the live shared grid. (Entities + the
+            # record below are already plain-dict snapshots taken under
+            # this same lock, so only the grid needed freezing.)
+            grid_copy = copy.deepcopy(grid)
             entity_dicts = []
             for e in session.entities.values():
                 d = e.to_dict()
@@ -393,8 +403,10 @@ def build_app() -> FastAPI:
             }
         # save_bundle: open("w") of the temp file + json.dump + os.fsync +
         # os.replace — all blocking I/O; run it off the event loop.
+        # ``grid_copy`` (frozen under the session lock, above) — the worker
+        # NEVER touches the live session grid and holds no session lock.
         actual_id = await asyncio.to_thread(
-            save_store.save_bundle, record, grid, entity_dicts
+            save_store.save_bundle, record, grid_copy, entity_dicts
         )
         record["id"] = actual_id  # the id actually written (fresh or explicit)
         return JSONResponse(
